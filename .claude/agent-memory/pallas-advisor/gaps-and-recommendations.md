@@ -20,9 +20,9 @@ Last reviewed: 2026-03-13, pallas v1.0.0-alpha.5
 | pallas-network | ADAPT (already using + own extensions) | — | Done |
 | pallas-validate | ADOPT Phase-1 as reference; ADOPT Phase-2 when uplc matures | HIGH | Not started |
 | pallas-configs | ADOPT | MEDIUM | Not started |
-| pallas-math | IMPLEMENT FROM SCRATCH | — | Done (ported to torsten-crypto) |
+| pallas-math | IMPLEMENT FROM SCRATCH | — | Done (ported to dugite-crypto) |
 | pallas-hardano | IMPLEMENT FROM SCRATCH | — | Done (Mithril import superior) |
-| pallas-txbuilder | EVALUATE for torsten-cli | LOW | Not started |
+| pallas-txbuilder | EVALUATE for dugite-cli | LOW | Not started |
 | pallas-utxorpc | IGNORE | N/A | — |
 
 ---
@@ -41,22 +41,22 @@ Comprehensive Phase-1 (structural + signature) validation across all eras:
 
 Phase-2 (Plutus script execution) via optional `pallas-uplc` dependency (feature `phase2`).
 
-### What torsten would gain
-1. **Phase-2 Plutus execution**: Torsten currently has NO Plutus script execution. pallas-validate's `phase2` feature via pallas-uplc would be the fastest path to Plutus support.
-2. **Validation parity**: Ensures torsten's validation matches pallas reference implementation.
-3. **Real-transaction test corpus**: pallas-validate has real mainnet tx test cases torsten can use.
+### What dugite would gain
+1. **Phase-2 Plutus execution**: Dugite currently has NO Plutus script execution. pallas-validate's `phase2` feature via pallas-uplc would be the fastest path to Plutus support.
+2. **Validation parity**: Ensures dugite's validation matches pallas reference implementation.
+3. **Real-transaction test corpus**: pallas-validate has real mainnet tx test cases dugite can use.
 
-### Gaps in pallas-validate vs torsten
-1. **CIP-0112 reference script fee**: Not in pallas-validate. Torsten has this. Must keep torsten's implementation.
-2. **Certificate ordering rules**: pallas-validate checks structure but not cert state (who's registered). Torsten's ledger state maintains this.
+### Gaps in pallas-validate vs dugite
+1. **CIP-0112 reference script fee**: Not in pallas-validate. Dugite has this. Must keep dugite's implementation.
+2. **Certificate ordering rules**: pallas-validate checks structure but not cert state (who's registered). Dugite's ledger state maintains this.
 3. **Withdrawal balance checks**: pallas-validate doesn't check against actual reward account balances.
 4. **Conway governance cert validation**: Incomplete (DRep cert structural checks not fully visible).
 
 ### Migration Path
-1. Add `pallas-validate = "1.0.0-alpha.5"` to torsten-ledger's Cargo.toml
-2. Create wrapper that maps torsten's `Environment` equivalent to pallas's `Environment`
+1. Add `pallas-validate = "1.0.0-alpha.5"` to dugite-ledger's Cargo.toml
+2. Create wrapper that maps dugite's `Environment` equivalent to pallas's `Environment`
 3. Use pallas-validate for Phase-1 checks on new transactions entering the mempool
-4. Keep torsten's additional checks (CIP-0112, cert state, withdrawal balance) as post-pallas checks
+4. Keep dugite's additional checks (CIP-0112, cert state, withdrawal balance) as post-pallas checks
 5. When pallas-uplc matures: enable `phase2` feature for Plutus execution
 
 ### Risks
@@ -73,20 +73,20 @@ Phase-2 (Plutus script execution) via optional `pallas-uplc` dependency (feature
 ### What it provides
 Structured JSON deserialization for Byron, Shelley, Alonzo, and Conway genesis files. Matches Haskell implementation field names exactly.
 
-### What torsten would gain
-1. Replace ad-hoc genesis parsing in `torsten-node/src/genesis.rs`
+### What dugite would gain
+1. Replace ad-hoc genesis parsing in `dugite-node/src/genesis.rs`
 2. Structured protocol parameter types that align with pallas-validate's `Environment`
 3. `shelley_utxos()` helper function for genesis UTxO extraction
 4. Correct Conway governance parameter parsing (DRep thresholds, committee, constitution)
 
 ### Migration Path
-1. Add `pallas-configs = { version = "1.0.0-alpha.5", features = ["json"] }` to torsten-node
-2. Replace `torsten-node/src/genesis.rs` parsing with pallas-configs structs
-3. Map pallas-configs types to torsten-primitives protocol parameter types
-4. Keep torsten's own types internally but use pallas-configs for file parsing
+1. Add `pallas-configs = { version = "1.0.0-alpha.5", features = ["json"] }` to dugite-node
+2. Replace `dugite-node/src/genesis.rs` parsing with pallas-configs structs
+3. Map pallas-configs types to dugite-primitives protocol parameter types
+4. Keep dugite's own types internally but use pallas-configs for file parsing
 
 ### Risks
-- Genesis file field coverage: verify pallas-configs parses all fields torsten needs
+- Genesis file field coverage: verify pallas-configs parses all fields dugite needs
 - Alpha API: field names could change between alpha versions (low risk — JSON field names are stable by Cardano spec)
 - Dependency weight: pallas-configs adds serde_with + num-rational; acceptable
 
@@ -97,9 +97,9 @@ Structured JSON deserialization for Byron, Shelley, Alonzo, and Conway genesis f
 ### Decision: IMPLEMENT FROM SCRATCH
 
 ### Rationale
-- Algorithms ported directly to torsten-crypto using dashu-int
+- Algorithms ported directly to dugite-crypto using dashu-int
 - VRF leader check requires: Euler continued fraction for ln(1+x), Taylor series for taylorExpCmp
-- Torsten's implementation is verified correct (tested against actual leader schedule on testnet)
+- Dugite's implementation is verified correct (tested against actual leader schedule on testnet)
 - Adding pallas-math dependency brings regex + additional dashu crates with no net benefit
 - The mathematical algorithms are stable and well-understood
 
@@ -110,22 +110,22 @@ Structured JSON deserialization for Byron, Shelley, Alonzo, and Conway genesis f
 ### Decision: IMPLEMENT FROM SCRATCH
 
 ### Rationale
-- Torsten's Mithril import is more comprehensive: download, digest verification, CRC32, bulk import
+- Dugite's Mithril import is more comprehensive: download, digest verification, CRC32, bulk import
 - pallas-hardano only provides chunk file iteration — a small subset
-- Torsten uses memory-mapped I/O (memmap2) for performance; pallas-hardano uses standard I/O
-- The 4M-block bulk import path is critical performance code that torsten has tuned
+- Dugite uses memory-mapped I/O (memmap2) for performance; pallas-hardano uses standard I/O
+- The 4M-block bulk import path is critical performance code that dugite has tuned
 
 ---
 
 ## LOW PRIORITY: pallas-txbuilder
 
-### Decision: EVALUATE when implementing torsten-cli transaction commands
+### Decision: EVALUATE when implementing dugite-cli transaction commands
 
 ### What it provides
 Conway-era transaction builder with fluent API. Handles inputs, outputs, scripts, redeemers, datums, minting, certificates.
 
 ### When to adopt
-When `torsten-cli transaction build` command needs implementation. Use as starting point rather than building from scratch.
+When `dugite-cli transaction build` command needs implementation. Use as starting point rather than building from scratch.
 
 ### Risks
 - Conway-only: historical era transactions not supported
@@ -137,31 +137,31 @@ When `torsten-cli transaction build` command needs implementation. Use as starti
 ## IGNORE: pallas-utxorpc
 
 ### Rationale
-UTxO RPC is a separate ecosystem (gRPC-based Cardano API). Not relevant to torsten's Ouroboros-native node implementation. Would only matter if torsten adds a UTxO RPC endpoint (not on roadmap).
+UTxO RPC is a separate ecosystem (gRPC-based Cardano API). Not relevant to dugite's Ouroboros-native node implementation. Would only matter if dugite adds a UTxO RPC endpoint (not on roadmap).
 
 ---
 
-## Torsten Capabilities That SURPASS Pallas
+## Dugite Capabilities That SURPASS Pallas
 
-These are areas where torsten is more complete or advanced than the corresponding pallas functionality:
+These are areas where dugite is more complete or advanced than the corresponding pallas functionality:
 
 ### 1. N2C Protocol (V17-V22)
-Torsten implements LocalStateQuery tags 0-38, V17-V22 with bit-15 version encoding. Pallas only defines through V16. Torsten is ahead of pallas here.
+Dugite implements LocalStateQuery tags 0-38, V17-V22 with bit-15 version encoding. Pallas only defines through V16. Dugite is ahead of pallas here.
 
 ### 2. Pipelined ChainSync
-Torsten's `PipelinedPeerClient` achieves 10-50x header throughput vs pallas's serial ChainSync. Pallas has no pipelining support.
+Dugite's `PipelinedPeerClient` achieves 10-50x header throughput vs pallas's serial ChainSync. Pallas has no pipelining support.
 
 ### 3. VRF Leader Check Math
-Torsten's Euler continued fraction + taylorExpCmp implementation, using dashu-int directly, is tested against real testnet leader schedules. Pallas-math implements the same algorithms but torsten doesn't need to depend on it.
+Dugite's Euler continued fraction + taylorExpCmp implementation, using dashu-int directly, is tested against real testnet leader schedules. Pallas-math implements the same algorithms but dugite doesn't need to depend on it.
 
 ### 4. Mithril Snapshot Import
-Torsten's full snapshot lifecycle (download, verify, CRC32, bulk import, deferred compaction) vastly exceeds pallas-hardano's read-only chunk iteration.
+Dugite's full snapshot lifecycle (download, verify, CRC32, bulk import, deferred compaction) vastly exceeds pallas-hardano's read-only chunk iteration.
 
 ### 5. CIP-0112 Reference Script Fee
-Torsten implements the 25KiB tier reference script fee calculation. pallas-validate does not.
+Dugite implements the 25KiB tier reference script fee calculation. pallas-validate does not.
 
 ### 6. Governance (CIP-1694)
-Torsten has complete DRep/SPO/CC voting with exact rational arithmetic. pallas-validate's Conway checks are structural only.
+Dugite has complete DRep/SPO/CC voting with exact rational arithmetic. pallas-validate's Conway checks are structural only.
 
 ---
 

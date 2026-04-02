@@ -4,7 +4,7 @@ description: In pipelined+pool mode, forge_ticker is guarded by pipeline_depth<=
 type: project
 ---
 
-In `crates/torsten-node/src/node/sync.rs`, the pipelined+pool sync path (the most common path on preview testnet) guards the forge ticker branch with:
+In `crates/dugite-node/src/node/sync.rs`, the pipelined+pool sync path (the most common path on preview testnet) guards the forge ticker branch with:
 
 ```rust
 _ = forge_ticker.tick(), if self.block_producer.is_some() && pipeline_depth <= 1 => {

@@ -1,11 +1,11 @@
 # Transactions
 
-Torsten CLI supports the full transaction lifecycle: building, signing, submitting, and inspecting transactions.
+Dugite CLI supports the full transaction lifecycle: building, signing, submitting, and inspecting transactions.
 
 ## Building a Transaction
 
 ```bash
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in <tx_hash>#<index> \
   --tx-out <address>+<lovelace> \
   --change-address <address> \
@@ -30,7 +30,7 @@ torsten-cli transaction build \
 ### Example: Simple ADA Transfer
 
 ```bash
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in "abc123...#0" \
   --tx-out "addr_test1qz...+5000000" \
   --change-address "addr_test1qp..." \
@@ -50,7 +50,7 @@ address+lovelace+"policy_id.asset_name quantity"
 Example:
 
 ```bash
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in "abc123...#0" \
   --tx-out 'addr_test1qz...+2000000+"a1b2c3...d4e5f6.4d79546f6b656e 100"' \
   --change-address "addr_test1qp..." \
@@ -67,7 +67,7 @@ Multiple tokens can be separated with `+` inside the quoted string:
 ### Including Certificates
 
 ```bash
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in "abc123...#0" \
   --tx-out "addr_test1qz...+5000000" \
   --change-address "addr_test1qp..." \
@@ -90,7 +90,7 @@ Create a metadata JSON file with integer keys:
 ```
 
 ```bash
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in "abc123...#0" \
   --tx-out "addr_test1qz...+5000000" \
   --change-address "addr_test1qp..." \
@@ -102,7 +102,7 @@ torsten-cli transaction build \
 ## Signing a Transaction
 
 ```bash
-torsten-cli transaction sign \
+dugite-cli transaction sign \
   --tx-body-file tx.body \
   --signing-key-file payment.skey \
   --out-file tx.signed
@@ -111,7 +111,7 @@ torsten-cli transaction sign \
 Multiple signing keys can be provided:
 
 ```bash
-torsten-cli transaction sign \
+dugite-cli transaction sign \
   --tx-body-file tx.body \
   --signing-key-file payment.skey \
   --signing-key-file stake.skey \
@@ -121,7 +121,7 @@ torsten-cli transaction sign \
 ## Submitting a Transaction
 
 ```bash
-torsten-cli transaction submit \
+dugite-cli transaction submit \
   --tx-file tx.signed \
   --socket-path ./node.sock
 ```
@@ -131,7 +131,7 @@ The node validates the transaction (Phase-1 and Phase-2 for Plutus transactions)
 ## Viewing a Transaction
 
 ```bash
-torsten-cli transaction view --tx-file tx.signed
+dugite-cli transaction view --tx-file tx.signed
 ```
 
 Output includes:
@@ -147,7 +147,7 @@ Output includes:
 Compute the transaction hash:
 
 ```bash
-torsten-cli transaction txid --tx-file tx.body
+dugite-cli transaction txid --tx-file tx.body
 ```
 
 Works with both transaction body files and signed transaction files.
@@ -155,7 +155,7 @@ Works with both transaction body files and signed transaction files.
 ## Calculate Minimum Fee
 
 ```bash
-torsten-cli transaction calculate-min-fee \
+dugite-cli transaction calculate-min-fee \
   --tx-body-file tx.body \
   --witness-count 2 \
   --protocol-params-file protocol-params.json
@@ -170,7 +170,7 @@ The fee calculation accounts for:
 To get the current protocol parameters:
 
 ```bash
-torsten-cli query protocol-parameters \
+dugite-cli query protocol-parameters \
   --socket-path ./node.sock \
   --out-file protocol-params.json
 ```
@@ -180,7 +180,7 @@ torsten-cli query protocol-parameters \
 Compute the minimum lovelace required for a transaction output to satisfy the `minUTxOValue` protocol parameter:
 
 ```bash
-torsten-cli transaction calculate-min-required-utxo \
+dugite-cli transaction calculate-min-required-utxo \
   --protocol-params-file protocol-params.json \
   --tx-out "addr_test1qz...+0+\"policy1.asset1 100\""
 ```
@@ -200,7 +200,7 @@ For multi-signature workflows, you can create witnesses separately and assemble 
 ### Create a Witness
 
 ```bash
-torsten-cli transaction witness \
+dugite-cli transaction witness \
   --tx-body-file tx.body \
   --signing-key-file payment.skey \
   --out-file payment.witness
@@ -209,7 +209,7 @@ torsten-cli transaction witness \
 ### Assemble a Transaction
 
 ```bash
-torsten-cli transaction assemble \
+dugite-cli transaction assemble \
   --tx-body-file tx.body \
   --witness-file payment.witness \
   --witness-file stake.witness \
@@ -221,26 +221,26 @@ torsten-cli transaction assemble \
 Compute the policy ID (Blake2b-224 hash) of a native script:
 
 ```bash
-torsten-cli transaction policyid --script-file policy.script
+dugite-cli transaction policyid --script-file policy.script
 ```
 
 ## Complete Workflow
 
 ```bash
 # 1. Query UTxOs to find inputs
-torsten-cli query utxo \
+dugite-cli query utxo \
   --address addr_test1qz... \
   --socket-path ./node.sock \
   --testnet-magic 2
 
 # 2. Get protocol parameters for fee calculation
-torsten-cli query protocol-parameters \
+dugite-cli query protocol-parameters \
   --socket-path ./node.sock \
   --testnet-magic 2 \
   --out-file pp.json
 
 # 3. Build the transaction
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in "abc123...#0" \
   --tx-out "addr_test1qr...+5000000" \
   --change-address "addr_test1qz..." \
@@ -248,7 +248,7 @@ torsten-cli transaction build \
   --out-file tx.body
 
 # 4. Calculate the exact fee
-torsten-cli transaction calculate-min-fee \
+dugite-cli transaction calculate-min-fee \
   --tx-body-file tx.body \
   --witness-count 1 \
   --protocol-params-file pp.json
@@ -256,13 +256,13 @@ torsten-cli transaction calculate-min-fee \
 # 5. Rebuild with the correct fee (repeat step 3 with updated --fee)
 
 # 6. Sign
-torsten-cli transaction sign \
+dugite-cli transaction sign \
   --tx-body-file tx.body \
   --signing-key-file payment.skey \
   --out-file tx.signed
 
 # 7. Submit
-torsten-cli transaction submit \
+dugite-cli transaction submit \
   --tx-file tx.signed \
   --socket-path ./node.sock
 ```

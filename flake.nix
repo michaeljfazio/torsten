@@ -1,5 +1,5 @@
 {
-  description = "Torsten - A Rust implementation of the Cardano node";
+  description = "Dugite - A Rust implementation of the Cardano node";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";

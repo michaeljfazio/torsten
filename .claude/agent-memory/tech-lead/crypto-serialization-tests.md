@@ -1,10 +1,10 @@
 ---
 name: serialization test coverage
-description: Coverage gaps found and filled in torsten-serialization (2026-03-20)
+description: Coverage gaps found and filled in dugite-serialization (2026-03-20)
 type: project
 ---
 
-Added 133 tests in `crates/torsten-serialization/tests/comprehensive_coverage.rs`.
+Added 133 tests in `crates/dugite-serialization/tests/comprehensive_coverage.rs`.
 
 **Key findings about the public API boundary:**
 - `encode_protocol_param_update`, `encode_redeemer`, `encode_gov_action`, `encode_drep`, `encode_voter`, `encode_voting_procedure`, `encode_proposal_procedure` are NOT re-exported from the crate public API — they are `pub(crate)` inside sub-modules.

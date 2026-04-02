@@ -1,6 +1,6 @@
 ---
 name: crate-pallas-txbuilder
-description: pallas-txbuilder transaction building API for Conway era; relevance to torsten-cli
+description: pallas-txbuilder transaction building API for Conway era; relevance to dugite-cli
 type: reference
 ---
 
@@ -47,22 +47,22 @@ pub enum TxBuilderError {
 - Add metadata
 - Build → `BuiltTransaction`
 
-## Relevance to Torsten
+## Relevance to Dugite
 
-Torsten has `torsten-cli` with 33+ subcommands. Some subcommands likely need transaction construction:
+Dugite has `dugite-cli` with 33+ subcommands. Some subcommands likely need transaction construction:
 - `transaction build` — building unsigned transactions
 - `transaction sign` — signing transactions
 - `transaction submit` — submitting to node
 
-`pallas-txbuilder` could replace hand-crafted CBOR encoding for transaction building in `torsten-cli`.
+`pallas-txbuilder` could replace hand-crafted CBOR encoding for transaction building in `dugite-cli`.
 
-## Current Status in Torsten
+## Current Status in Dugite
 
-NOT adopted. Torsten-cli builds transactions manually or is still being developed.
+NOT adopted. Dugite-cli builds transactions manually or is still being developed.
 
 ## Adoption Recommendation
 
-**EVALUATE when implementing torsten-cli transaction building**. The builder provides ergonomic Conway transaction construction. Key considerations:
+**EVALUATE when implementing dugite-cli transaction building**. The builder provides ergonomic Conway transaction construction. Key considerations:
 
 1. **Conway-only**: Builder targets Conway era. Historical era transactions would need other means.
 2. **Alpha stability**: API may change between alpha versions.
@@ -71,4 +71,4 @@ NOT adopted. Torsten-cli builds transactions manually or is still being develope
 
 **Risk**: pallas-txbuilder is likely less tested than other pallas crates given its higher-level nature. Transaction building errors could produce malformed transactions that mainnet nodes reject.
 
-**Recommendation**: Use as a starting point for torsten-cli's `transaction build` command, but add comprehensive integration tests against a live cardano-node before shipping.
+**Recommendation**: Use as a starting point for dugite-cli's `transaction build` command, but add comprehensive integration tests against a live cardano-node before shipping.

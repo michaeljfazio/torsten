@@ -5,10 +5,10 @@ Branch: main (80a4450)
 
 ## Storage Benchmarks
 ```
-[1m[92m   Compiling[0m torsten-primitives v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-primitives)
-[1m[92m   Compiling[0m torsten-serialization v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-serialization)
-[1m[92m   Compiling[0m torsten-crypto v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-crypto)
-[1m[92m   Compiling[0m torsten-storage v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-storage)
+[1m[92m   Compiling[0m dugite-primitives v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-primitives)
+[1m[92m   Compiling[0m dugite-serialization v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-serialization)
+[1m[92m   Compiling[0m dugite-crypto v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-crypto)
+[1m[92m   Compiling[0m dugite-storage v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-storage)
 [1m[92m    Finished[0m `bench` profile [optimized] target(s) in 21.31s
 [1m[92m     Running[0m benches/storage_bench.rs (target/release/deps/storage_bench-51833895afe17d60)
 Gnuplot not found, using plotters backend
@@ -842,11 +842,11 @@ scaling/chaindb_insert/default_20kb/250000
 
 ## UTxO Benchmarks
 ```
-[1m[92m   Compiling[0m torsten-primitives v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-primitives)
-[1m[92m   Compiling[0m torsten-lsm v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-lsm)
-[1m[92m   Compiling[0m torsten-serialization v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-serialization)
-[1m[92m   Compiling[0m torsten-crypto v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-crypto)
-[1m[92m   Compiling[0m torsten-ledger v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-ledger)
+[1m[92m   Compiling[0m dugite-primitives v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-primitives)
+[1m[92m   Compiling[0m dugite-lsm v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-lsm)
+[1m[92m   Compiling[0m dugite-serialization v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-serialization)
+[1m[92m   Compiling[0m dugite-crypto v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-crypto)
+[1m[92m   Compiling[0m dugite-ledger v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-ledger)
 [1m[92m    Finished[0m `bench` profile [optimized] target(s) in 31.20s
 [1m[92m     Running[0m benches/utxo_bench.rs (target/release/deps/utxo_bench-4b37a42019cfa4eb)
 Gnuplot not found, using plotters backend
@@ -1292,9 +1292,9 @@ utxo_large_scale/total_lovelace/scan/10000000
 
 ## LSM Stress Tests
 ```
-[1m[92m   Compiling[0m torsten-lsm v0.4.6-alpha (/home/runner/work/torsten/torsten/crates/torsten-lsm)
+[1m[92m   Compiling[0m dugite-lsm v0.4.6-alpha (/home/runner/work/dugite/dugite/crates/dugite-lsm)
 [1m[92m    Finished[0m `release` profile [optimized] target(s) in 10.34s
-[1m[92m     Running[0m unittests src/lib.rs (target/release/deps/torsten_lsm-e9460fbb829b3490)
+[1m[92m     Running[0m unittests src/lib.rs (target/release/deps/dugite_lsm-e9460fbb829b3490)
 
 running 3 tests
 test tree::mainnet_scale_tests::test_mainnet_scale_wal_crash_recovery ... ok
@@ -1303,7 +1303,7 @@ test tree::mainnet_scale_tests::test_mainnet_scale_delete_amplification ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 93 filtered out; finished in 8.34s
 
-[1m[92m   Doc-tests[0m torsten_lsm
+[1m[92m   Doc-tests[0m dugite_lsm
 
 running 0 tests
 

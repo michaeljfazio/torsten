@@ -1,13 +1,13 @@
 # Governance
 
-Torsten CLI supports Conway-era governance operations as defined in [CIP-1694](https://cips.cardano.org/cip/CIP-1694). This includes DRep management, voting, and governance action creation.
+Dugite CLI supports Conway-era governance operations as defined in [CIP-1694](https://cips.cardano.org/cip/CIP-1694). This includes DRep management, voting, and governance action creation.
 
 ## DRep Operations
 
 ### Generate DRep Keys
 
 ```bash
-torsten-cli governance drep key-gen \
+dugite-cli governance drep key-gen \
   --signing-key-file drep.skey \
   --verification-key-file drep.vkey
 ```
@@ -16,11 +16,11 @@ torsten-cli governance drep key-gen \
 
 ```bash
 # Bech32 format (default)
-torsten-cli governance drep id \
+dugite-cli governance drep id \
   --drep-verification-key-file drep.vkey
 
 # Hex format
-torsten-cli governance drep id \
+dugite-cli governance drep id \
   --drep-verification-key-file drep.vkey \
   --output-format hex
 ```
@@ -30,7 +30,7 @@ torsten-cli governance drep id \
 Create a DRep registration certificate:
 
 ```bash
-torsten-cli governance drep registration-certificate \
+dugite-cli governance drep registration-certificate \
   --drep-verification-key-file drep.vkey \
   --key-reg-deposit-amt 500000000 \
   --anchor-url "https://example.com/drep-metadata.json" \
@@ -43,7 +43,7 @@ The `--key-reg-deposit-amt` should match the current DRep deposit parameter (cur
 ### DRep Retirement
 
 ```bash
-torsten-cli governance drep retirement-certificate \
+dugite-cli governance drep retirement-certificate \
   --drep-verification-key-file drep.vkey \
   --deposit-amt 500000000 \
   --out-file drep-retire.cert
@@ -54,7 +54,7 @@ torsten-cli governance drep retirement-certificate \
 Update DRep metadata:
 
 ```bash
-torsten-cli governance drep update-certificate \
+dugite-cli governance drep update-certificate \
   --drep-verification-key-file drep.vkey \
   --anchor-url "https://example.com/drep-metadata-v2.json" \
   --anchor-data-hash "d4e5f6a7..." \
@@ -70,7 +70,7 @@ Votes can be cast by DReps, SPOs, or Constitutional Committee members:
 **DRep vote:**
 
 ```bash
-torsten-cli governance vote create \
+dugite-cli governance vote create \
   --governance-action-tx-id "a1b2c3d4..." \
   --governance-action-index 0 \
   --vote yes \
@@ -81,7 +81,7 @@ torsten-cli governance vote create \
 **SPO vote:**
 
 ```bash
-torsten-cli governance vote create \
+dugite-cli governance vote create \
   --governance-action-tx-id "a1b2c3d4..." \
   --governance-action-index 0 \
   --vote no \
@@ -92,7 +92,7 @@ torsten-cli governance vote create \
 **Constitutional Committee vote:**
 
 ```bash
-torsten-cli governance vote create \
+dugite-cli governance vote create \
   --governance-action-tx-id "a1b2c3d4..." \
   --governance-action-index 0 \
   --vote yes \
@@ -113,7 +113,7 @@ torsten-cli governance vote create \
 Attach rationale metadata to a vote:
 
 ```bash
-torsten-cli governance vote create \
+dugite-cli governance vote create \
   --governance-action-tx-id "a1b2c3d4..." \
   --governance-action-index 0 \
   --vote yes \
@@ -130,7 +130,7 @@ torsten-cli governance vote create \
 A governance action that carries no on-chain effect (used for signaling):
 
 ```bash
-torsten-cli governance action create-info \
+dugite-cli governance action create-info \
   --anchor-url "https://example.com/proposal.json" \
   --anchor-data-hash "a1b2c3d4..." \
   --deposit 100000000000 \
@@ -143,7 +143,7 @@ torsten-cli governance action create-info \
 Express no confidence in the current constitutional committee:
 
 ```bash
-torsten-cli governance action create-no-confidence \
+dugite-cli governance action create-no-confidence \
   --anchor-url "https://example.com/no-confidence.json" \
   --anchor-data-hash "a1b2c3d4..." \
   --deposit 100000000000 \
@@ -158,7 +158,7 @@ torsten-cli governance action create-no-confidence \
 Propose a new constitution:
 
 ```bash
-torsten-cli governance action create-constitution \
+dugite-cli governance action create-constitution \
   --anchor-url "https://example.com/constitution-proposal.json" \
   --anchor-data-hash "a1b2c3d4..." \
   --deposit 100000000000 \
@@ -174,7 +174,7 @@ torsten-cli governance action create-constitution \
 Propose a protocol version change:
 
 ```bash
-torsten-cli governance action create-hard-fork-initiation \
+dugite-cli governance action create-hard-fork-initiation \
   --anchor-url "https://example.com/hardfork.json" \
   --anchor-data-hash "a1b2c3d4..." \
   --deposit 100000000000 \
@@ -189,7 +189,7 @@ torsten-cli governance action create-hard-fork-initiation \
 Propose changes to protocol parameters:
 
 ```bash
-torsten-cli governance action create-protocol-parameters-update \
+dugite-cli governance action create-protocol-parameters-update \
   --anchor-url "https://example.com/pp-update.json" \
   --anchor-data-hash "a1b2c3d4..." \
   --deposit 100000000000 \
@@ -214,7 +214,7 @@ The `pp-changes.json` file contains the parameter fields to change:
 Propose changes to the constitutional committee:
 
 ```bash
-torsten-cli governance action create-update-committee \
+dugite-cli governance action create-update-committee \
   --anchor-url "https://example.com/committee-update.json" \
   --anchor-data-hash "a1b2c3d4..." \
   --deposit 100000000000 \
@@ -232,7 +232,7 @@ The `--add-cc-cold-verification-key-hash` uses the format `key_hash,expiry_epoch
 Propose a withdrawal from the treasury:
 
 ```bash
-torsten-cli governance action create-treasury-withdrawal \
+dugite-cli governance action create-treasury-withdrawal \
   --anchor-url "https://example.com/withdrawal.json" \
   --anchor-data-hash "a1b2c3d4..." \
   --deposit 100000000000 \
@@ -248,11 +248,11 @@ Compute the Blake2b-256 hash of an anchor data file:
 
 ```bash
 # Binary file
-torsten-cli governance action hash-anchor-data \
+dugite-cli governance action hash-anchor-data \
   --file-binary proposal.json
 
 # Text file
-torsten-cli governance action hash-anchor-data \
+dugite-cli governance action hash-anchor-data \
   --file-text proposal.txt
 ```
 
@@ -262,7 +262,7 @@ Governance actions and votes are submitted as part of transactions. Include the 
 
 ```bash
 # Submit a DRep registration
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in "abc123...#0" \
   --tx-out "addr_test1qz...+5000000" \
   --change-address "addr_test1qp..." \
@@ -270,13 +270,13 @@ torsten-cli transaction build \
   --certificate-file drep-reg.cert \
   --out-file tx.body
 
-torsten-cli transaction sign \
+dugite-cli transaction sign \
   --tx-body-file tx.body \
   --signing-key-file payment.skey \
   --signing-key-file drep.skey \
   --out-file tx.signed
 
-torsten-cli transaction submit \
+dugite-cli transaction submit \
   --tx-file tx.signed \
   --socket-path ./node.sock
 ```

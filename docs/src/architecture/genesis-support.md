@@ -1,6 +1,6 @@
 # Ouroboros Genesis Support
 
-Torsten includes a Genesis State Machine (GSM) that tracks the node's sync progression through the Ouroboros Genesis protocol states.
+Dugite includes a Genesis State Machine (GSM) that tracks the node's sync progression through the Ouroboros Genesis protocol states.
 
 ## Overview
 
@@ -15,7 +15,7 @@ The GSM implements three states matching the Ouroboros Genesis specification:
 Genesis mode is opt-in via the `--consensus-mode genesis` CLI flag:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --consensus-mode genesis \
   --config config/preview-config.json \
   ...
@@ -50,8 +50,8 @@ The recommended deployment path uses Mithril snapshot import for fast sync with 
 
 ```bash
 # Import a Mithril snapshot first
-torsten-node mithril-import --network-magic 2 --database-path ./db
+dugite-node mithril-import --network-magic 2 --database-path ./db
 
 # Then run in default praos mode
-torsten-node run --config config/preview-config.json --database-path ./db ...
+dugite-node run --config config/preview-config.json --database-path ./db ...
 ```

@@ -1,6 +1,6 @@
 # Consensus
 
-Torsten implements the Ouroboros Praos consensus protocol, the proof-of-stake protocol used by Cardano since the Shelley era.
+Dugite implements the Ouroboros Praos consensus protocol, the proof-of-stake protocol used by Cardano since the Shelley era.
 
 ## Ouroboros Praos Overview
 
@@ -40,7 +40,7 @@ A slot leader is elected if `VRF_output < phi(sigma)`.
 
 ### VRF Exact Rational Arithmetic
 
-The leader check is a critical consensus operation — any deviation from the Haskell reference implementation would cause a node to disagree on which blocks are valid. Torsten uses **exact 34-digit fixed-point arithmetic** via `dashu-int` `IBig`, matching Haskell's `FixedPoint E34` type exactly. No floating-point operations are used anywhere in the VRF computation path.
+The leader check is a critical consensus operation — any deviation from the Haskell reference implementation would cause a node to disagree on which blocks are valid. Dugite uses **exact 34-digit fixed-point arithmetic** via `dashu-int` `IBig`, matching Haskell's `FixedPoint E34` type exactly. No floating-point operations are used anywhere in the VRF computation path.
 
 **Era-dependent VRF modes:**
 
@@ -103,7 +103,7 @@ Where `k` is the security parameter (2160 on mainnet) and `f` is the active slot
 
 ## Chain Selection
 
-When multiple valid chains exist, Ouroboros Praos selects the chain with the most blocks (longest chain rule). Torsten implements:
+When multiple valid chains exist, Ouroboros Praos selects the chain with the most blocks (longest chain rule). Dugite implements:
 
 1. **Chain comparison** — Compare the block height of competing chains
 2. **Rollback support** — Roll back up to k=2160 blocks to switch to a longer chain
@@ -111,11 +111,11 @@ When multiple valid chains exist, Ouroboros Praos selects the chain with the mos
 
 ## Epoch Transitions
 
-At each epoch boundary, Torsten performs:
+At each epoch boundary, Dugite performs:
 
 ### Stake Snapshot Rotation
 
-Torsten uses the mark/set/go snapshot model:
+Dugite uses the mark/set/go snapshot model:
 - **Mark** — The current epoch boundary snapshot (will be used for leader election two epochs from now)
 - **Set** — The previous epoch's mark (used for leader election in the current epoch)
 - **Go** — Two epochs ago (used for reward distribution in the current epoch)
@@ -158,7 +158,7 @@ At each epoch boundary, rewards are calculated and distributed:
 
 ## Validation Checks
 
-Torsten validates the following consensus-level properties:
+Dugite validates the following consensus-level properties:
 
 ### KES Period Validation
 

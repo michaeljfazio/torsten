@@ -34,11 +34,11 @@ Boundary 2→3: rotate → go=mark1, set=mark2; RUPD fires from set=mark2 → tr
 
 ## Fix
 
-In `/Users/michaelfazio/Source/torsten/crates/torsten-ledger/src/state/epoch.rs` `process_epoch_transition`:
+In `/Users/michaelfazio/Source/dugite/crates/dugite-ledger/src/state/epoch.rs` `process_epoch_transition`:
 - Changed `if let Some(go_snapshot) = self.snapshots.go.clone()` → `if let Some(set_snapshot) = self.snapshots.set.clone()`
 - Passes `&set_snapshot` to `calculate_rewards()` instead of `&go_snapshot`
 
-In `/Users/michaelfazio/Source/torsten/crates/torsten-ledger/src/state/rewards.rs` `calculate_rewards`:
+In `/Users/michaelfazio/Source/dugite/crates/dugite-ledger/src/state/rewards.rs` `calculate_rewards`:
 - Renamed parameter from `go_snapshot` to `rupd_snapshot` throughout
 - All internal references updated accordingly
 

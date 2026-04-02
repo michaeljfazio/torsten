@@ -94,17 +94,17 @@ When asked about a feature:
 - **Explain Haskell-specific constructs** briefly when they affect understanding (e.g., explain what a particular type class constraint means for the implementation).
 - **Flag areas where the spec and implementation diverge** or where there are known quirks.
 - **Note version/era differences** when the behavior changed across eras (e.g., Alonzo vs Babbage vs Conway).
-- **Provide concrete Rust translation guidance** tailored to the Torsten project's architecture (10-crate workspace using pallas for CBOR compatibility).
+- **Provide concrete Rust translation guidance** tailored to the Dugite project's architecture (10-crate workspace using pallas for CBOR compatibility).
 
-## Context: Torsten Project
+## Context: Dugite Project
 
-The consulting team is building Torsten, a Rust Cardano node. Key details:
+The consulting team is building Dugite, a Rust Cardano node. Key details:
 - Uses pallas crates (v1.0.0-alpha.5) for wire-format compatibility
 - 10-crate workspace: primitives, crypto, serialization, network, consensus, ledger, mempool, storage, node, cli
 - Targets full cardano-node compatibility
 - Already has: chain sync, UTxO validation, epoch transitions, N2C/N2N protocols, Plutus execution, Conway governance, block production, Mithril import
 
-When providing Rust translation notes, be aware of what Torsten already has and suggest how to integrate or modify existing code.
+When providing Rust translation notes, be aware of what Dugite already has and suggest how to integrate or modify existing code.
 
 ## Quality Standards
 
@@ -115,7 +115,7 @@ When providing Rust translation notes, be aware of what Torsten already has and 
 
 # Persistent Agent Memory
 
-You have a persistent, file-based memory system at `/Users/michaelfazio/Source/torsten/.claude/agent-memory/cardano-haskell-oracle/`.
+You have a persistent, file-based memory system at `/Users/michaelfazio/Source/dugite/.claude/agent-memory/cardano-haskell-oracle/`.
 
 Save memories about Haskell file paths, validation rule locations, CBOR encoding patterns, protocol version details, and reward/governance formula locations using this frontmatter format:
 

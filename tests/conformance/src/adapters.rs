@@ -1,28 +1,28 @@
-//! Adapters that convert between conformance test vector types and Torsten types.
+//! Adapters that convert between conformance test vector types and Dugite types.
 //!
 //! The formal Agda specification uses abstract/simplified types (e.g., addresses
 //! as tagged enums, TxId as hex strings). This module bridges the gap by
-//! converting the JSON-deserialized test types into Torsten's concrete types,
-//! and converting Torsten outputs back into comparable test types.
+//! converting the JSON-deserialized test types into Dugite's concrete types,
+//! and converting Dugite outputs back into comparable test types.
 
 use crate::schema::{
     CertState, PoolSubState, TestAddress, TestCertificate, TestCredential, TestDRep, TestInput,
     TestPoolParams, TestTransaction, TxOutput, UtxoEntry, UtxoEnvironment, UtxoState,
 };
-use std::collections::{BTreeMap, HashSet};
-use torsten_ledger::UtxoSet;
-use torsten_primitives::address::{
+use dugite_ledger::UtxoSet;
+use dugite_primitives::address::{
     Address, BaseAddress, ByronAddress, EnterpriseAddress, RewardAddress,
 };
-use torsten_primitives::credentials::Credential;
-use torsten_primitives::hash::{Hash28, Hash32};
-use torsten_primitives::network::NetworkId;
-use torsten_primitives::protocol_params::ProtocolParameters;
-use torsten_primitives::transaction::{
+use dugite_primitives::credentials::Credential;
+use dugite_primitives::hash::{Hash28, Hash32};
+use dugite_primitives::network::NetworkId;
+use dugite_primitives::protocol_params::ProtocolParameters;
+use dugite_primitives::transaction::{
     self, Certificate, ExUnits, Rational, Transaction, TransactionBody, TransactionInput,
     TransactionOutput, TransactionWitnessSet, VKeyWitness,
 };
-use torsten_primitives::value::{AssetName, Lovelace, Value};
+use dugite_primitives::value::{AssetName, Lovelace, Value};
+use std::collections::{BTreeMap, HashSet};
 
 /// Error type for adapter conversions.
 #[derive(Debug, thiserror::Error)]
@@ -55,7 +55,7 @@ pub fn parse_hash28(hex_str: &str) -> Result<Hash28, AdapterError> {
 // Credential conversion
 // ---------------------------------------------------------------------------
 
-/// Convert a test credential to a Torsten credential.
+/// Convert a test credential to a Dugite credential.
 pub fn to_credential(tc: &TestCredential) -> Result<Credential, AdapterError> {
     match tc {
         TestCredential::VKey { hash } => {
@@ -69,7 +69,7 @@ pub fn to_credential(tc: &TestCredential) -> Result<Credential, AdapterError> {
     }
 }
 
-/// Convert a Torsten credential to a test credential.
+/// Convert a Dugite credential to a test credential.
 pub fn from_credential(cred: &Credential) -> TestCredential {
     match cred {
         Credential::VerificationKey(h) => TestCredential::VKey { hash: h.to_hex() },
@@ -96,7 +96,7 @@ fn network_to_u8(n: NetworkId) -> u8 {
     }
 }
 
-/// Convert a test address to a Torsten address.
+/// Convert a test address to a Dugite address.
 pub fn to_address(addr: &TestAddress) -> Result<Address, AdapterError> {
     match addr {
         TestAddress::Base {
@@ -126,7 +126,7 @@ pub fn to_address(addr: &TestAddress) -> Result<Address, AdapterError> {
     }
 }
 
-/// Convert a Torsten address to a test address.
+/// Convert a Dugite address to a test address.
 pub fn from_address(addr: &Address) -> TestAddress {
     match addr {
         Address::Base(b) => TestAddress::Base {
@@ -159,7 +159,7 @@ pub fn from_address(addr: &Address) -> TestAddress {
 // Value conversion
 // ---------------------------------------------------------------------------
 
-/// Convert a test output to a Torsten transaction output.
+/// Convert a test output to a Dugite transaction output.
 pub fn to_tx_output(out: &TxOutput) -> Result<TransactionOutput, AdapterError> {
     let address = to_address(&out.address)?;
 
@@ -196,7 +196,7 @@ pub fn to_tx_output(out: &TxOutput) -> Result<TransactionOutput, AdapterError> {
     })
 }
 
-/// Convert a Torsten transaction output to a test output.
+/// Convert a Dugite transaction output to a test output.
 pub fn from_tx_output(out: &TransactionOutput) -> TxOutput {
     let mut assets = BTreeMap::new();
     for (policy_id, asset_map) in &out.value.multi_asset {
@@ -218,7 +218,7 @@ pub fn from_tx_output(out: &TransactionOutput) -> TxOutput {
 // UTxO set conversion
 // ---------------------------------------------------------------------------
 
-/// Build a Torsten UTxO set from test vector entries.
+/// Build a Dugite UTxO set from test vector entries.
 pub fn to_utxo_set(entries: &[UtxoEntry]) -> Result<UtxoSet, AdapterError> {
     let mut utxo_set = UtxoSet::new();
     for entry in entries {
@@ -233,7 +233,7 @@ pub fn to_utxo_set(entries: &[UtxoEntry]) -> Result<UtxoSet, AdapterError> {
     Ok(utxo_set)
 }
 
-/// Convert a Torsten UTxO set to test vector entries.
+/// Convert a Dugite UTxO set to test vector entries.
 pub fn from_utxo_set(utxo_set: &UtxoSet) -> Vec<UtxoEntry> {
     let mut entries: Vec<UtxoEntry> = utxo_set
         .iter()
@@ -275,7 +275,7 @@ fn generate_mock_vkey_witnesses(
     utxo_set: &UtxoSet,
     tx_hash: &Hash32,
 ) -> Vec<VKeyWitness> {
-    use torsten_crypto::keys::PaymentSigningKey;
+    use dugite_crypto::keys::PaymentSigningKey;
 
     // Build lookup table: keyhash -> (vkey_bytes, signing_key)
     let key_table: Vec<(Hash28, Vec<u8>, PaymentSigningKey)> = MOCK_SIGNING_KEYS
@@ -314,7 +314,7 @@ fn generate_mock_vkey_witnesses(
     witnesses
 }
 
-/// Convert a test transaction to a Torsten transaction.
+/// Convert a test transaction to a Dugite transaction.
 ///
 /// When `utxo_set` is provided, properly signed VKey witnesses are automatically
 /// generated for all VKey-credentialed inputs to satisfy both witness completeness
@@ -334,7 +334,7 @@ pub fn to_transaction_with_utxo(
     Ok(transaction)
 }
 
-/// Convert a test transaction to a Torsten transaction.
+/// Convert a test transaction to a Dugite transaction.
 pub fn to_transaction(tx: &TestTransaction) -> Result<Transaction, AdapterError> {
     to_transaction_inner(tx)
 }
@@ -408,14 +408,14 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
         inputs,
         outputs,
         fee: Lovelace(tx.fee),
-        ttl: tx.ttl.map(torsten_primitives::time::SlotNo),
+        ttl: tx.ttl.map(dugite_primitives::time::SlotNo),
         certificates,
         withdrawals,
         auxiliary_data_hash: tx
             .auxiliary_data_hash
             .as_ref()
             .and_then(|h| parse_hash32(h).ok()),
-        validity_interval_start: tx.validity_start.map(torsten_primitives::time::SlotNo),
+        validity_interval_start: tx.validity_start.map(dugite_primitives::time::SlotNo),
         mint,
         script_data_hash: None,
         collateral,
@@ -433,7 +433,7 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
 
     Ok(Transaction {
         hash,
-        era: torsten_primitives::era::Era::Conway,
+        era: dugite_primitives::era::Era::Conway,
         body,
         witness_set: TransactionWitnessSet {
             vkey_witnesses: Vec::new(),
@@ -459,7 +459,7 @@ fn to_transaction_inner(tx: &TestTransaction) -> Result<Transaction, AdapterErro
         },
         is_valid: tx.is_valid,
         auxiliary_data: if tx.has_auxiliary_data {
-            Some(torsten_primitives::transaction::AuxiliaryData {
+            Some(dugite_primitives::transaction::AuxiliaryData {
                 metadata: BTreeMap::new(),
                 native_scripts: Vec::new(),
                 plutus_v1_scripts: Vec::new(),
@@ -488,7 +488,7 @@ fn to_tx_input(input: &TestInput) -> Result<TransactionInput, AdapterError> {
 // Certificate conversion
 // ---------------------------------------------------------------------------
 
-/// Convert a test certificate to a Torsten certificate.
+/// Convert a test certificate to a Dugite certificate.
 pub fn to_certificate(cert: &TestCertificate) -> Result<Certificate, AdapterError> {
     match cert {
         TestCertificate::StakeRegistration { credential } => {
@@ -551,7 +551,7 @@ pub fn to_certificate(cert: &TestCertificate) -> Result<Certificate, AdapterErro
     }
 }
 
-/// Convert a test DRep to a Torsten DRep.
+/// Convert a test DRep to a Dugite DRep.
 pub fn to_drep(drep: &TestDRep) -> Result<transaction::DRep, AdapterError> {
     match drep {
         TestDRep::KeyHash { hash } => {
@@ -567,7 +567,7 @@ pub fn to_drep(drep: &TestDRep) -> Result<transaction::DRep, AdapterError> {
     }
 }
 
-/// Convert a test pool params to a Torsten pool params.
+/// Convert a test pool params to a Dugite pool params.
 pub fn to_pool_params(params: &TestPoolParams) -> Result<transaction::PoolParams, AdapterError> {
     let operator = parse_hash28(&params.operator)?;
     let vrf_keyhash = parse_hash32(&params.vrf_keyhash)?;
@@ -599,7 +599,7 @@ pub fn to_pool_params(params: &TestPoolParams) -> Result<transaction::PoolParams
 // Protocol parameters conversion
 // ---------------------------------------------------------------------------
 
-/// Build Torsten ProtocolParameters from a UTXO environment.
+/// Build Dugite ProtocolParameters from a UTXO environment.
 ///
 /// Fills in required fields not present in the test vector with sensible
 /// defaults (the formal spec only uses a subset of protocol parameters for
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn test_mock_signing_key_hashes() {
         // Verify the mock signing keys produce the expected credential hashes
-        use torsten_crypto::keys::PaymentSigningKey;
+        use dugite_crypto::keys::PaymentSigningKey;
 
         let sk1 = PaymentSigningKey::from_bytes(&[1u8; 32]).unwrap();
         let hash1 = sk1.verification_key().hash();

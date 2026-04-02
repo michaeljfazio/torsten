@@ -19,10 +19,10 @@ graph LR
 
 ## Running a Relay
 
-A relay is simply a Torsten node started without block production keys:
+A relay is simply a Dugite node started without block production keys:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --config config.json \
   --topology topology-relay.json \
   --database-path ./db \
@@ -106,7 +106,7 @@ To run multiple relays on the same machine, use different ports, database paths,
 
 ```bash
 # Relay 1 on port 3001
-torsten-node run \
+dugite-node run \
   --config config.json \
   --topology topology-relay1.json \
   --database-path ./db-relay1 \
@@ -115,7 +115,7 @@ torsten-node run \
   --port 3001
 
 # Relay 2 on port 3002
-torsten-node run \
+dugite-node run \
   --config config.json \
   --topology topology-relay2.json \
   --database-path ./db-relay2 \
@@ -163,7 +163,7 @@ sudo ufw enable
 
 ## Monitoring
 
-Torsten exposes Prometheus metrics on port 12798 by default. Key metrics to watch on a relay:
+Dugite exposes Prometheus metrics on port 12798 by default. Key metrics to watch on a relay:
 
 | Metric | What it tells you |
 |--------|-------------------|

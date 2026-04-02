@@ -87,7 +87,7 @@ pub trait KesSig: Sized {
 }
 ```
 
-### Torsten Usage (from torsten-crypto/src/kes.rs)
+### Dugite Usage (from dugite-crypto/src/kes.rs)
 
 ```rust
 use pallas_crypto::kes::common::PublicKey as KesPublicKey;
@@ -96,7 +96,7 @@ use pallas_crypto::kes::summed_kes::{Sum6Kes, Sum6KesSig};
 use pallas_crypto::kes::traits::{KesSig, KesSk};
 ```
 
-**Critical note**: Sum6Kes::Drop zeroizes the key buffer. Torsten must copy bytes before any drop. This is a memory safety feature but requires careful lifecycle management.
+**Critical note**: Sum6Kes::Drop zeroizes the key buffer. Dugite must copy bytes before any drop. This is a memory safety feature but requires careful lifecycle management.
 
 ## Key Module (`pallas_crypto::key`)
 
@@ -151,7 +151,7 @@ CRITICAL — two distinct cases depending on era:
 - `VrfCert = (output: Bytes, proof: Bytes)` — CBOR array [output, proof]
 - Pass: `nonce_vrf.0` (the raw bytes of VRF output, always **64 bytes**)
 - Result: `blake2b256(prev_eta_v || blake2b256(64-byte-nonce-vrf-output))`
-- Torsten stores: the **raw 64-byte** `nonce_vrf.0` in `block.header.nonce_vrf_output`
+- Dugite stores: the **raw 64-byte** `nonce_vrf.0` in `block.header.nonce_vrf_output`
   then `update_evolving_nonce` applies one blake2b256 hash, giving the same result
 
 **Praos (Babbage/Conway, proto >= 7)**
@@ -161,7 +161,7 @@ CRITICAL — two distinct cases depending on era:
 - This produces a **32-byte** pre-hashed value
 - Pass: this 32-byte pre-hashed value as `block_eta_vrf_0`
 - Result: `blake2b256(prev_eta_v || blake2b256(blake2b256("N"||raw_vrf)))`  ← 2 hashes total
-- Torsten stores: the 32-byte result of `hb.nonce_vrf_output()` (already hashed once)
+- Dugite stores: the 32-byte result of `hb.nonce_vrf_output()` (already hashed once)
   then `update_evolving_nonce` applies ONE MORE blake2b256 hash
 
 ### Full nonce hash chains
@@ -192,7 +192,7 @@ epoch_nonce' = candidate_nonce ⭒ lab_nonce ⭒ extra_entropy
 - `candidate_nonce` (ηc): evolving nonce frozen before the randomness stabilisation window
 - `lab_nonce` (ηh): prev_hash of the last block before the epoch boundary (from previous epoch)
 
-**Torsten's epoch nonce computation (state/epoch.rs lines 338–368):**
+**Dugite's epoch nonce computation (state/epoch.rs lines 338–368):**
 ```rust
 epoch_nonce = blake2b256(candidate || prev_hash_nonce)
 // where prev_hash_nonce = self.lab_nonce captured BEFORE updating it
@@ -206,26 +206,26 @@ The pallas test_rolling_nonce test covers 30 sequential Shelley blocks using:
 - 64-byte nonce_vrf.0 inputs (TPraos era)
 - First expected output: `2af15f57076a8ff225746624882a77c8d2736fe41d3db70154a22b50af851246`
 
-## What Torsten Uses
+## What Dugite Uses
 
-torsten-crypto wraps pallas-crypto for:
+dugite-crypto wraps pallas-crypto for:
 1. **KES**: `kes_keygen`, `kes_sign_message`, `kes_verify`, `kes_update`, `kes_sk_to_pk` — all via Sum6Kes
-2. **Hashing**: Via pallas-crypto Hash<N> types (Hash32, Hash28 in torsten-primitives map to these)
+2. **Hashing**: Via pallas-crypto Hash<N> types (Hash32, Hash28 in dugite-primitives map to these)
 
-## What Torsten Does NOT Use from pallas-crypto
+## What Dugite Does NOT Use from pallas-crypto
 
-1. **VRF**: Torsten uses `vrf_dalek` crate directly for ECVRF-ED25519-SHA512-Elligator2
-2. **CompactKes**: Torsten uses Sum6Kes (standard), not the compact variant
+1. **VRF**: Dugite uses `vrf_dalek` crate directly for ECVRF-ED25519-SHA512-Elligator2
+2. **CompactKes**: Dugite uses Sum6Kes (standard), not the compact variant
 3. **Memsec directly**: May be used transitively through KES operations
 
 ## Known Issues / Caveats
 
-1. **28-byte hash padding bug**: Pallas Hash<28> types (DRep keys, pool voter keys, required signers) cannot be directly converted to Hash<32> via `Hash<32>::from()`. Torsten must pad these manually. This is a common source of bugs when working with mixed hash sizes.
-2. **KES buffer lifecycle**: Sum6Kes zeroizes on drop — torsten must copy bytes before drop when serializing/deserializing KES keys.
+1. **28-byte hash padding bug**: Pallas Hash<28> types (DRep keys, pool voter keys, required signers) cannot be directly converted to Hash<32> via `Hash<32>::from()`. Dugite must pad these manually. This is a common source of bugs when working with mixed hash sizes.
+2. **KES buffer lifecycle**: Sum6Kes zeroizes on drop — dugite must copy bytes before drop when serializing/deserializing KES keys.
 3. **`kes` feature flag**: Must explicitly enable in Cargo.toml: `pallas-crypto = { version = "...", features = ["kes"] }`
 
 ## Gaps in pallas-crypto
 
-1. **No native VRF**: pallas-crypto does not include VRF (ECVRF-ED25519-SHA512-Elligator2). Torsten uses `vrf_dalek` for this.
-2. **No BIP-32 HD derivation**: For wallet key derivation (but torsten-node doesn't need this)
+1. **No native VRF**: pallas-crypto does not include VRF (ECVRF-ED25519-SHA512-Elligator2). Dugite uses `vrf_dalek` for this.
+2. **No BIP-32 HD derivation**: For wallet key derivation (but dugite-node doesn't need this)
 3. **No bech32 key encoding**: Separate pallas-bech32 crate handles this

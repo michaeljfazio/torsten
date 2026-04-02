@@ -1,6 +1,6 @@
 ---
 name: Deferred pointer stake (sisPtrStake) implementation
-description: Haskell defers pointer address resolution to SNAP time; Torsten previously resolved eagerly causing 603 epoch mismatches from epoch 647
+description: Haskell defers pointer address resolution to SNAP time; Dugite previously resolved eagerly causing 603 epoch mismatches from epoch 647
 type: project
 ---
 
@@ -8,7 +8,7 @@ Haskell's `ShelleyInstantStake` has two separate buckets:
 - `sisCredentialStake`: base/reward address coins — eagerly resolved to credential hash
 - `sisPtrStake`: pointer address coins — deferred, resolved to credential via `saPtrs` at each SNAP boundary
 
-Torsten previously resolved all addresses eagerly at UTxO insertion time and placed pointer coins in `stake_map`. This diverged whenever a credential deregistered after a pointer UTxO was created — Haskell excluded those coins from the snapshot, Torsten kept them in stake_map.
+Dugite previously resolved all addresses eagerly at UTxO insertion time and placed pointer coins in `stake_map`. This diverged whenever a credential deregistered after a pointer UTxO was created — Haskell excluded those coins from the snapshot, Dugite kept them in stake_map.
 
 **Fix (implemented):**
 - Added `ptr_stake: HashMap<Pointer, u64>` field to `LedgerState` with `#[serde(default)]`
@@ -23,4 +23,4 @@ Torsten previously resolved all addresses eagerly at UTxO insertion time and pla
 
 **Why:** Caused 603 epoch reward mismatches starting at epoch 647 on mainnet.
 
-**How to apply:** When debugging epoch reward divergence between Torsten and Haskell, check whether ptr_stake is being resolved correctly at SNAP boundaries.
+**How to apply:** When debugging epoch reward divergence between Dugite and Haskell, check whether ptr_stake is being resolved correctly at SNAP boundaries.

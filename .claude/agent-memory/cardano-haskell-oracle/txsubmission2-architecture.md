@@ -197,12 +197,12 @@ scoreRate / scoreMax   = rejection recovery window
 - Churn mechanism may re-establish and re-promote
 - TxSubmission2 starts fresh on new connection
 
-## Key Differences from Torsten
+## Key Differences from Dugite
 
-### Torsten Issues Identified
-1. **No governor**: Torsten doesn't have cold/warm/hot peer states
+### Dugite Issues Identified
+1. **No governor**: Dugite doesn't have cold/warm/hot peer states
 2. **No central decision logic**: Each peer session is independent (no SharedTxState)
 3. **MAX_TX_IDS_REQUEST = 100**: Haskell V1 uses 3, V2 uses 12
 4. **No init delay**: Haskell defaults to 60s delay before starting server
-5. **Independent connections**: Torsten may create separate connections instead of reusing single duplex
+5. **Independent connections**: Dugite may create separate connections instead of reusing single duplex
 6. **No ControlMessage**: No clean shutdown signal from governor

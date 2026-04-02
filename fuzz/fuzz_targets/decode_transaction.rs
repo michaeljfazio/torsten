@@ -9,6 +9,6 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     // Try all era variants — none should panic
     for era_id in 0..=6 {
-        let _ = torsten_serialization::decode_transaction(era_id, data);
+        let _ = dugite_serialization::decode_transaction(era_id, data);
     }
 });

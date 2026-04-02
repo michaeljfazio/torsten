@@ -6,7 +6,7 @@ type: project
 
 ## Critical Issue: nonce_vrf_output double-hashing in forge.rs
 
-**Where:** `crates/torsten-node/src/forge.rs` lines 291-296
+**Where:** `crates/dugite-node/src/forge.rs` lines 291-296
 **Problem:** When forging, we compute:
   `nonce_vrf_output = blake2b_256("N" || vrf_output)`    [1 hash, 32 bytes]
 
@@ -41,7 +41,7 @@ For our forged blocks we pre-compute one hash and store it as `nonce_vrf_output`
 
 ## epoch_nonce Field in BlockHeader
 
-**Non-issue:** The `epoch_nonce` field in `BlockHeader` is NOT encoded into the CBOR header body (it's absent from `encode_block_header_body`). It is only stored in the Torsten in-memory struct for convenience. The epoch_nonce stored in `forge.rs` line 310 does NOT appear on the wire. Correct.
+**Non-issue:** The `epoch_nonce` field in `BlockHeader` is NOT encoded into the CBOR header body (it's absent from `encode_block_header_body`). It is only stored in the Dugite in-memory struct for convenience. The epoch_nonce stored in `forge.rs` line 310 does NOT appear on the wire. Correct.
 
 ## VRF Leader Value Derivation (Praos, proto>=7)
 
@@ -61,8 +61,8 @@ For our forged blocks we pre-compute one hash and store it as `nonce_vrf_output`
 
 ## Stake Snapshot for Leader vs Haskell Spec
 
-Haskell uses the "mark" snapshot (ssStakeMark) for leader election in epoch N+2, not "set". The "set" snapshot is used for reward calculation. Torsten uses "set" for leader check.
+Haskell uses the "mark" snapshot (ssStakeMark) for leader election in epoch N+2, not "set". The "set" snapshot is used for reward calculation. Dugite uses "set" for leader check.
 
-**This is a potential bug:** Haskell's `checkLeaderValue` in `Cardano.Protocol.TPraos.BHeader` uses the stake from the MARK snapshot (2 epochs old), while Torsten uses the SET snapshot (1 epoch old). Need to verify this against the spec. The Ouroboros Praos paper says the stake distribution used for leader election is fixed at the epoch boundary 2 epochs prior, which is the "mark" snapshot from the current epoch.
+**This is a potential bug:** Haskell's `checkLeaderValue` in `Cardano.Protocol.TPraos.BHeader` uses the stake from the MARK snapshot (2 epochs old), while Dugite uses the SET snapshot (1 epoch old). Need to verify this against the spec. The Ouroboros Praos paper says the stake distribution used for leader election is fixed at the epoch boundary 2 epochs prior, which is the "mark" snapshot from the current epoch.
 
-**Actually:** Per the Haskell implementation, the stake snapshot used for slot leader selection in epoch E is the "mark" snapshot taken at the START of epoch E-1 (i.e., it's the snapshot that was "mark" at the end of E-2 / beginning of E-1). In the mark/set/go cycle: mark becomes set at E-1 boundary, set becomes go at E boundary. The stake USED for leader election in epoch E is the "go" snapshot. In Torsten, the forge path uses "set" which corresponds to one epoch behind "go". This may cause leader election discrepancies.
+**Actually:** Per the Haskell implementation, the stake snapshot used for slot leader selection in epoch E is the "mark" snapshot taken at the START of epoch E-1 (i.e., it's the snapshot that was "mark" at the end of E-2 / beginning of E-1). In the mark/set/go cycle: mark becomes set at E-1 boundary, set becomes go at E boundary. The stake USED for leader election in epoch E is the "go" snapshot. In Dugite, the forge path uses "set" which corresponds to one epoch behind "go". This may cause leader election discrepancies.

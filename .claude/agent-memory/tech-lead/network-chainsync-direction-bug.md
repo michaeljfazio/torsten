@@ -7,7 +7,7 @@ type: project
 # N2N ChainSync/BlockFetch immediate termination from Haskell node
 
 ## Symptom
-Haskell cardano-node connects to torsten, handshakes V15 InitiatorAndResponder, promotes to Hot,
+Haskell cardano-node connects to dugite, handshakes V15 InitiatorAndResponder, promotes to Hot,
 but ChainSync exits in <2ms (`PeerHotDuration 0.001504s`), BlockFetch client also terminates
 immediately (`BlockFetch.Client.ClientTerminating`).
 
@@ -46,12 +46,12 @@ If the Haskell node's TxSub2 Server sends MsgRequestTxIds on protocol_id=4 with 
 
 ## The Critical Protocol Violation
 
-After MsgAcceptVersion with `initiatorOnlyDiffusionMode=false`, the Haskell node expects torsten
-to behave as a FULL peer — meaning torsten must proactively start sending on the protocols where
-torsten is the initiator:
-- TxSubmission2: torsten is the Server (receives txs); Haskell is the Client (sends txs)
-  → Haskell waits for torsten to send MsgRequestTxIds immediately after handshake
-  → torsten waits for Haskell to send MsgInit
+After MsgAcceptVersion with `initiatorOnlyDiffusionMode=false`, the Haskell node expects dugite
+to behave as a FULL peer — meaning dugite must proactively start sending on the protocols where
+dugite is the initiator:
+- TxSubmission2: dugite is the Server (receives txs); Haskell is the Client (sends txs)
+  → Haskell waits for dugite to send MsgRequestTxIds immediately after handshake
+  → dugite waits for Haskell to send MsgInit
   → DEADLOCK → timeout → Haskell disconnects
 
 The <2ms clean termination is the Haskell node's `idleTimeout` or the BlockFetch client
@@ -66,10 +66,10 @@ noticing no data flows and giving up.
    the Haskell peer's server-side protocols (TxSub2 server → our consumer) and should
    be routed to our TxSub2 client-side handler, not re-dispatched to the server handler.
 3. The current `handle_n2n_txsubmission` with tag=6 MsgInit handling is correct for
-   connections where torsten is the *receiver* of txs (torsten's TxSub2 server).
-   But in InitiatorAndResponder mode, torsten also runs as a TxSub2 *client* (submitter),
+   connections where dugite is the *receiver* of txs (dugite's TxSub2 server).
+   But in InitiatorAndResponder mode, dugite also runs as a TxSub2 *client* (submitter),
    sending txs to the Haskell peer — that path is entirely missing.
 
 **Why:** Cardano N2N InitiatorAndResponder requires full bidirectional mini-protocol
 operation. The current server only handles one direction per protocol, causing the
-Haskell node to time out waiting for messages that torsten never sends.
+Haskell node to time out waiting for messages that dugite never sends.

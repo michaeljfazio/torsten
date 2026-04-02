@@ -1,6 +1,6 @@
 # Networks
 
-Torsten can connect to any Cardano network. Each network is identified by a unique magic number used during the N2N handshake.
+Dugite can connect to any Cardano network. Each network is identified by a unique magic number used during the N2N handshake.
 
 ## Network Magic Values
 
@@ -39,7 +39,7 @@ Create a `topology-mainnet.json`:
 Run the node:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --config config-mainnet.json \
   --topology topology-mainnet.json \
   --database-path ./db-mainnet \
@@ -77,7 +77,7 @@ Create a `topology-preview.json`:
 Run the node:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --config config-preview.json \
   --topology topology-preview.json \
   --database-path ./db-preview \
@@ -113,7 +113,7 @@ Create a `topology-preprod.json`:
 Run the node:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --config config-preprod.json \
   --topology topology-preprod.json \
   --database-path ./db-preprod \
@@ -138,23 +138,23 @@ When querying a node connected to a testnet, pass the `--testnet-magic` flag to 
 
 ```bash
 # Preview
-torsten-cli query tip --socket-path ./node-preview.sock --testnet-magic 2
+dugite-cli query tip --socket-path ./node-preview.sock --testnet-magic 2
 
 # Preprod
-torsten-cli query tip --socket-path ./node-preprod.sock --testnet-magic 1
+dugite-cli query tip --socket-path ./node-preprod.sock --testnet-magic 1
 
 # Mainnet (default, --testnet-magic not needed)
-torsten-cli query tip --socket-path ./node-mainnet.sock
+dugite-cli query tip --socket-path ./node-mainnet.sock
 ```
 
 ## Multiple Nodes
 
-You can run multiple Torsten instances on the same machine by using different ports, database paths, and socket paths:
+You can run multiple Dugite instances on the same machine by using different ports, database paths, and socket paths:
 
 ```bash
 # Preview on port 3001
-torsten-node run --port 3001 --database-path ./db-preview --socket-path ./preview.sock ...
+dugite-node run --port 3001 --database-path ./db-preview --socket-path ./preview.sock ...
 
 # Preprod on port 3002
-torsten-node run --port 3002 --database-path ./db-preprod --socket-path ./preprod.sock ...
+dugite-node run --port 3002 --database-path ./db-preprod --socket-path ./preprod.sock ...
 ```

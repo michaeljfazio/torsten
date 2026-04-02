@@ -18,12 +18,12 @@ fuzz_target!(|data: &[u8]| {
     // Try interpreting the fuzz input as a UTF-8 string for bech32 decoding.
     if let Ok(s) = std::str::from_utf8(data) {
         // None of these should panic, regardless of input string
-        let _ = torsten_primitives::governance::decode_drep_key(s);
-        let _ = torsten_primitives::governance::decode_drep_script(s);
-        let _ = torsten_primitives::governance::decode_cc_hot_key(s);
-        let _ = torsten_primitives::governance::decode_cc_hot_script(s);
-        let _ = torsten_primitives::governance::decode_cc_cold_key(s);
-        let _ = torsten_primitives::governance::decode_cc_cold_script(s);
+        let _ = dugite_primitives::governance::decode_drep_key(s);
+        let _ = dugite_primitives::governance::decode_drep_script(s);
+        let _ = dugite_primitives::governance::decode_cc_hot_key(s);
+        let _ = dugite_primitives::governance::decode_cc_hot_script(s);
+        let _ = dugite_primitives::governance::decode_cc_cold_key(s);
+        let _ = dugite_primitives::governance::decode_cc_cold_script(s);
     }
 
     // --- Test 2: Governance action CBOR parsing ---

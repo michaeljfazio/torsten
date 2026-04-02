@@ -9,6 +9,6 @@ cd "$(dirname "$0")/.."
 SOCKET="${CARDANO_NODE_SOCKET_PATH:-./node.sock}"
 MAGIC="${1:-2}"  # Default to preview
 
-./target/release/torsten-cli query tip \
+./target/release/dugite-cli query tip \
     --socket-path "$SOCKET" \
     --testnet-magic "$MAGIC"

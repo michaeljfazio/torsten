@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Run the Haskell cardano-node as a relay on the Cardano preview testnet,
-# peering exclusively with a local Torsten node.
+# peering exclusively with a local Dugite node.
 #
 # Usage: ./scripts/run-haskell-relay-preview.sh [--db PATH] [--log FILE]
 #
-# Ports (non-conflicting with Torsten defaults):
-#   Node listen:       3002   (Torsten uses 3001)
-#   Prometheus legacy: 12799  (Torsten uses 12798)
+# Ports (non-conflicting with Dugite defaults):
+#   Node listen:       3002   (Dugite uses 3001)
+#   Prometheus legacy: 12799  (Dugite uses 12798)
 #   Prometheus tracer: 12797  (haskell-preview-config.json PrometheusSimple suffix)
 #   Socket:            ./haskell-node.sock
 #
 # Networking:
-#   - Single peer: Torsten at 127.0.0.1:3001
+#   - Single peer: Dugite at 127.0.0.1:3001
 #   - P2P peer sharing disabled (PeerSharing: false in config)
 #   - Ledger peer discovery disabled (useLedgerAfterSlot: -1 in topology)
 #   - No public roots; no bootstrap peers
@@ -54,7 +54,7 @@ CMD=(
 )
 
 echo "Starting Haskell cardano-node relay (preview testnet)..."
-echo "Peer:      127.0.0.1:3001  (Torsten)"
+echo "Peer:      127.0.0.1:3001  (Dugite)"
 echo "Database:  $DATABASE_PATH"
 echo "Socket:    ./haskell-node.sock"
 echo "Port:      3002"

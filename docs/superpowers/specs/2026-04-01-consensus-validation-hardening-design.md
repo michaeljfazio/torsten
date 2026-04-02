@@ -82,7 +82,7 @@ Three items from the original issue (#3 block size, #5 KES binding, #7 Shelley t
 
 **Changes:**
 
-1. Add a test module in `crates/torsten-crypto/src/kes.rs` (or `tests/`) with IOHK reference vectors.
+1. Add a test module in `crates/dugite-crypto/src/kes.rs` (or `tests/`) with IOHK reference vectors.
 2. Test cases: known seed → known keypair → known signature at known period → verify passes.
 3. Also test: verification with wrong key fails, verification at wrong period fails, verification with corrupted signature fails.
 
@@ -92,10 +92,10 @@ Three items from the original issue (#3 block size, #5 KES binding, #7 Shelley t
 Haskell checks `header_size <= maxBlockHeaderSize` and `body_size <= maxBlockBodySize` separately in `envelopeChecks`. Our `validate_envelope()` already does exactly this. The issue's suggestion of `body + header <= total` does not match Haskell.
 
 ### KES Explicit Binding (Issue Item #5)
-The binding between `opcert.kes_vk_hot` and the actual KES signing key is enforced implicitly by `KES.verifySignedKES` — it takes `vk_hot` from the opcert as the verification key and the Sum6Kes Merkle root reconstruction internally validates the key match. There is no explicit `vk_hot == derived_pk` comparison in Haskell. As long as Torsten passes `opcert.kes_vk_hot` to `kes_verify`, this is correct.
+The binding between `opcert.kes_vk_hot` and the actual KES signing key is enforced implicitly by `KES.verifySignedKES` — it takes `vk_hot` from the opcert as the verification key and the Sum6Kes Merkle root reconstruction internally validates the key match. There is no explicit `vk_hot == derived_pk` comparison in Haskell. As long as Dugite passes `opcert.kes_vk_hot` to `kes_verify`, this is correct.
 
 ### Shelley Transition (Issue Item #7)
-The Shelley transition epoch is not derivable from genesis config alone — it requires either on-chain Byron update proposals (mainnet) or `TestShelleyHardForkAtEpoch` config override (testnets). Torsten's `shelley_transition_epoch_for_magic()` lookup table + dynamic EraHistory detection already matches this correctly.
+The Shelley transition epoch is not derivable from genesis config alone — it requires either on-chain Byron update proposals (mainnet) or `TestShelleyHardForkAtEpoch` config override (testnets). Dugite's `shelley_transition_epoch_for_magic()` lookup table + dynamic EraHistory detection already matches this correctly.
 
 ## Tests
 
@@ -108,6 +108,6 @@ The Shelley transition epoch is not derivable from genesis config alone — it r
 
 ## Files Modified
 
-- `crates/torsten-consensus/src/praos.rs` — ObsoleteNode check, HeaderProtVerTooHigh check
-- `crates/torsten-consensus/src/chain_selection.rs` — remove hash tiebreaker, add Conway slot window
-- `crates/torsten-crypto/src/kes.rs` — Sum6Kes test vectors
+- `crates/dugite-consensus/src/praos.rs` — ObsoleteNode check, HeaderProtVerTooHigh check
+- `crates/dugite-consensus/src/chain_selection.rs` — remove hash tiebreaker, add Conway slot window
+- `crates/dugite-crypto/src/kes.rs` — Sum6Kes test vectors

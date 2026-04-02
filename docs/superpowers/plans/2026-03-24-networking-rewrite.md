@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace all pallas-network dependencies in torsten-network with a custom Ouroboros networking implementation aligned to the Haskell cardano-node reference.
+**Goal:** Replace all pallas-network dependencies in dugite-network with a custom Ouroboros networking implementation aligned to the Haskell cardano-node reference.
 
-**Architecture:** Four-layer architecture (Bearer → Mux → Protocols → Connection Manager), each independently testable. The public trait API (`BlockProvider`, `TxValidator`, `MempoolProvider`, `UtxoQueryProvider`, `ConnectionMetrics`) is preserved so torsten-node adapter code remains stable. All CBOR encoding uses minicbor directly.
+**Architecture:** Four-layer architecture (Bearer → Mux → Protocols → Connection Manager), each independently testable. The public trait API (`BlockProvider`, `TxValidator`, `MempoolProvider`, `UtxoQueryProvider`, `ConnectionMetrics`) is preserved so dugite-node adapter code remains stable. All CBOR encoding uses minicbor directly.
 
 **Tech Stack:** Rust, tokio (async runtime), minicbor (CBOR), bytes, tokio-util (CancellationToken), hickory-resolver (DNS), socket2 (TCP options)
 
@@ -15,7 +15,7 @@
 ## File Structure
 
 ```
-crates/torsten-network/
+crates/dugite-network/
 ├── Cargo.toml                               # Remove pallas-network/traverse/crypto, add minicbor workspace
 ├── src/
 │   ├── lib.rs                               # Re-exports, public trait definitions
@@ -81,10 +81,10 @@ crates/torsten-network/
 │       └── selection.rs                     # Peer selection algorithms, address filtering
 ```
 
-**Files modified in torsten-node (integration):**
-- `crates/torsten-node/src/node/mod.rs` — update network construction to use ConnectionManager API
-- `crates/torsten-node/src/node/sync.rs` — update sync client to use new PipelinedChainSyncClient
-- `crates/torsten-node/src/node/serve.rs` — trait implementations preserved, minor signature adjustments
+**Files modified in dugite-node (integration):**
+- `crates/dugite-node/src/node/mod.rs` — update network construction to use ConnectionManager API
+- `crates/dugite-node/src/node/sync.rs` — update sync client to use new PipelinedChainSyncClient
+- `crates/dugite-node/src/node/serve.rs` — trait implementations preserved, minor signature adjustments
 
 **Files modified in workspace root:**
 - `Cargo.toml` — remove `pallas-network` from workspace dependencies
@@ -94,10 +94,10 @@ crates/torsten-network/
 ## Task 1: Scaffold and Dependencies
 
 **Files:**
-- Modify: `crates/torsten-network/Cargo.toml`
-- Create: `crates/torsten-network/src/error.rs`
-- Create: `crates/torsten-network/src/codec.rs`
-- Modify: `crates/torsten-network/src/lib.rs`
+- Modify: `crates/dugite-network/Cargo.toml`
+- Create: `crates/dugite-network/src/error.rs`
+- Create: `crates/dugite-network/src/codec.rs`
+- Modify: `crates/dugite-network/src/lib.rs`
 
 - [ ] **Step 1: Create a feature branch**
 
@@ -108,7 +108,7 @@ git push -u origin feature/networking-rewrite
 
 - [ ] **Step 2: Update Cargo.toml — remove pallas, keep everything else**
 
-In `crates/torsten-network/Cargo.toml`, remove these three dependencies:
+In `crates/dugite-network/Cargo.toml`, remove these three dependencies:
 ```toml
 # REMOVE:
 pallas-network = { workspace = true }
@@ -124,7 +124,7 @@ tokio-util = { workspace = true }
 - [ ] **Step 3: Delete all existing source files except lib.rs**
 
 ```bash
-# From crates/torsten-network/src/
+# From crates/dugite-network/src/
 # Delete everything except lib.rs
 rm -rf bearer/ mux/ handshake/ protocol/ connection/ peer/
 rm -f bandwidth.rs client.rs dns.rs duplex.rs governor.rs n2c_client.rs
@@ -134,7 +134,7 @@ rm -rf miniprotocols/ multiplexer/ n2c/ query_handler/
 
 - [ ] **Step 4: Write error.rs**
 
-Create `crates/torsten-network/src/error.rs`:
+Create `crates/dugite-network/src/error.rs`:
 
 ```rust
 use std::fmt;
@@ -371,7 +371,7 @@ impl From<HandshakeError> for ConnectionError {
 
 - [ ] **Step 5: Write codec.rs — shared CBOR helpers**
 
-Create `crates/torsten-network/src/codec.rs`:
+Create `crates/dugite-network/src/codec.rs`:
 
 ```rust
 //! Shared CBOR encoding/decoding helpers for Ouroboros wire format.
@@ -528,10 +528,10 @@ fn skip_cbor_value(dec: &mut Decoder<'_>) -> Result<(), minicbor::decode::Error>
 
 - [ ] **Step 6: Write minimal lib.rs stub**
 
-Replace `crates/torsten-network/src/lib.rs` with:
+Replace `crates/dugite-network/src/lib.rs` with:
 
 ```rust
-//! Ouroboros network protocol implementation for the Torsten Cardano node.
+//! Ouroboros network protocol implementation for the Dugite Cardano node.
 //!
 //! Four-layer architecture:
 //! - Layer 1: Bearer (TCP, Unix socket transport)
@@ -554,10 +554,10 @@ pub mod mux;
 pub use error::*;
 
 // Re-export MempoolProvider from primitives (used by TxSubmission2, LocalTxSubmission, LocalTxMonitor)
-pub use torsten_primitives::mempool::MempoolProvider;
+pub use dugite_primitives::mempool::MempoolProvider;
 
 // ─── Public Traits ───
-// These are the integration boundary with torsten-node.
+// These are the integration boundary with dugite-node.
 // The node crate implements these traits and passes them to the network layer.
 
 /// Provides block data from ChainDB for N2N server protocols.
@@ -687,20 +687,20 @@ mod tests {
 
 - [ ] **Step 8: Verify the crate compiles (it won't build fully yet, but syntax should be clean)**
 
-Run: `cargo check -p torsten-network 2>&1 | head -20`
+Run: `cargo check -p dugite-network 2>&1 | head -20`
 Expected: May have errors about missing modules — that's fine at this stage. The error.rs and codec.rs should be syntactically valid.
 
 - [ ] **Step 8: Commit scaffold**
 
 ```bash
-git add -A crates/torsten-network/
+git add -A crates/dugite-network/
 git commit -m "feat(network): scaffold networking rewrite — error types, codec, public traits
 
 Remove pallas-network/traverse/crypto dependencies. Define the unified
 error hierarchy (NetworkError, BearerError, MuxError, HandshakeError,
 ProtocolError, ConnectionError) and shared CBOR codec helpers. Preserve
 public trait API (BlockProvider, TxValidator, UtxoQueryProvider,
-ConnectionMetrics) for torsten-node compatibility."
+ConnectionMetrics) for dugite-node compatibility."
 ```
 
 ---
@@ -708,14 +708,14 @@ ConnectionMetrics) for torsten-node compatibility."
 ## Task 2: Bearer Layer
 
 **Files:**
-- Create: `crates/torsten-network/src/bearer/mod.rs`
-- Create: `crates/torsten-network/src/bearer/tcp.rs`
-- Create: `crates/torsten-network/src/bearer/unix.rs`
-- Test: `crates/torsten-network/src/bearer/mod.rs` (inline tests)
+- Create: `crates/dugite-network/src/bearer/mod.rs`
+- Create: `crates/dugite-network/src/bearer/tcp.rs`
+- Create: `crates/dugite-network/src/bearer/unix.rs`
+- Test: `crates/dugite-network/src/bearer/mod.rs` (inline tests)
 
 - [ ] **Step 1: Write bearer trait and mock bearer**
 
-Create `crates/torsten-network/src/bearer/mod.rs`:
+Create `crates/dugite-network/src/bearer/mod.rs`:
 
 ```rust
 //! Transport abstraction layer.
@@ -808,7 +808,7 @@ impl Bearer for MockBearer {
 
 - [ ] **Step 2: Write TCP bearer**
 
-Create `crates/torsten-network/src/bearer/tcp.rs`:
+Create `crates/dugite-network/src/bearer/tcp.rs`:
 
 ```rust
 //! TCP bearer implementation.
@@ -906,7 +906,7 @@ impl Bearer for TcpBearer {
 
 - [ ] **Step 3: Write Unix bearer**
 
-Create `crates/torsten-network/src/bearer/unix.rs`:
+Create `crates/dugite-network/src/bearer/unix.rs`:
 
 ```rust
 //! Unix domain socket bearer for N2C connections.
@@ -969,13 +969,13 @@ impl Bearer for UnixBearer {
 
 - [ ] **Step 4: Verify bearer layer compiles**
 
-Run: `cargo check -p torsten-network`
+Run: `cargo check -p dugite-network`
 Expected: Should compile (bearer module has no dependencies on deleted code).
 
 - [ ] **Step 5: Commit bearer layer**
 
 ```bash
-git add crates/torsten-network/src/bearer/
+git add crates/dugite-network/src/bearer/
 git commit -m "feat(network): add Bearer trait with TCP and Unix implementations
 
 TCP bearer: SDU size 12,288 bytes (matching Haskell), TCP_NODELAY=false,
@@ -988,13 +988,13 @@ Mock bearer provided for testing."
 ## Task 3: Multiplexer — SDU Segment Encoding
 
 **Files:**
-- Create: `crates/torsten-network/src/mux/mod.rs`
-- Create: `crates/torsten-network/src/mux/segment.rs`
+- Create: `crates/dugite-network/src/mux/mod.rs`
+- Create: `crates/dugite-network/src/mux/segment.rs`
 - Test: inline in `segment.rs`
 
 - [ ] **Step 1: Write segment.rs with tests first**
 
-Create `crates/torsten-network/src/mux/segment.rs`:
+Create `crates/dugite-network/src/mux/segment.rs`:
 
 ```rust
 //! SDU (Segment Data Unit) header encoding/decoding.
@@ -1209,7 +1209,7 @@ mod tests {
 
 - [ ] **Step 2: Write mux/mod.rs stub**
 
-Create `crates/torsten-network/src/mux/mod.rs`:
+Create `crates/dugite-network/src/mux/mod.rs`:
 
 ```rust
 //! Ouroboros multiplexer.
@@ -1229,13 +1229,13 @@ pub use segment::{Direction, SduHeader, HEADER_SIZE};
 
 - [ ] **Step 3: Run segment tests**
 
-Run: `cargo test -p torsten-network -- segment::tests`
+Run: `cargo test -p dugite-network -- segment::tests`
 Expected: All tests pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-network/src/mux/
+git add crates/dugite-network/src/mux/
 git commit -m "feat(network): add SDU segment encoding/decoding with tests
 
 8-byte header: timestamp(u32) + direction_bit|protocol_id(u16) + payload_len(u16).
@@ -1248,16 +1248,16 @@ All known Ouroboros protocol IDs verified in roundtrip tests."
 ## Task 4: Multiplexer — MuxChannel, Egress, and Ingress
 
 **Files:**
-- Create: `crates/torsten-network/src/mux/channel.rs`
-- Create: `crates/torsten-network/src/mux/egress.rs`
-- Create: `crates/torsten-network/src/mux/ingress.rs`
-- Update: `crates/torsten-network/src/mux/mod.rs`
+- Create: `crates/dugite-network/src/mux/channel.rs`
+- Create: `crates/dugite-network/src/mux/egress.rs`
+- Create: `crates/dugite-network/src/mux/ingress.rs`
+- Update: `crates/dugite-network/src/mux/mod.rs`
 
 This is a large task. Each file implements one mux component. The test for the full mux lifecycle (egress+ingress+channel working together) is at the end.
 
 - [ ] **Step 1: Write MuxChannel**
 
-Create `crates/torsten-network/src/mux/channel.rs` — the per-protocol handle. The channel provides `send()` (writes complete CBOR messages to egress) and `recv()` (reads from ingress buffer, detects CBOR boundaries).
+Create `crates/dugite-network/src/mux/channel.rs` — the per-protocol handle. The channel provides `send()` (writes complete CBOR messages to egress) and `recv()` (reads from ingress buffer, detects CBOR boundaries).
 
 Key details:
 - `send()` sends complete messages via `mpsc::Sender<Bytes>` to egress task (bounded capacity 32)
@@ -1268,7 +1268,7 @@ Key details:
 
 - [ ] **Step 2: Write EgressTask**
 
-Create `crates/torsten-network/src/mux/egress.rs` — the egress queue and writer.
+Create `crates/dugite-network/src/mux/egress.rs` — the egress queue and writer.
 
 Key details:
 - Receives messages from all protocol channels via a shared `mpsc::Receiver<(u16, Direction, Bytes)>`
@@ -1279,7 +1279,7 @@ Key details:
 
 - [ ] **Step 3: Write IngressTask**
 
-Create `crates/torsten-network/src/mux/ingress.rs` — the ingress demuxer.
+Create `crates/dugite-network/src/mux/ingress.rs` — the ingress demuxer.
 
 Key details:
 - Reads SDU headers (8 bytes) then payload from bearer
@@ -1310,13 +1310,13 @@ Test the full mux lifecycle: create two mock bearers connected back-to-back, cre
 
 - [ ] **Step 6: Run all mux tests**
 
-Run: `cargo test -p torsten-network -- mux`
+Run: `cargo test -p dugite-network -- mux`
 Expected: All pass.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/torsten-network/src/mux/
+git add crates/dugite-network/src/mux/
 git commit -m "feat(network): implement Ouroboros multiplexer
 
 MuxChannel with CBOR boundary detection, EgressTask with round-robin
@@ -1330,9 +1330,9 @@ Protocol ID 1 silently discarded (reserved)."
 ## Task 5: Handshake Protocol
 
 **Files:**
-- Create: `crates/torsten-network/src/handshake/mod.rs`
-- Create: `crates/torsten-network/src/handshake/n2n.rs`
-- Create: `crates/torsten-network/src/handshake/n2c.rs`
+- Create: `crates/dugite-network/src/handshake/mod.rs`
+- Create: `crates/dugite-network/src/handshake/n2n.rs`
+- Create: `crates/dugite-network/src/handshake/n2c.rs`
 
 - [ ] **Step 1: Write N2N version data codec (n2n.rs)**
 
@@ -1354,10 +1354,10 @@ Test: version negotiation (propose V14+V15, accept V15), magic mismatch (refuse)
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- handshake`
+Run: `cargo test -p dugite-network -- handshake`
 
 ```bash
-git add crates/torsten-network/src/handshake/
+git add crates/dugite-network/src/handshake/
 git commit -m "feat(network): implement Ouroboros handshake protocol
 
 N2N V14-V15 and N2C V16-V23 version negotiation. Acceptance logic
@@ -1370,10 +1370,10 @@ query OR). Simultaneous open detection. Query mode support."
 ## Task 6: Protocol Module Foundation + KeepAlive
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/mod.rs`
-- Create: `crates/torsten-network/src/protocol/keepalive/mod.rs`
-- Create: `crates/torsten-network/src/protocol/keepalive/client.rs`
-- Create: `crates/torsten-network/src/protocol/keepalive/server.rs`
+- Create: `crates/dugite-network/src/protocol/mod.rs`
+- Create: `crates/dugite-network/src/protocol/keepalive/mod.rs`
+- Create: `crates/dugite-network/src/protocol/keepalive/client.rs`
+- Create: `crates/dugite-network/src/protocol/keepalive/server.rs`
 
 Start with KeepAlive because it's the simplest protocol — proves the pattern for all others.
 
@@ -1409,10 +1409,10 @@ Loop: receive `MsgKeepAlive(cookie)` or `MsgDone`, echo `MsgKeepAliveResponse(co
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- keepalive`
+Run: `cargo test -p dugite-network -- keepalive`
 
 ```bash
-git add crates/torsten-network/src/protocol/
+git add crates/dugite-network/src/protocol/
 git commit -m "feat(network): add KeepAlive mini-protocol (client + server)
 
 Cookie-based ping/pong with RTT measurement. Configurable interval
@@ -1424,9 +1424,9 @@ Cookie-based ping/pong with RTT measurement. Configurable interval
 ## Task 7: ChainSync Protocol
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/chainsync/mod.rs`
-- Create: `crates/torsten-network/src/protocol/chainsync/client.rs`
-- Create: `crates/torsten-network/src/protocol/chainsync/server.rs`
+- Create: `crates/dugite-network/src/protocol/chainsync/mod.rs`
+- Create: `crates/dugite-network/src/protocol/chainsync/client.rs`
+- Create: `crates/dugite-network/src/protocol/chainsync/server.rs`
 
 The most complex and performance-critical protocol.
 
@@ -1460,10 +1460,10 @@ Test intersection with multiple points, pipelining state transitions (verify out
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- chainsync`
+Run: `cargo test -p dugite-network -- chainsync`
 
 ```bash
-git add crates/torsten-network/src/protocol/chainsync/
+git add crates/dugite-network/src/protocol/chainsync/
 git commit -m "feat(network): implement ChainSync mini-protocol
 
 Pipelined client with low_mark=200/high_mark=300 matching Haskell.
@@ -1476,9 +1476,9 @@ announcement wait with randomized timeout. EBB handling for Byron era."
 ## Task 8: BlockFetch Protocol
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/blockfetch/mod.rs`
-- Create: `crates/torsten-network/src/protocol/blockfetch/client.rs`
-- Create: `crates/torsten-network/src/protocol/blockfetch/server.rs`
+- Create: `crates/dugite-network/src/protocol/blockfetch/mod.rs`
+- Create: `crates/dugite-network/src/protocol/blockfetch/client.rs`
+- Create: `crates/dugite-network/src/protocol/blockfetch/server.rs`
 
 - [ ] **Step 1: Write BlockFetch codec (blockfetch/mod.rs)**
 
@@ -1501,10 +1501,10 @@ State enum: `BFIdle`, `BFBusy`, `BFStreaming`, `BFDone`. Messages: MsgRequestRan
 
 - [ ] **Step 4: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- blockfetch`
+Run: `cargo test -p dugite-network -- blockfetch`
 
 ```bash
-git add crates/torsten-network/src/protocol/blockfetch/
+git add crates/dugite-network/src/protocol/blockfetch/
 git commit -m "feat(network): implement BlockFetch mini-protocol
 
 Client with batch-level pipelining, streaming block delivery.
@@ -1517,9 +1517,9 @@ sequential block streaming via BlockProvider."
 ## Task 9: TxSubmission2 Protocol
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/txsubmission/mod.rs`
-- Create: `crates/torsten-network/src/protocol/txsubmission/client.rs`
-- Create: `crates/torsten-network/src/protocol/txsubmission/server.rs`
+- Create: `crates/dugite-network/src/protocol/txsubmission/mod.rs`
+- Create: `crates/dugite-network/src/protocol/txsubmission/client.rs`
+- Create: `crates/dugite-network/src/protocol/txsubmission/server.rs`
 
 - [ ] **Step 1: Write TxSubmission2 codec (txsubmission/mod.rs)**
 
@@ -1549,10 +1549,10 @@ Test: first request must be non-blocking, blocking only when unacked=0, MsgDone 
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- txsubmission`
+Run: `cargo test -p dugite-network -- txsubmission`
 
 ```bash
-git add crates/torsten-network/src/protocol/txsubmission/
+git add crates/dugite-network/src/protocol/txsubmission/
 git commit -m "feat(network): implement TxSubmission2 mini-protocol
 
 Pull-based protocol with correct inverted agency. First MsgRequestTxIds
@@ -1565,9 +1565,9 @@ inflight dedup (O(1) vs old O(n^2)). FIFO acknowledgment tracking."
 ## Task 10: PeerSharing Protocol
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/peersharing/mod.rs`
-- Create: `crates/torsten-network/src/protocol/peersharing/client.rs`
-- Create: `crates/torsten-network/src/protocol/peersharing/server.rs`
+- Create: `crates/dugite-network/src/protocol/peersharing/mod.rs`
+- Create: `crates/dugite-network/src/protocol/peersharing/client.rs`
+- Create: `crates/dugite-network/src/protocol/peersharing/server.rs`
 
 - [ ] **Step 1: Write PeerSharing codec, client, server, and address filtering**
 
@@ -1582,10 +1582,10 @@ Test all non-routable ranges are rejected: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.
 
 - [ ] **Step 3: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- peersharing`
+Run: `cargo test -p dugite-network -- peersharing`
 
 ```bash
-git add crates/torsten-network/src/protocol/peersharing/
+git add crates/dugite-network/src/protocol/peersharing/
 git commit -m "feat(network): implement PeerSharing mini-protocol
 
 IPv4/IPv6 address exchange. Address filtering rejects RFC1918, CGNAT
@@ -1597,8 +1597,8 @@ IPv4/IPv6 address exchange. Address filtering rejects RFC1918, CGNAT
 ## Task 11a: N2C LocalChainSync + LocalTxSubmission
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/local_chainsync/server.rs`
-- Create: `crates/torsten-network/src/protocol/local_tx_submission/server.rs`
+- Create: `crates/dugite-network/src/protocol/local_chainsync/server.rs`
+- Create: `crates/dugite-network/src/protocol/local_tx_submission/server.rs`
 
 - [ ] **Step 1: Write LocalChainSync server**
 
@@ -1610,11 +1610,11 @@ MsgSubmitTx [0, era_id, tx_bytes] → validate via TxValidator → add to mempoo
 
 - [ ] **Step 3: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- local_chainsync local_tx_submission`
+Run: `cargo test -p dugite-network -- local_chainsync local_tx_submission`
 
 ```bash
-git add crates/torsten-network/src/protocol/local_chainsync/
-git add crates/torsten-network/src/protocol/local_tx_submission/
+git add crates/dugite-network/src/protocol/local_chainsync/
+git add crates/dugite-network/src/protocol/local_tx_submission/
 git commit -m "feat(network): implement LocalChainSync and LocalTxSubmission
 
 LocalChainSync sends full blocks with HFC era wrapping.
@@ -1626,7 +1626,7 @@ LocalTxSubmission validates via TxValidator, adds to mempool."
 ## Task 11b: N2C LocalTxMonitor
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/local_tx_monitor/server.rs`
+- Create: `crates/dugite-network/src/protocol/local_tx_monitor/server.rs`
 
 - [ ] **Step 1: Write LocalTxMonitor server**
 
@@ -1648,10 +1648,10 @@ Test: acquire captures snapshot, subsequent queries see consistent state even if
 
 - [ ] **Step 3: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- local_tx_monitor`
+Run: `cargo test -p dugite-network -- local_tx_monitor`
 
 ```bash
-git add crates/torsten-network/src/protocol/local_tx_monitor/
+git add crates/dugite-network/src/protocol/local_tx_monitor/
 git commit -m "feat(network): implement LocalTxMonitor
 
 Snapshot-based mempool monitoring. MsgGetMeasures gated on V20+.
@@ -1663,9 +1663,9 @@ MsgAwaitAcquire blocks until new snapshot available."
 ## Task 11c: N2C LocalStateQuery
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/local_state_query/mod.rs`
-- Create: `crates/torsten-network/src/protocol/local_state_query/server.rs`
-- Create: `crates/torsten-network/src/protocol/local_state_query/encoding.rs`
+- Create: `crates/dugite-network/src/protocol/local_state_query/mod.rs`
+- Create: `crates/dugite-network/src/protocol/local_state_query/server.rs`
+- Create: `crates/dugite-network/src/protocol/local_state_query/encoding.rs`
 
 This is the most complex N2C protocol. Much of the query encoding logic can be ported from the existing `n2c/query/` code (which was already custom, not pallas-dependent).
 
@@ -1704,10 +1704,10 @@ Test: VolatileTip always acquires, SpecificPoint fails with correct error, MsgRe
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- local_state_query`
+Run: `cargo test -p dugite-network -- local_state_query`
 
 ```bash
-git add crates/torsten-network/src/protocol/local_state_query/
+git add crates/dugite-network/src/protocol/local_state_query/
 git commit -m "feat(network): implement LocalStateQuery
 
 39 BlockQuery tags (0-38) with HFC wrapping. Proper acquire/release
@@ -1720,11 +1720,11 @@ atomic release+acquire. Snapshot-under-lock for lock-free query."
 ## Task 12: Peer Manager & Governor
 
 **Files:**
-- Create: `crates/torsten-network/src/peer/mod.rs`
-- Create: `crates/torsten-network/src/peer/manager.rs`
-- Create: `crates/torsten-network/src/peer/governor.rs`
-- Create: `crates/torsten-network/src/peer/discovery.rs`
-- Create: `crates/torsten-network/src/peer/selection.rs`
+- Create: `crates/dugite-network/src/peer/mod.rs`
+- Create: `crates/dugite-network/src/peer/manager.rs`
+- Create: `crates/dugite-network/src/peer/governor.rs`
+- Create: `crates/dugite-network/src/peer/discovery.rs`
+- Create: `crates/dugite-network/src/peer/selection.rs`
 
 - [ ] **Step 1: Write PeerManager (peer/manager.rs)**
 
@@ -1744,10 +1744,10 @@ Address filtering (`is_routable`): reject all non-routable ranges. Peer selectio
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- peer`
+Run: `cargo test -p dugite-network -- peer`
 
 ```bash
-git add crates/torsten-network/src/peer/
+git add crates/dugite-network/src/peer/
 git commit -m "feat(network): implement Peer Manager and Governor
 
 Cold/warm/hot peer lifecycle, EWMA latency, reputation scoring with
@@ -1761,14 +1761,14 @@ includes CGNAT and IPv6 ULA rejection."
 ## Task 13: Block Fetch Decision Logic
 
 **Files:**
-- Create: `crates/torsten-network/src/protocol/blockfetch/decision.rs`
-- Modify: `crates/torsten-network/src/protocol/blockfetch/mod.rs`
+- Create: `crates/dugite-network/src/protocol/blockfetch/decision.rs`
+- Modify: `crates/dugite-network/src/protocol/blockfetch/mod.rs`
 
 The block fetch decision logic sits between ChainSync (which receives headers) and BlockFetch (which downloads blocks). It decides which peer to fetch each block range from.
 
 - [ ] **Step 1: Write block fetch decision engine**
 
-Create `crates/torsten-network/src/protocol/blockfetch/decision.rs`:
+Create `crates/dugite-network/src/protocol/blockfetch/decision.rs`:
 
 Key responsibilities:
 - Maintain a download queue of block ranges needed (populated from ChainSync headers)
@@ -1798,11 +1798,11 @@ Test: ranges distributed across peers by latency, failed range retried on differ
 
 - [ ] **Step 3: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- blockfetch::decision`
+Run: `cargo test -p dugite-network -- blockfetch::decision`
 
 ```bash
-git add crates/torsten-network/src/protocol/blockfetch/decision.rs
-git add crates/torsten-network/src/protocol/blockfetch/mod.rs
+git add crates/dugite-network/src/protocol/blockfetch/decision.rs
+git add crates/dugite-network/src/protocol/blockfetch/mod.rs
 git commit -m "feat(network): add block fetch decision logic
 
 Latency-based peer selection, parallel range distribution, retry on
@@ -1814,10 +1814,10 @@ failure, rollback handling. Respects blockFetchPipeliningMax (100)."
 ## Task 14: Connection Manager
 
 **Files:**
-- Create: `crates/torsten-network/src/connection/mod.rs`
-- Create: `crates/torsten-network/src/connection/manager.rs`
-- Create: `crates/torsten-network/src/connection/state.rs`
-- Create: `crates/torsten-network/src/connection/handler.rs`
+- Create: `crates/dugite-network/src/connection/mod.rs`
+- Create: `crates/dugite-network/src/connection/manager.rs`
+- Create: `crates/dugite-network/src/connection/state.rs`
+- Create: `crates/dugite-network/src/connection/handler.rs`
 
 - [ ] **Step 1: Write ConnectionState (connection/state.rs)**
 
@@ -1843,10 +1843,10 @@ Public API: `ConnectionManager::new(config, block_provider, tx_validator, mempoo
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `cargo test -p torsten-network -- connection`
+Run: `cargo test -p dugite-network -- connection`
 
 ```bash
-git add crates/torsten-network/src/connection/
+git add crates/dugite-network/src/connection/
 git commit -m "feat(network): implement Connection Manager
 
 Full connection lifecycle with simultaneous open handling (reuse inbound
@@ -1859,8 +1859,8 @@ warm/hot protocol orchestration with CancellationToken shutdown."
 ## Task 15: Wire Up lib.rs and Metrics
 
 **Files:**
-- Update: `crates/torsten-network/src/lib.rs`
-- Create: `crates/torsten-network/src/metrics.rs`
+- Update: `crates/dugite-network/src/lib.rs`
+- Create: `crates/dugite-network/src/metrics.rs`
 
 - [ ] **Step 1: Update lib.rs to export all modules**
 
@@ -1868,22 +1868,22 @@ Uncomment all module declarations. Re-export key public types: ConnectionManager
 
 - [ ] **Step 2: Write metrics.rs**
 
-Prometheus metric definitions for connection, protocol, mux, and latency metrics. Use the existing pattern from torsten-node's metrics.
+Prometheus metric definitions for connection, protocol, mux, and latency metrics. Use the existing pattern from dugite-node's metrics.
 
 - [ ] **Step 3: Verify the full crate compiles**
 
-Run: `cargo check -p torsten-network`
+Run: `cargo check -p dugite-network`
 Expected: Clean compilation with zero warnings.
 
 - [ ] **Step 4: Run all tests**
 
-Run: `cargo test -p torsten-network`
+Run: `cargo test -p dugite-network`
 Expected: All tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-network/src/lib.rs crates/torsten-network/src/metrics.rs
+git add crates/dugite-network/src/lib.rs crates/dugite-network/src/metrics.rs
 git commit -m "feat(network): wire up all modules, add Prometheus metrics
 
 Export complete public API. Prometheus metrics for connections, protocols,
@@ -1892,12 +1892,12 @@ mux, and latency on port 12798."
 
 ---
 
-## Task 16: Integrate with torsten-node
+## Task 16: Integrate with dugite-node
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/mod.rs`
-- Modify: `crates/torsten-node/src/node/sync.rs`
-- Modify: `crates/torsten-node/src/node/serve.rs`
+- Modify: `crates/dugite-node/src/node/mod.rs`
+- Modify: `crates/dugite-node/src/node/sync.rs`
+- Modify: `crates/dugite-node/src/node/serve.rs`
 - Modify: `Cargo.toml` (workspace root)
 
 - [ ] **Step 1: Update serve.rs trait implementations**
@@ -1914,7 +1914,7 @@ Replace `PipelinedPeerClient` usage with the new `PipelinedChainSyncClient`. The
 
 - [ ] **Step 4: Remove pallas-network from workspace Cargo.toml**
 
-Remove `pallas-network` from `[workspace.dependencies]` if no other crate uses it (confirmed: only torsten-network used it).
+Remove `pallas-network` from `[workspace.dependencies]` if no other crate uses it (confirmed: only dugite-network used it).
 
 - [ ] **Step 5: Build the full workspace**
 
@@ -1939,8 +1939,8 @@ Expected: Clean.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/torsten-network/ crates/torsten-node/ Cargo.toml Cargo.lock
-git commit -m "feat(network): integrate new networking layer with torsten-node
+git add crates/dugite-network/ crates/dugite-node/ Cargo.toml Cargo.lock
+git commit -m "feat(network): integrate new networking layer with dugite-node
 
 Update node construction to use ConnectionManager API. Adapt sync loop
 to new PipelinedChainSyncClient. Remove pallas-network workspace dep.
@@ -1952,7 +1952,7 @@ All tests pass, clippy clean, fmt clean."
 ## Task 17: Conformance Test Capture and Validation
 
 **Files:**
-- Create: `crates/torsten-network/tests/conformance/`
+- Create: `crates/dugite-network/tests/conformance/`
 
 - [ ] **Step 1: Capture wire traces from cardano-node**
 
@@ -1964,13 +1964,13 @@ Test framework that loads `.cbor` trace files, replays them through our encoder/
 
 - [ ] **Step 3: Run conformance tests**
 
-Run: `cargo test -p torsten-network -- conformance`
+Run: `cargo test -p dugite-network -- conformance`
 Expected: All pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-network/tests/
+git add crates/dugite-network/tests/
 git commit -m "test(network): add protocol conformance test suite
 
 Wire trace replay against captured cardano-node sessions. Verifies
@@ -1988,7 +1988,7 @@ Run: `cargo build --release`
 - [ ] **Step 2: Run on preview testnet**
 
 ```bash
-./target/release/torsten-node run \
+./target/release/dugite-node run \
   --config config/preview-config.json \
   --topology config/preview-topology.json \
   --database-path ./db-preview \
@@ -2010,8 +2010,8 @@ Verify: responses match expected format.
 - [ ] **Step 4: Verify Prometheus metrics**
 
 ```bash
-curl -s http://localhost:12798/metrics | grep torsten_peers
-curl -s http://localhost:12798/metrics | grep torsten_chainsync
+curl -s http://localhost:12798/metrics | grep dugite_peers
+curl -s http://localhost:12798/metrics | grep dugite_chainsync
 ```
 
 Verify: metrics are being reported.

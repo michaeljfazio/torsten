@@ -164,7 +164,7 @@ Uses real mainnet transaction examples (not synthetic).
 
 ## Known Limitations / Gaps
 
-1. **No reference script fee calculation (CIP-0112)**: pallas-validate does not implement the 25KiB-tier reference script fee. Torsten has this implemented in `torsten-ledger`.
+1. **No reference script fee calculation (CIP-0112)**: pallas-validate does not implement the 25KiB-tier reference script fee. Dugite has this implemented in `dugite-ledger`.
 2. **No certificate state tracking**: The validation doesn't maintain cert state (who's registered, what pools exist) — it validates structural correctness but not cert ordering rules.
 3. **No reward/withdrawal validation against actual stake state**: Withdrawal amounts not checked against actual reward account balances.
 4. **Phase-2 status uncertain**: pallas-uplc 0.1.0 is the Plutus evaluator dependency — its maturity is unclear.
@@ -193,9 +193,9 @@ Additionally, `tx_languages()` in pallas-validate does NOT do `scriptsNeeded ∩
 
 When all three languages are present, the function returns only `[V1, V2]`, dropping V3 entirely. This is a hardcoded bug in the multi-language branch.
 
-## Comparison to torsten-ledger
+## Comparison to dugite-ledger
 
-Torsten's `torsten-ledger` implements:
+Dugite's `dugite-ledger` implements:
 - Phase-1 validation (structural + signature checks) — overlaps with pallas-validate
 - CIP-0112 reference script fee calculation (NOT in pallas-validate)
 - UTxO set management
@@ -210,6 +210,6 @@ Torsten's `torsten-ledger` implements:
 
 ## Adoption Recommendation
 
-**ADAPT**: pallas-validate Phase-1 logic is well-tested against real transactions. Consider adopting for the validation checks themselves, while torsten-ledger retains state management. The main gap is CIP-0112 reference script fee and the cert state context needed for deeper validation.
+**ADAPT**: pallas-validate Phase-1 logic is well-tested against real transactions. Consider adopting for the validation checks themselves, while dugite-ledger retains state management. The main gap is CIP-0112 reference script fee and the cert state context needed for deeper validation.
 
-The biggest value is Plutus Phase-2 via pallas-uplc once that crate matures — torsten does not yet have Plutus execution.
+The biggest value is Plutus Phase-2 via pallas-uplc once that crate matures — dugite does not yet have Plutus execution.

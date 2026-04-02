@@ -1,6 +1,6 @@
 # Third-Party Licenses
 
-Torsten depends on a number of open-source Rust crates. This page documents
+Dugite depends on a number of open-source Rust crates. This page documents
 all third-party dependencies and their license terms.
 
 **Total dependencies:** 393
@@ -39,7 +39,7 @@ all third-party dependencies and their license terms.
 
 ## Key Dependencies
 
-These are the primary libraries that Torsten directly depends on:
+These are the primary libraries that Dugite directly depends on:
 
 | Crate | Version | License | Description |
 |-------|---------|---------|-------------|
@@ -90,7 +90,7 @@ including SHA-224,... |
 
 ## All Dependencies
 
-Complete list of all third-party crates used by Torsten, sorted alphabetically.
+Complete list of all third-party crates used by Dugite, sorted alphabetically.
 
 | Crate | Version | License |
 |-------|---------|---------|

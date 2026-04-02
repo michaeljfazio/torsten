@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run Torsten as a relay node on Cardano mainnet.
+# Run Dugite as a relay node on Cardano mainnet.
 #
 # Usage: ./scripts/run-relay-mainnet.sh [--log FILE]
 #
@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-BIN=./target/release/torsten-node
+BIN=./target/release/dugite-node
 
 if [[ ! -x "$BIN" ]]; then
     echo "Binary not found. Building..."
@@ -40,7 +40,7 @@ CMD=(
     --port 3001
 )
 
-echo "Starting Torsten relay (mainnet)..."
+echo "Starting Dugite relay (mainnet)..."
 echo "Database:  ./db-mainnet"
 echo "Socket:    ./node.sock"
 echo "Metrics:   http://localhost:12798/metrics"

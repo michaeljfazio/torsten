@@ -128,11 +128,11 @@ Provides fee calculation helpers. Likely implements the linear fee formula (`a *
 
 ## Wellknown Module
 
-Contains network-specific constants for mainnet, preview, preprod. Used in `torsten-network/src/pipelined.rs` for Byron epoch length.
+Contains network-specific constants for mainnet, preview, preprod. Used in `dugite-network/src/pipelined.rs` for Byron epoch length.
 
-## What Torsten Uses from pallas-traverse
+## What Dugite Uses from pallas-traverse
 
-From `torsten-serialization/src/multi_era.rs`:
+From `dugite-serialization/src/multi_era.rs`:
 - `MultiEraBlock as PallasBlock` — primary block deserialization
 - `MultiEraTx as PallasTx` — transaction traversal
 - `MultiEraInput as PallasInput`
@@ -143,7 +143,7 @@ From `torsten-serialization/src/multi_era.rs`:
 - `MultiEraSigners`
 - `Era as PallasEra` — era detection
 
-From `torsten-network/src/pipelined.rs`:
+From `dugite-network/src/pipelined.rs`:
 - `MultiEraHeader` — for decoding block headers during pipelined chainsync
 
 ## Notes

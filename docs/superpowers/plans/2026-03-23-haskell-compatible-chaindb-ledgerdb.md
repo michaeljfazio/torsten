@@ -2,17 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace Torsten's ad-hoc fork handling with a proper Haskell-compatible storage architecture: VolatileDB for recent blocks (all forks), ImmutableDB for confirmed blocks, LedgerDB with last-k ledger states for O(1) rollback, chain selection via anchored fragment comparison, and background copy-to-immutable + GC threads.
+**Goal:** Replace Dugite's ad-hoc fork handling with a proper Haskell-compatible storage architecture: VolatileDB for recent blocks (all forks), ImmutableDB for confirmed blocks, LedgerDB with last-k ledger states for O(1) rollback, chain selection via anchored fragment comparison, and background copy-to-immutable + GC threads.
 
 **Architecture:** Follows ouroboros-consensus ChainDB exactly: blocks enter a ChainSelQueue and are processed sequentially by a single background thread (addBlockRunner). Each block is written to VolatileDB first, then chain selection runs to determine if the current chain should switch. The LedgerDB maintains an AnchoredSeq of the last k+1 ledger states so rollback is always O(k) with no snapshot loading or genesis replay. The immutable tip advances when a block is k-deep on the selected chain.
 
-**Tech Stack:** Rust, tokio, bincode/serde, torsten-storage, torsten-ledger, torsten-consensus
+**Tech Stack:** Rust, tokio, bincode/serde, dugite-storage, dugite-ledger, dugite-consensus
 
 **Sources (corroborated):**
 - **Haskell Source**: ouroboros-consensus `ChainDB/Impl/ChainSel.hs`, `LedgerDB/V2/LedgerSeq.hs`, `Background.hs`, `NodeKernel.hs`
 - **Technical Report**: "The Cardano Consensus and Storage Layer" (de Vries, Winant, Coutts) — TR §chaindb, §chainsel, §storage:components
 - **Cardano Blueprint**: `src/storage/README.md`, `src/consensus/chainsel.md`
-- **Torsten Audit**: Architect agent audit 2026-03-23 (5 identified problems)
+- **Dugite Audit**: Architect agent audit 2026-03-23 (5 identified problems)
 
 ---
 
@@ -50,10 +50,10 @@ These MUST be maintained at all times:
 
 ### File Structure
 
-- Create: `crates/torsten-ledger/src/ledger_seq.rs`
-- Modify: `crates/torsten-ledger/src/state/mod.rs` (add LedgerSeq integration)
-- Modify: `crates/torsten-ledger/src/lib.rs` (pub mod ledger_seq)
-- Test: `crates/torsten-ledger/tests/ledger_seq_tests.rs`
+- Create: `crates/dugite-ledger/src/ledger_seq.rs`
+- Modify: `crates/dugite-ledger/src/state/mod.rs` (add LedgerSeq integration)
+- Modify: `crates/dugite-ledger/src/lib.rs` (pub mod ledger_seq)
+- Test: `crates/dugite-ledger/tests/ledger_seq_tests.rs`
 
 ### Data Structure
 
@@ -177,10 +177,10 @@ impl LedgerSeq {
 
 ### File Structure
 
-- Create: `crates/torsten-consensus/src/chain_fragment.rs` (pure data structure, no I/O — lives in consensus to avoid circular deps)
-- Modify: `crates/torsten-consensus/src/lib.rs` (pub mod chain_fragment)
-- Modify: `crates/torsten-storage/src/volatile_db.rs` (replace selected_chain)
-- Test: `crates/torsten-consensus/tests/chain_fragment_tests.rs`
+- Create: `crates/dugite-consensus/src/chain_fragment.rs` (pure data structure, no I/O — lives in consensus to avoid circular deps)
+- Modify: `crates/dugite-consensus/src/lib.rs` (pub mod chain_fragment)
+- Modify: `crates/dugite-storage/src/volatile_db.rs` (replace selected_chain)
+- Test: `crates/dugite-consensus/tests/chain_fragment_tests.rs`
 
 ### Data Structure
 
@@ -239,9 +239,9 @@ impl ChainFragment {
 
 ### File Structure
 
-- Create: `crates/torsten-consensus/src/chain_selection.rs`
-- Modify: `crates/torsten-consensus/src/lib.rs`
-- Test: `crates/torsten-consensus/tests/chain_selection_tests.rs`
+- Create: `crates/dugite-consensus/src/chain_selection.rs`
+- Modify: `crates/dugite-consensus/src/lib.rs`
+- Test: `crates/dugite-consensus/tests/chain_selection_tests.rs`
 
 ### Algorithm (from TR §chainsel:addblock)
 
@@ -276,11 +276,11 @@ When block B arrives:
 
 ### File Structure
 
-- Create: `crates/torsten-storage/src/chain_sel_queue.rs`
-- Modify: `crates/torsten-node/src/node/mod.rs` (new block flow)
-- Modify: `crates/torsten-node/src/node/sync.rs` (submit to queue instead of direct apply)
-- Modify: `crates/torsten-node/src/forge.rs` (submit to queue instead of direct apply)
-- Test: `crates/torsten-storage/tests/chain_sel_queue_tests.rs`
+- Create: `crates/dugite-storage/src/chain_sel_queue.rs`
+- Modify: `crates/dugite-node/src/node/mod.rs` (new block flow)
+- Modify: `crates/dugite-node/src/node/sync.rs` (submit to queue instead of direct apply)
+- Modify: `crates/dugite-node/src/forge.rs` (submit to queue instead of direct apply)
+- Test: `crates/dugite-storage/tests/chain_sel_queue_tests.rs`
 
 ### Architecture
 

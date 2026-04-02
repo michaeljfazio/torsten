@@ -242,10 +242,10 @@ Same response type as GetStakeDistribution2 (`SL.PoolDistr`) but filtered:
 | CompactGenesis encoding | — | — | — | — | CHANGED | — | — |
 | GetDRepDelegations (39) | — | — | — | — | — | — | Added |
 
-## Rust/Torsten Implementation Notes
+## Rust/Dugite Implementation Notes
 
 ### Version Negotiation
-Torsten currently supports V16-V17. To add V21 support:
+Dugite currently supports V16-V17. To add V21 support:
 1. Add `NodeToClientV_21` to the negotiation set
 2. Gate `GetPoolDistr2`, `GetStakeDistribution2`, `GetMaxMajorProtocolVersion` on V21+
 3. Switch PParams encoding based on negotiated version

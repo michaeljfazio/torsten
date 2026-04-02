@@ -3,7 +3,7 @@
 //! Reads blocks from immutable chunk files at `/tmp/db-preview-nonce-test/immutable/`,
 //! computes the evolving nonce and epoch nonce independently using pallas's
 //! `generate_rolling_nonce` and `generate_epoch_nonce`, and compares them with
-//! torsten's own nonce computation.
+//! dugite's own nonce computation.
 //!
 //! Preview testnet parameters:
 //!   - epoch_length = 86400 slots
@@ -90,10 +90,10 @@ struct BlockNonceInfo {
     ///   - ShelleyCompatible (Alonzo): raw 64-byte nonce_vrf.0
     ///   - BabbageCompatible (Babbage/Conway): 32-byte blake2b("N" || vrf_result.0)
     pallas_nonce_vrf_output: Option<Vec<u8>>,
-    /// Torsten's pre-computed nonce eta (from torsten-serialization decode):
+    /// Dugite's pre-computed nonce eta (from dugite-serialization decode):
     ///   - Alonzo: blake2b(nonce_vrf.0) = 32 bytes
     ///   - Babbage/Conway: blake2b("N" || vrf_result.0) = 32 bytes
-    torsten_nonce_vrf_output: Vec<u8>,
+    dugite_nonce_vrf_output: Vec<u8>,
 }
 
 /// Iterate blocks from chunk files, calling the callback for each block.
@@ -176,12 +176,12 @@ where
             // Extract pallas nonce VRF output (raw, for pallas generate_rolling_nonce)
             let pallas_nonce_vrf_output = header.nonce_vrf_output().ok();
 
-            // Decode with torsten-serialization to get torsten's pre-computed nonce eta
-            let torsten_block =
-                torsten_serialization::multi_era::decode_block_with_byron_epoch_length(
+            // Decode with dugite-serialization to get dugite's pre-computed nonce eta
+            let dugite_block =
+                dugite_serialization::multi_era::decode_block_with_byron_epoch_length(
                     block_cbor, 0, // preview has no Byron era
                 );
-            let torsten_nonce_vrf_output = match torsten_block {
+            let dugite_nonce_vrf_output = match dugite_block {
                 Ok(ref b) => b.header.nonce_vrf_output.clone(),
                 Err(_) => Vec::new(),
             };
@@ -192,7 +192,7 @@ where
                 era,
                 prev_hash,
                 pallas_nonce_vrf_output,
-                torsten_nonce_vrf_output,
+                dugite_nonce_vrf_output,
             });
 
             if flow.is_break() {
@@ -297,8 +297,8 @@ impl PallasNonceTracker {
     }
 }
 
-/// Torsten-style nonce computation (mirrors LedgerState::update_evolving_nonce).
-struct TorstenNonceTracker {
+/// Dugite-style nonce computation (mirrors LedgerState::update_evolving_nonce).
+struct DugiteNonceTracker {
     evolving_nonce: [u8; 32],
     candidate_nonce: [u8; 32],
     lab_nonce: [u8; 32],
@@ -309,7 +309,7 @@ struct TorstenNonceTracker {
     stability_window: u64,
 }
 
-impl TorstenNonceTracker {
+impl DugiteNonceTracker {
     fn new(genesis_hash: [u8; 32], stability_window: u64) -> Self {
         Self {
             evolving_nonce: genesis_hash,
@@ -329,11 +329,11 @@ impl TorstenNonceTracker {
             self.process_epoch_transition(block_epoch);
         }
 
-        if !info.torsten_nonce_vrf_output.is_empty() {
-            // Mirrors torsten LedgerState::update_evolving_nonce:
+        if !info.dugite_nonce_vrf_output.is_empty() {
+            // Mirrors dugite LedgerState::update_evolving_nonce:
             // eta_hash = blake2b_256(nonce_eta) -- always hashes input
             // evolving = blake2b_256(evolving || eta_hash)
-            let eta_hash = blake2b_256(&info.torsten_nonce_vrf_output);
+            let eta_hash = blake2b_256(&info.dugite_nonce_vrf_output);
             let mut data = Vec::with_capacity(64);
             data.extend_from_slice(&self.evolving_nonce);
             data.extend_from_slice(&eta_hash);
@@ -360,7 +360,7 @@ impl TorstenNonceTracker {
         self.epoch_block_count = 0;
     }
 
-    /// Compute epoch nonce the same way torsten does (Haskell ⭒ combine).
+    /// Compute epoch nonce the same way dugite does (Haskell ⭒ combine).
     fn compute_epoch_nonce(&self) -> [u8; 32] {
         let zero = [0u8; 32];
         if self.candidate_nonce == zero && self.last_epoch_block_nonce == zero {
@@ -379,7 +379,7 @@ impl TorstenNonceTracker {
     }
 }
 
-/// Blake2b-256 hash helper (pure Rust, matching torsten-primitives).
+/// Blake2b-256 hash helper (pure Rust, matching dugite-primitives).
 fn blake2b_256(data: &[u8]) -> [u8; 32] {
     let hash: PallasHash<32> = Hasher::<256>::hash(data);
     let mut out = [0u8; 32];
@@ -411,15 +411,15 @@ fn test_epoch_nonce_preview_first_2_epochs() {
     // Three independent trackers:
     // 1. Pallas-only (using generate_rolling_nonce with raw pallas header data)
     let mut pallas_tracker = PallasNonceTracker::new(genesis_hash);
-    // 2. Torsten-style with 3k/f window
-    let mut torsten_tracker_3kf = TorstenNonceTracker::new(genesis_arr, STABILITY_WINDOW_3KF);
-    // 3. Torsten-style with 4k/f window
-    let mut torsten_tracker_4kf = TorstenNonceTracker::new(genesis_arr, STABILITY_WINDOW_4KF);
+    // 2. Dugite-style with 3k/f window
+    let mut dugite_tracker_3kf = DugiteNonceTracker::new(genesis_arr, STABILITY_WINDOW_3KF);
+    // 3. Dugite-style with 4k/f window
+    let mut dugite_tracker_4kf = DugiteNonceTracker::new(genesis_arr, STABILITY_WINDOW_4KF);
 
     let mut total_blocks = 0u64;
     let mut last_epoch_seen = 0u64;
 
-    // Epoch nonce results: (epoch, pallas_3kf, pallas_4kf, torsten_3kf, torsten_4kf)
+    // Epoch nonce results: (epoch, pallas_3kf, pallas_4kf, dugite_3kf, dugite_4kf)
     let mut epoch_nonces: Vec<(u64, String, String, String, String)> = Vec::new();
 
     // Track the first block era to log
@@ -447,16 +447,10 @@ fn test_epoch_nonce_preview_first_2_epochs() {
         if block_epoch > last_epoch_seen && last_epoch_seen < NUM_EPOCHS {
             let pallas_3kf = hex::encode(pallas_tracker.compute_epoch_nonce_3kf().as_ref());
             let pallas_4kf = hex::encode(pallas_tracker.compute_epoch_nonce_4kf().as_ref());
-            let torsten_3kf = hex::encode(torsten_tracker_3kf.compute_epoch_nonce());
-            let torsten_4kf = hex::encode(torsten_tracker_4kf.compute_epoch_nonce());
+            let dugite_3kf = hex::encode(dugite_tracker_3kf.compute_epoch_nonce());
+            let dugite_4kf = hex::encode(dugite_tracker_4kf.compute_epoch_nonce());
 
-            epoch_nonces.push((
-                block_epoch,
-                pallas_3kf,
-                pallas_4kf,
-                torsten_3kf,
-                torsten_4kf,
-            ));
+            epoch_nonces.push((block_epoch, pallas_3kf, pallas_4kf, dugite_3kf, dugite_4kf));
 
             eprintln!(
                 "\n=== Epoch transition to epoch {} (first block: slot {}, block #{}) ===",
@@ -483,12 +477,12 @@ fn test_epoch_nonce_preview_first_2_epochs() {
                 hex::encode(pallas_tracker.last_epoch_block_nonce.as_ref())
             );
             eprintln!(
-                "  Torsten evolving (3kf): {}",
-                hex::encode(torsten_tracker_3kf.evolving_nonce)
+                "  Dugite evolving (3kf): {}",
+                hex::encode(dugite_tracker_3kf.evolving_nonce)
             );
             eprintln!(
-                "  Torsten evolving (4kf): {}",
-                hex::encode(torsten_tracker_4kf.evolving_nonce)
+                "  Dugite evolving (4kf): {}",
+                hex::encode(dugite_tracker_4kf.evolving_nonce)
             );
 
             last_epoch_seen = block_epoch;
@@ -498,7 +492,7 @@ fn test_epoch_nonce_preview_first_2_epochs() {
         let epoch_block_approx = pallas_tracker.epoch_block_count;
         if epoch_block_approx < 3 {
             eprintln!(
-                "  Block slot={} epoch={} era={:?} nonce_vrf_len={} torsten_nonce_len={}",
+                "  Block slot={} epoch={} era={:?} nonce_vrf_len={} dugite_nonce_len={}",
                 info.slot,
                 block_epoch,
                 info.era,
@@ -506,14 +500,14 @@ fn test_epoch_nonce_preview_first_2_epochs() {
                     .as_ref()
                     .map(|v| v.len())
                     .unwrap_or(0),
-                info.torsten_nonce_vrf_output.len(),
+                info.dugite_nonce_vrf_output.len(),
             );
         }
 
         // Apply block to all trackers
         pallas_tracker.apply_block(&info);
-        torsten_tracker_3kf.apply_block(&info);
-        torsten_tracker_4kf.apply_block(&info);
+        dugite_tracker_3kf.apply_block(&info);
+        dugite_tracker_4kf.apply_block(&info);
 
         total_blocks += 1;
         ControlFlow::Continue(())
@@ -527,19 +521,19 @@ fn test_epoch_nonce_preview_first_2_epochs() {
     eprintln!("EPOCH NONCE COMPARISON:");
     eprintln!("{:-<100}", "");
 
-    for (epoch, pallas_3kf, pallas_4kf, torsten_3kf, torsten_4kf) in &epoch_nonces {
+    for (epoch, pallas_3kf, pallas_4kf, dugite_3kf, dugite_4kf) in &epoch_nonces {
         eprintln!("Epoch {epoch}:");
         eprintln!("  Pallas epoch nonce (3k/f):  {pallas_3kf}");
         eprintln!("  Pallas epoch nonce (4k/f):  {pallas_4kf}");
-        eprintln!("  Torsten epoch nonce (3k/f): {torsten_3kf}");
-        eprintln!("  Torsten epoch nonce (4k/f): {torsten_4kf}");
+        eprintln!("  Dugite epoch nonce (3k/f): {dugite_3kf}");
+        eprintln!("  Dugite epoch nonce (4k/f): {dugite_4kf}");
 
-        let p3_vs_t3 = if pallas_3kf == torsten_3kf {
+        let p3_vs_t3 = if pallas_3kf == dugite_3kf {
             "MATCH"
         } else {
             "MISMATCH"
         };
-        let p4_vs_t4 = if pallas_4kf == torsten_4kf {
+        let p4_vs_t4 = if pallas_4kf == dugite_4kf {
             "MATCH"
         } else {
             "MISMATCH"
@@ -549,8 +543,8 @@ fn test_epoch_nonce_preview_first_2_epochs() {
         } else {
             "DIFFERENT"
         };
-        eprintln!("  Pallas(3kf) vs Torsten(3kf): {p3_vs_t3}");
-        eprintln!("  Pallas(4kf) vs Torsten(4kf): {p4_vs_t4}");
+        eprintln!("  Pallas(3kf) vs Dugite(3kf): {p3_vs_t3}");
+        eprintln!("  Pallas(4kf) vs Dugite(4kf): {p4_vs_t4}");
         eprintln!("  Pallas(3kf) vs Pallas(4kf):  {p3_vs_p4}");
         eprintln!();
     }
@@ -559,7 +553,7 @@ fn test_epoch_nonce_preview_first_2_epochs() {
     eprintln!("\nPER-BLOCK EVOLVING NONCE COMPARISON (first 10 blocks):");
     let genesis_hash2 = PallasHash::<32>::from(genesis_hash_bytes.as_slice());
     let mut pallas_evolving = genesis_hash2;
-    let mut torsten_evolving_bytes = genesis_arr;
+    let mut dugite_evolving_bytes = genesis_arr;
     let mut block_count = 0u64;
 
     iterate_blocks(immutable_dir, |info| {
@@ -572,14 +566,14 @@ fn test_epoch_nonce_preview_first_2_epochs() {
                 // Pallas rolling nonce
                 let pallas_new = generate_rolling_nonce(pallas_evolving, nonce_vrf);
 
-                // Torsten rolling nonce (same as update_evolving_nonce)
-                let eta_hash = blake2b_256(&info.torsten_nonce_vrf_output);
+                // Dugite rolling nonce (same as update_evolving_nonce)
+                let eta_hash = blake2b_256(&info.dugite_nonce_vrf_output);
                 let mut data = Vec::with_capacity(64);
-                data.extend_from_slice(&torsten_evolving_bytes);
+                data.extend_from_slice(&dugite_evolving_bytes);
                 data.extend_from_slice(&eta_hash);
-                let torsten_new = blake2b_256(&data);
+                let dugite_new = blake2b_256(&data);
 
-                let match_status = if pallas_new.as_ref() == &torsten_new[..] {
+                let match_status = if pallas_new.as_ref() == &dugite_new[..] {
                     "MATCH"
                 } else {
                     "MISMATCH"
@@ -590,38 +584,38 @@ fn test_epoch_nonce_preview_first_2_epochs() {
                     info.block_number, info.slot, info.era, match_status
                 );
                 eprintln!(
-                    "    pallas_nonce_vrf_len={}, torsten_nonce_vrf_len={}",
+                    "    pallas_nonce_vrf_len={}, dugite_nonce_vrf_len={}",
                     nonce_vrf.len(),
-                    info.torsten_nonce_vrf_output.len()
+                    info.dugite_nonce_vrf_output.len()
                 );
                 eprintln!("    pallas  evolving: {}", hex::encode(pallas_new.as_ref()));
-                eprintln!("    torsten evolving: {}", hex::encode(torsten_new));
+                eprintln!("    dugite evolving: {}", hex::encode(dugite_new));
 
-                if pallas_new.as_ref() != &torsten_new[..] {
+                if pallas_new.as_ref() != &dugite_new[..] {
                     // Show the intermediate hash values for debugging
                     let pallas_inner_hash = Hasher::<256>::hash(nonce_vrf);
-                    let torsten_inner_hash_input = &info.torsten_nonce_vrf_output;
-                    let torsten_inner_hash = blake2b_256(torsten_inner_hash_input);
+                    let dugite_inner_hash_input = &info.dugite_nonce_vrf_output;
+                    let dugite_inner_hash = blake2b_256(dugite_inner_hash_input);
                     eprintln!(
                         "    pallas inner hash (blake2b of raw nonce_vrf): {}",
                         hex::encode(pallas_inner_hash.as_ref())
                     );
                     eprintln!(
-                        "    torsten inner hash (blake2b of pre-hashed):   {}",
-                        hex::encode(torsten_inner_hash)
+                        "    dugite inner hash (blake2b of pre-hashed):   {}",
+                        hex::encode(dugite_inner_hash)
                     );
                     eprintln!(
                         "    pallas raw nonce_vrf (first 32 bytes): {}",
                         hex::encode(&nonce_vrf[..std::cmp::min(32, nonce_vrf.len())])
                     );
                     eprintln!(
-                        "    torsten pre-hashed nonce_eta:          {}",
-                        hex::encode(torsten_inner_hash_input)
+                        "    dugite pre-hashed nonce_eta:          {}",
+                        hex::encode(dugite_inner_hash_input)
                     );
                 }
 
                 pallas_evolving = pallas_new;
-                torsten_evolving_bytes = torsten_new;
+                dugite_evolving_bytes = dugite_new;
                 block_count += 1;
             }
         }
@@ -645,15 +639,15 @@ fn test_epoch_nonce_preview_first_2_epochs() {
 
     // Final summary
     eprintln!("\n=== FINAL SUMMARY ===");
-    for (epoch, pallas_3kf, pallas_4kf, torsten_3kf, torsten_4kf) in &epoch_nonces {
+    for (epoch, pallas_3kf, pallas_4kf, dugite_3kf, dugite_4kf) in &epoch_nonces {
         eprintln!("Epoch {epoch}:");
         eprintln!("  Pallas epoch nonce (3k/f):  {pallas_3kf}");
         eprintln!("  Pallas epoch nonce (4k/f):  {pallas_4kf}");
-        eprintln!("  Torsten epoch nonce (3k/f): {torsten_3kf}");
-        eprintln!("  Torsten epoch nonce (4k/f): {torsten_4kf}");
+        eprintln!("  Dugite epoch nonce (3k/f): {dugite_3kf}");
+        eprintln!("  Dugite epoch nonce (4k/f): {dugite_4kf}");
 
-        if pallas_3kf != torsten_3kf {
-            eprintln!("  ** Pallas(3kf) != Torsten(3kf) -- evolving nonce divergence detected");
+        if pallas_3kf != dugite_3kf {
+            eprintln!("  ** Pallas(3kf) != Dugite(3kf) -- evolving nonce divergence detected");
         }
     }
 }

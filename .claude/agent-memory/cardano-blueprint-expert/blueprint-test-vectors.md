@@ -108,7 +108,7 @@ c3 58 1e ...  = tag(3) bytes(30)    timeOfDayPico (negative bignum, 30 bytes)
 
 ### CRITICAL: UTCTime Encoding Mismatch
 
-**torsten's current encoding** (encode_system_start in state_query.rs):
+**dugite's current encoding** (encode_system_start in state_query.rs):
 - Produces: `8204831907e6185b00` for 2022-04-01T00:00:00Z
 - = `[4, [2022, 91, 0]]` — plain u64 integers
 
@@ -117,7 +117,7 @@ c3 58 1e ...  = tag(3) bytes(30)    timeOfDayPico (negative bignum, 30 bytes)
 - Values are NOT calendar year/day/pico — they are Haskell internal UTCTime representation
 - The Blueprint CDDL (`year = bigint, dayOfYear = int, timeOfDayPico = bigint`) documents this
 
-**This is a known conformance gap** — torsten sends `[year_u64, day_u64, pico_u64]` but cardano-node
+**This is a known conformance gap** — dugite sends `[year_u64, day_u64, pico_u64]` but cardano-node
 sends `[tag(2) bignum, neg_int, tag(3) bignum]`. cardano-cli likely rejects our GetSystemStart
 response. Fix requires implementing Haskell cborg UTCTime encoding.
 

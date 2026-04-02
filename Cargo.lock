@@ -954,6 +954,340 @@ dependencies = [
 ]
 
 [[package]]
+name = "dugite-cli"
+version = "1.0.0-alpha"
+dependencies = [
+ "anyhow",
+ "bech32 0.11.1",
+ "clap",
+ "dugite-consensus",
+ "dugite-crypto",
+ "dugite-network",
+ "dugite-primitives",
+ "dugite-serialization",
+ "hex",
+ "minicbor 0.25.1",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "dugite-config"
+version = "1.0.0-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dugite-conformance"
+version = "1.0.0-alpha"
+dependencies = [
+ "dugite-crypto",
+ "dugite-ledger",
+ "dugite-primitives",
+ "dugite-serialization",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dugite-consensus"
+version = "1.0.0-alpha"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dugite-crypto",
+ "dugite-primitives",
+ "dugite-serialization",
+ "futures",
+ "minicbor 0.25.1",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "proptest",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dugite-crypto"
+version = "1.0.0-alpha"
+dependencies = [
+ "criterion",
+ "curve25519-dalek 3.2.0 (git+https://github.com/iquerejeta/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
+ "dashu-base",
+ "dashu-int",
+ "dugite-primitives",
+ "ed25519-dalek",
+ "hex",
+ "minicbor 0.25.1",
+ "pallas-crypto 1.0.0-alpha.6",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "vrf_dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "dugite-golden-tests"
+version = "1.0.0-alpha"
+dependencies = [
+ "dugite-crypto",
+ "dugite-network",
+ "dugite-primitives",
+ "dugite-serialization",
+ "hex",
+ "memmap2",
+ "minicbor 0.25.1",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-primitives 1.0.0-alpha.6",
+ "pallas-traverse 1.0.0-alpha.6",
+]
+
+[[package]]
+name = "dugite-integration-tests"
+version = "1.0.0-alpha"
+dependencies = [
+ "anyhow",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dugite-ledger"
+version = "1.0.0-alpha"
+dependencies = [
+ "bincode 1.3.3",
+ "criterion",
+ "dugite-crypto",
+ "dugite-lsm",
+ "dugite-primitives",
+ "dugite-serialization",
+ "minicbor 0.25.1",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "parking_lot",
+ "proptest",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "uplc",
+]
+
+[[package]]
+name = "dugite-lsm"
+version = "1.0.0-alpha"
+dependencies = [
+ "byteorder",
+ "crc32fast",
+ "criterion",
+ "fs2",
+ "parking_lot",
+ "proptest",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dugite-mempool"
+version = "1.0.0-alpha"
+dependencies = [
+ "criterion",
+ "dashmap",
+ "dugite-crypto",
+ "dugite-ledger",
+ "dugite-primitives",
+ "parking_lot",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dugite-monitor"
+version = "1.0.0-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "libc",
+ "ratatui",
+ "reqwest",
+ "tokio",
+]
+
+[[package]]
+name = "dugite-network"
+version = "1.0.0-alpha"
+dependencies = [
+ "async-trait",
+ "byteorder",
+ "bytes",
+ "dugite-crypto",
+ "dugite-primitives",
+ "dugite-serialization",
+ "futures",
+ "hex",
+ "hickory-resolver",
+ "minicbor 0.25.1",
+ "num-bigint",
+ "parking_lot",
+ "proptest",
+ "rand 0.8.5",
+ "socket2 0.5.10",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "dugite-node"
+version = "1.0.0-alpha"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bech32 0.11.1",
+ "bs58",
+ "chrono",
+ "clap",
+ "crc32fast",
+ "dugite-consensus",
+ "dugite-crypto",
+ "dugite-ledger",
+ "dugite-mempool",
+ "dugite-network",
+ "dugite-primitives",
+ "dugite-serialization",
+ "dugite-storage",
+ "fs2",
+ "futures",
+ "futures-util",
+ "hex",
+ "indicatif",
+ "libc",
+ "memmap2",
+ "minicbor 0.25.1",
+ "mithril-client",
+ "num-bigint",
+ "pallas-addresses 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-traverse 1.0.0-alpha.6",
+ "rand 0.8.5",
+ "rayon",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-journald",
+ "tracing-subscriber",
+ "zstd",
+]
+
+[[package]]
+name = "dugite-primitives"
+version = "1.0.0-alpha"
+dependencies = [
+ "bech32 0.11.1",
+ "blake2 0.10.6",
+ "blake2b_simd",
+ "bytes",
+ "chrono",
+ "criterion",
+ "derive_more",
+ "hex",
+ "minicbor 0.25.1",
+ "num-bigint",
+ "num-rational",
+ "num-traits",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dugite-serialization"
+version = "1.0.0-alpha"
+dependencies = [
+ "bincode 1.3.3",
+ "bytes",
+ "criterion",
+ "dugite-primitives",
+ "hex",
+ "minicbor 0.25.1",
+ "pallas-addresses 1.0.0-alpha.6",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-primitives 1.0.0-alpha.6",
+ "pallas-traverse 1.0.0-alpha.6",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "dugite-storage"
+version = "1.0.0-alpha"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "criterion",
+ "dugite-crypto",
+ "dugite-primitives",
+ "dugite-serialization",
+ "io-uring",
+ "memmap2",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4032,340 +4366,6 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
-
-[[package]]
-name = "torsten-cli"
-version = "1.0.0-alpha"
-dependencies = [
- "anyhow",
- "bech32 0.11.1",
- "clap",
- "hex",
- "minicbor 0.25.1",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "torsten-consensus",
- "torsten-crypto",
- "torsten-network",
- "torsten-primitives",
- "torsten-serialization",
-]
-
-[[package]]
-name = "torsten-config"
-version = "1.0.0-alpha"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "ratatui",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "torsten-conformance"
-version = "1.0.0-alpha"
-dependencies = [
- "hex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "torsten-crypto",
- "torsten-ledger",
- "torsten-primitives",
- "torsten-serialization",
-]
-
-[[package]]
-name = "torsten-consensus"
-version = "1.0.0-alpha"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "minicbor 0.25.1",
- "num-bigint",
- "num-rational",
- "num-traits",
- "proptest",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "torsten-crypto",
- "torsten-primitives",
- "torsten-serialization",
- "tracing",
-]
-
-[[package]]
-name = "torsten-crypto"
-version = "1.0.0-alpha"
-dependencies = [
- "criterion",
- "curve25519-dalek 3.2.0 (git+https://github.com/iquerejeta/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
- "dashu-base",
- "dashu-int",
- "ed25519-dalek",
- "hex",
- "minicbor 0.25.1",
- "pallas-crypto 1.0.0-alpha.6",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "torsten-primitives",
- "vrf_dalek",
- "zeroize",
-]
-
-[[package]]
-name = "torsten-golden-tests"
-version = "1.0.0-alpha"
-dependencies = [
- "hex",
- "memmap2",
- "minicbor 0.25.1",
- "pallas-crypto 1.0.0-alpha.6",
- "pallas-primitives 1.0.0-alpha.6",
- "pallas-traverse 1.0.0-alpha.6",
- "torsten-crypto",
- "torsten-network",
- "torsten-primitives",
- "torsten-serialization",
-]
-
-[[package]]
-name = "torsten-integration-tests"
-version = "1.0.0-alpha"
-dependencies = [
- "anyhow",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "torsten-ledger"
-version = "1.0.0-alpha"
-dependencies = [
- "bincode 1.3.3",
- "criterion",
- "minicbor 0.25.1",
- "num-bigint",
- "num-rational",
- "num-traits",
- "parking_lot",
- "proptest",
- "rayon",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "torsten-crypto",
- "torsten-lsm",
- "torsten-primitives",
- "torsten-serialization",
- "tracing",
- "uplc",
-]
-
-[[package]]
-name = "torsten-lsm"
-version = "1.0.0-alpha"
-dependencies = [
- "byteorder",
- "crc32fast",
- "criterion",
- "fs2",
- "parking_lot",
- "proptest",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "torsten-mempool"
-version = "1.0.0-alpha"
-dependencies = [
- "criterion",
- "dashmap",
- "parking_lot",
- "thiserror 2.0.18",
- "tokio",
- "torsten-crypto",
- "torsten-ledger",
- "torsten-primitives",
- "tracing",
-]
-
-[[package]]
-name = "torsten-monitor"
-version = "1.0.0-alpha"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "libc",
- "ratatui",
- "reqwest",
- "tokio",
-]
-
-[[package]]
-name = "torsten-network"
-version = "1.0.0-alpha"
-dependencies = [
- "async-trait",
- "byteorder",
- "bytes",
- "futures",
- "hex",
- "hickory-resolver",
- "minicbor 0.25.1",
- "num-bigint",
- "parking_lot",
- "proptest",
- "rand 0.8.5",
- "socket2 0.5.10",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "torsten-crypto",
- "torsten-primitives",
- "torsten-serialization",
- "tracing",
-]
-
-[[package]]
-name = "torsten-node"
-version = "1.0.0-alpha"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "bech32 0.11.1",
- "bs58",
- "chrono",
- "clap",
- "crc32fast",
- "fs2",
- "futures",
- "futures-util",
- "hex",
- "indicatif",
- "libc",
- "memmap2",
- "minicbor 0.25.1",
- "mithril-client",
- "num-bigint",
- "pallas-addresses 1.0.0-alpha.6",
- "pallas-crypto 1.0.0-alpha.6",
- "pallas-traverse 1.0.0-alpha.6",
- "rand 0.8.5",
- "rayon",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "toml",
- "torsten-consensus",
- "torsten-crypto",
- "torsten-ledger",
- "torsten-mempool",
- "torsten-network",
- "torsten-primitives",
- "torsten-serialization",
- "torsten-storage",
- "tracing",
- "tracing-appender",
- "tracing-journald",
- "tracing-subscriber",
- "zstd",
-]
-
-[[package]]
-name = "torsten-primitives"
-version = "1.0.0-alpha"
-dependencies = [
- "bech32 0.11.1",
- "blake2 0.10.6",
- "blake2b_simd",
- "bytes",
- "chrono",
- "criterion",
- "derive_more",
- "hex",
- "minicbor 0.25.1",
- "num-bigint",
- "num-rational",
- "num-traits",
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "torsten-serialization"
-version = "1.0.0-alpha"
-dependencies = [
- "bincode 1.3.3",
- "bytes",
- "criterion",
- "hex",
- "minicbor 0.25.1",
- "pallas-addresses 1.0.0-alpha.6",
- "pallas-codec 1.0.0-alpha.6",
- "pallas-crypto 1.0.0-alpha.6",
- "pallas-primitives 1.0.0-alpha.6",
- "pallas-traverse 1.0.0-alpha.6",
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "torsten-primitives",
- "tracing",
-]
-
-[[package]]
-name = "torsten-storage"
-version = "1.0.0-alpha"
-dependencies = [
- "bytes",
- "crc32fast",
- "criterion",
- "io-uring",
- "memmap2",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "torsten-crypto",
- "torsten-primitives",
- "torsten-serialization",
- "tracing",
-]
 
 [[package]]
 name = "tower"

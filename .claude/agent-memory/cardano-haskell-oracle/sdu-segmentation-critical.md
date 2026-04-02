@@ -1,5 +1,5 @@
 ---
-name: SDU Segmentation Size — Haskell vs Torsten
+name: SDU Segmentation Size — Haskell vs Dugite
 description: Critical: SDUSize value IS the split point; no -8 adjustment; Haskell uses splitAt(sduSize), NOT splitAt(sduSize-8)
 type: reference
 ---
@@ -93,16 +93,16 @@ The receiver:
 
 The Haskell mux accepts ANY `mhLength` value in the received header, up to 65535 (u16 max).
 
-## Critical Implication for Torsten
+## Critical Implication for Dugite
 
-**Torsten's current bug**: The mux is reading the `payload_length` field from the header but may not be splitting correctly.
+**Dugite's current bug**: The mux is reading the `payload_length` field from the header but may not be splitting correctly.
 
-If Haskell sends payload_length = 12_288, Torsten MUST:
+If Haskell sends payload_length = 12_288, Dugite MUST:
 1. Accept it (no validation against SDUSize).
 2. Read exactly 12_288 bytes of payload.
 3. Strip the 8-byte header and deliver just the payload to the protocol handler.
 
-**Torsten changed from 12_288 to 12_280 payload but error changed** from "expected word" to "expected list len or indef". This suggests:
+**Dugite changed from 12_288 to 12_280 payload but error changed** from "expected word" to "expected list len or indef". This suggests:
 - The size change was NOT the issue.
 - The real problem is in how the split/chunking is being done or how protocol messages are being reconstructed.
 

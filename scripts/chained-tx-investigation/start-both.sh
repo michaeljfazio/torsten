@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Start Torsten and Haskell cardano-node side by side on preview testnet.
+# Start Dugite and Haskell cardano-node side by side on preview testnet.
 #
-# Torsten:  port 3001, prometheus 12798, socket ./node.sock
+# Dugite:  port 3001, prometheus 12798, socket ./node.sock
 # Haskell:  port 3002, prometheus 12799, socket ./haskell-node.sock
 #
 # Both nodes peer with each other AND with the IOG bootstrap peer.
-# Logs go to /tmp/torsten-investigation.log and /tmp/haskell-investigation.log
+# Logs go to /tmp/dugite-investigation.log and /tmp/haskell-investigation.log
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 INVESTIGATION_DIR="scripts/chained-tx-investigation"
-BIN=./target/release/torsten-node
+BIN=./target/release/dugite-node
 KEY_DIR=./keys/preview-test/pool
 
 # --- Preflight checks ---
 if [[ ! -x "$BIN" ]]; then
-    echo "Building torsten-node..."
+    echo "Building dugite-node..."
     cargo build --release
 fi
 
@@ -34,19 +34,19 @@ done
 
 # --- Stop any existing instances ---
 echo "Stopping any running instances..."
-pkill -f "torsten-node run" 2>/dev/null || true
+pkill -f "dugite-node run" 2>/dev/null || true
 pkill -f "cardano-node run" 2>/dev/null || true
 sleep 2
 
 # Clean up stale sockets
 rm -f ./node.sock ./haskell-node.sock
 
-# --- Start Torsten (block producer) ---
+# --- Start Dugite (block producer) ---
 echo ""
-echo "=== Starting Torsten (port 3001, metrics 12798) ==="
-RUST_LOG=info,torsten_network=debug "$BIN" run \
+echo "=== Starting Dugite (port 3001, metrics 12798) ==="
+RUST_LOG=info,dugite_network=debug "$BIN" run \
     --config config/preview-config.json \
-    --topology "$INVESTIGATION_DIR/torsten-topology.json" \
+    --topology "$INVESTIGATION_DIR/dugite-topology.json" \
     --database-path ./db-preview \
     --socket-path ./node.sock \
     --host-addr 0.0.0.0 \
@@ -54,10 +54,10 @@ RUST_LOG=info,torsten_network=debug "$BIN" run \
     --shelley-kes-key "$KEY_DIR/kes.skey" \
     --shelley-vrf-key "$KEY_DIR/vrf.skey" \
     --shelley-operational-certificate "$KEY_DIR/opcert.cert" \
-    > /tmp/torsten-investigation.log 2>&1 &
-TORSTEN_PID=$!
-echo "Torsten PID: $TORSTEN_PID"
-echo "Log: /tmp/torsten-investigation.log"
+    > /tmp/dugite-investigation.log 2>&1 &
+DUGITE_PID=$!
+echo "Dugite PID: $DUGITE_PID"
+echo "Log: /tmp/dugite-investigation.log"
 
 # --- Start Haskell node ---
 echo ""
@@ -85,9 +85,9 @@ for i in $(seq 1 60); do
         echo "Both sockets ready after ${i}s"
         break
     fi
-    if ! kill -0 $TORSTEN_PID 2>/dev/null; then
-        echo "ERROR: Torsten died. Check /tmp/torsten-investigation.log"
-        tail -20 /tmp/torsten-investigation.log
+    if ! kill -0 $DUGITE_PID 2>/dev/null; then
+        echo "ERROR: Dugite died. Check /tmp/dugite-investigation.log"
+        tail -20 /tmp/dugite-investigation.log
         exit 1
     fi
     if ! kill -0 $HASKELL_PID 2>/dev/null; then
@@ -101,17 +101,17 @@ done
 echo ""
 echo "=== Both nodes running ==="
 echo ""
-echo "Torsten:   PID=$TORSTEN_PID  socket=./node.sock         log=/tmp/torsten-investigation.log"
+echo "Dugite:   PID=$DUGITE_PID  socket=./node.sock         log=/tmp/dugite-investigation.log"
 echo "Haskell:   PID=$HASKELL_PID  socket=./haskell-node.sock  log=/tmp/haskell-investigation.log"
 echo ""
 echo "Metrics:"
-echo "  Torsten:  http://localhost:12798/metrics"
+echo "  Dugite:  http://localhost:12798/metrics"
 echo "  Haskell:  http://localhost:12799/metrics"
 echo ""
 echo "Watch logs:"
-echo "  tail -f /tmp/torsten-investigation.log | grep -i txsubmission"
+echo "  tail -f /tmp/dugite-investigation.log | grep -i txsubmission"
 echo "  tail -f /tmp/haskell-investigation.log | grep -i txsubmission"
 echo ""
-echo "Stop both:  kill $TORSTEN_PID $HASKELL_PID"
+echo "Stop both:  kill $DUGITE_PID $HASKELL_PID"
 echo ""
-echo "Next: ./scripts/chained-tx-investigation/submit-chained-txs.sh --target torsten --chain-length 10"
+echo "Next: ./scripts/chained-tx-investigation/submit-chained-txs.sh --target dugite --chain-length 10"

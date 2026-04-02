@@ -8,7 +8,7 @@ Three divergences from the Cardano Blueprint were identified and corrected:
 
 ## Fix 1: Reference script fee ceiling vs floor
 
-**File:** `crates/torsten-ledger/src/validation/scripts.rs`
+**File:** `crates/dugite-ledger/src/validation/scripts.rs`
 
 **Bug:** `calculate_ref_script_tiered_fee` used `(acc_num / acc_den) as u64` (floor).
 
@@ -20,7 +20,7 @@ Three divergences from the Cardano Blueprint were identified and corrected:
 
 ## Fix 2: Block-level totalRefScriptSize check
 
-**File:** `crates/torsten-ledger/src/state/apply.rs`
+**File:** `crates/dugite-ledger/src/state/apply.rs`
 
 **Bug:** Missing block-level aggregate ref script size check. Only per-tx fee calculation existed.
 
@@ -35,7 +35,7 @@ Three divergences from the Cardano Blueprint were identified and corrected:
 
 ## Fix 3: Chain selection tiebreaker (Praos)
 
-**File:** `crates/torsten-consensus/src/chain_selection.rs`
+**File:** `crates/dugite-consensus/src/chain_selection.rs`
 
 **Bug:** Equal-length chains used header hash as tiebreaker (not spec-compliant).
 
@@ -50,5 +50,5 @@ Three divergences from the Cardano Blueprint were identified and corrected:
 
 ## Related pre-existing fixes
 
-- `torsten-serialization/src/multi_era.rs`: Fixed `KeepRaw<T>.as_ref()` compile error (uses `Deref` not `AsRef`; fixed to `x` with auto-deref). Also fixed `alonzo::AuxiliaryData` unresolved module (should be `PallasAux`).
-- `crates/torsten-ledger/src/state/tests.rs`: Fixed `test_epoch_nonce_computation` expectation — `update_evolving_nonce` applies `blake2b_256` to the eta input before combining.
+- `dugite-serialization/src/multi_era.rs`: Fixed `KeepRaw<T>.as_ref()` compile error (uses `Deref` not `AsRef`; fixed to `x` with auto-deref). Also fixed `alonzo::AuxiliaryData` unresolved module (should be `PallasAux`).
+- `crates/dugite-ledger/src/state/tests.rs`: Fixed `test_epoch_nonce_computation` expectation — `update_evolving_nonce` applies `blake2b_256` to the eta input before combining.

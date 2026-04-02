@@ -1,25 +1,25 @@
 # Node Validator Agent Memory
 
 ## Key Files
-- Node binary: `./target/release/torsten-node`
-- CLI binary: `./target/release/torsten-cli`
+- Node binary: `./target/release/dugite-node`
+- CLI binary: `./target/release/dugite-cli`
 - Config dir: `./config/` (preview-config.json, preview-topology.json)
-- Preview DB: `/tmp/torsten-db-preview/` — epoch=1238, 2,935,506 UTxOs (run #16)
+- Preview DB: `/tmp/dugite-db-preview/` — epoch=1238, 2,935,506 UTxOs (run #16)
 - Ledger snapshot: `<db>/ledger-snapshot.bin` (~80 MB with LSM backend)
-- Node logs: `/tmp/torsten-vrf-debug.log` (run #16 — VRF nonce fix validation)
+- Node logs: `/tmp/dugite-vrf-debug.log` (run #16 — VRF nonce fix validation)
 
 ## Startup Command Pattern (LSM backend, default)
 ```
-TORSTEN_PIPELINE_DEPTH=150 ./target/release/torsten-node run \
+DUGITE_PIPELINE_DEPTH=150 ./target/release/dugite-node run \
   --config config/preview-config.json \
   --topology config/preview-topology.json \
-  --database-path /tmp/torsten-db-preview \
+  --database-path /tmp/dugite-db-preview \
   --socket-path ./node-lsm-test.sock \
   --host-addr 0.0.0.0 --port 3002 \
   --metrics-port 12798 \
-  > /tmp/torsten-vrf-debug.log 2>&1 &
+  > /tmp/dugite-vrf-debug.log 2>&1 &
 ```
-NOTE: Always `pkill -f torsten-node && rm -f ./node-lsm-test.sock` before restart.
+NOTE: Always `pkill -f dugite-node && rm -f ./node-lsm-test.sock` before restart.
 NOTE: `--utxo-backend in-memory` is NO LONGER required — LSM backend is production-worthy.
 NOTE: Default metrics port is 12798. Use `--metrics-port 12799` only if Haskell node is also running.
 
@@ -58,22 +58,22 @@ Key fixes applied in commit 1a11d0d:
 - Tx hash: `370f8772f8cc63598f5ffd5355704af6633df4123cb84514ec8bbfe6c06c26bb`
 - Error: `ScriptDataHashMismatch { expected: "7482...", actual: "dfe1..." }`
 - Fix: look up reference inputs in utxo_set to detect their script versions
-- File: `crates/torsten-ledger/src/validation/` — compute_script_data_hash
+- File: `crates/dugite-ledger/src/validation/` — compute_script_data_hash
 
 ## CRITICAL BUG #2: CollateralHasTokens Incorrect for Txs with CollateralReturn (OPEN)
 - Tx hash: `95cdd9d9489916be8bc6cd8aa86b34a7a4651bf673f599a4195fd1ddbd1678b4`
 - Fix: only reject when net collateral (total - return) has non-ADA assets
-- File: `crates/torsten-ledger/src/validation/collateral.rs`
+- File: `crates/dugite-ledger/src/validation/collateral.rs`
 
 ## OPEN BUG #3: Plutus script returns Data instead of Unit/Bool (run #14)
 - Script hash: `4faf61d99fe87d6f1c4ae346f804a6b9824808a04047bd846fb1ea5f` (PlutusV2)
 - Error: `Unexpected result: Constant(Data(Array(Indef([BigInt(0)...]))))`
-- File to investigate: `crates/torsten-ledger/src/plutus.rs` — script context construction
+- File to investigate: `crates/dugite-ledger/src/plutus.rs` — script context construction
 
 ## OPEN BUG #4: FeeTooSmall false positive (run #13 mainnet)
 - Tx hash: `9816fcc8efdd80f350a2cca600a268a0e65c2df1b28022f07b99c382112c0fe2`
 - Error: `FeeTooSmall { minimum: 168581, actual: 168537 }` (diff=44 lovelace)
-- File: `crates/torsten-ledger/src/validation.rs` — min_fee calculation (ref script rounding)
+- File: `crates/dugite-ledger/src/validation.rs` — min_fee calculation (ref script rounding)
 
 ## Prometheus Metrics
 - Default port is 12798. `http://localhost:12798/metrics`, `/health`, `/ready`
@@ -91,10 +91,10 @@ Key fixes applied in commit 1a11d0d:
 - OPEN: 10-min sync stall post-crash — pending_blocks buffer starves when first connecting block delayed
 - Soak test: 43 cycles submitted, 35+ confirmed, avg ~25s confirmation time
 
-## Soak Test Run #18 Findings (2026-03-27) — Haskell ↔ Torsten Interop
-- Setup: Torsten block producer (SAND pool) + Haskell cardano-node syncing exclusively from Torsten
+## Soak Test Run #18 Findings (2026-03-27) — Haskell ↔ Dugite Interop
+- Setup: Dugite block producer (SAND pool) + Haskell cardano-node syncing exclusively from Dugite
 - Two controlled SIGTERM restarts observed: 07:11:58 and 07:19:47 (external kill, not crashes)
-- Restart recovery: Torsten back at tip in **20 seconds** (01:58→02:18 from process start)
+- Restart recovery: Dugite back at tip in **20 seconds** (01:58→02:18 from process start)
 - Haskell intersection reset to origin after restart (expected — volatileDB divergence)
 - CONFIRMED OPEN BUG: pending_blocks starvation stall at ~07:34 — 30 rollbacks in 7min, zero blocks fetched
   - Pattern: peers rollback to slot AHEAD of our tip (107941003 > our 107940438), block fetch decision logic deadlocks
@@ -102,7 +102,7 @@ Key fixes applied in commit 1a11d0d:
 - Haskell sync: N2N v15 handshake OK, 2 MuxErrored events (INFO severity, both recovered automatically)
 - Haskell chainsync channel contention: "already taken" warning (1 occurrence) — race on channel acquisition
 - Txs: 19 submitted, 16 confirmed on-chain (3 pending at end, C7 lost on restart — expected)
-- No panics, no ERROR logs in either Torsten or Haskell during the soak period
+- No panics, no ERROR logs in either Dugite or Haskell during the soak period
 - Memory at tip: 1.4 GB RSS (fresh after restart, vs 3.7 GB before restart — LSM backend compacted)
 
 ## Operational Notes
@@ -110,6 +110,6 @@ Key fixes applied in commit 1a11d0d:
 - LSM backend snapshot ~80 MB; in-memory ~1.1 GB
 - Replay speed on preview: 20K blk/s when snapshot available for same epoch (much faster than cold start)
 - Replay speed slows at slot ~12M due to UTxO growth; recovers after slot ~15M
-- Debug epoch nonces: `RUST_LOG="torsten_ledger::state::epoch=debug"` shows per-epoch nonce values
+- Debug epoch nonces: `RUST_LOG="dugite_ledger::state::epoch=debug"` shows per-epoch nonce values
 - After crash recovery: wait for "UTxO store attached (N entries)" before submitting txs
 - Use UTxOs from blocks 100+ before the snapshot point to avoid InputNotFound rejections

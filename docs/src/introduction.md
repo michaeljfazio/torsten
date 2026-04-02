@@ -1,12 +1,12 @@
 # Introduction
 
-**Torsten** is a Cardano node implementation written in Rust, aiming for 100% compatibility with [cardano-node](https://github.com/IntersectMBO/cardano-node) (Haskell).
+**Dugite** is a Cardano node implementation written in Rust, aiming for 100% compatibility with [cardano-node](https://github.com/IntersectMBO/cardano-node) (Haskell).
 
 Built by [Sandstone Pool](https://www.sandstone.io/).
 
-[![CI](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml)
+[![CI](https://github.com/michaeljfazio/dugite/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljfazio/dugite/actions/workflows/ci.yml)
 
-## Why Torsten?
+## Why Dugite?
 
 The Cardano ecosystem benefits from client diversity. Running multiple independent node implementations strengthens the network by:
 
@@ -32,10 +32,10 @@ The Cardano ecosystem benefits from client diversity. Running multiple independe
 
 ## Project Status
 
-Torsten is under active development. It can sync against both the Cardano mainnet and preview/preprod testnets. The node implements the full N2N and N2C protocol stacks, ledger validation, epoch transitions with stake snapshots and reward distribution, and Conway-era governance.
+Dugite is under active development. It can sync against both the Cardano mainnet and preview/preprod testnets. The node implements the full N2N and N2C protocol stacks, ledger validation, epoch transitions with stake snapshots and reward distribution, and Conway-era governance.
 
-See the [Feature Status](https://github.com/michaeljfazio/torsten#feature-status) section in the repository README for a detailed checklist of implemented and pending features.
+See the [Feature Status](https://github.com/michaeljfazio/dugite#feature-status) section in the repository README for a detailed checklist of implemented and pending features.
 
 ## License
 
-Torsten is released under the [Apache-2.0 License](https://github.com/michaeljfazio/torsten/blob/main/LICENSE).
+Dugite is released under the [Apache-2.0 License](https://github.com/michaeljfazio/dugite/blob/main/LICENSE).

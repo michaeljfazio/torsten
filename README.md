@@ -1,24 +1,24 @@
-# Torsten
+# Dugite
 
 A Cardano node implementation written in Rust, aiming for 100% compatibility with [cardano-node](https://github.com/IntersectMBO/cardano-node).
 
 Built by [Sandstone Pool](https://www.sandstone.io/)
 
-[Documentation](https://michaeljfazio.github.io/torsten/) | [Benchmarks](https://michaeljfazio.github.io/torsten/reference/benchmarks.html) | [Developer Wiki](https://github.com/michaeljfazio/torsten/wiki) | [Discussions](https://github.com/michaeljfazio/torsten/discussions)
+[Documentation](https://michaeljfazio.github.io/dugite/) | [Benchmarks](https://michaeljfazio.github.io/dugite/reference/benchmarks.html) | [Developer Wiki](https://github.com/michaeljfazio/dugite/wiki) | [Discussions](https://github.com/michaeljfazio/dugite/discussions)
 
-[![CI](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/ci.yml)
-[![Code Scanning](https://github.com/michaeljfazio/torsten/actions/workflows/code-scanning.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/code-scanning.yml)
-[![codecov](https://codecov.io/gh/michaeljfazio/torsten/graph/badge.svg)](https://codecov.io/gh/michaeljfazio/torsten)
-[![Nightly Benchmarks](https://github.com/michaeljfazio/torsten/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/michaeljfazio/torsten/actions/workflows/benchmarks.yml)
-[![Docs](https://github.com/michaeljfazio/torsten/actions/workflows/docs.yml/badge.svg)](https://michaeljfazio.github.io/torsten/)
+[![CI](https://github.com/michaeljfazio/dugite/actions/workflows/ci.yml/badge.svg)](https://github.com/michaeljfazio/dugite/actions/workflows/ci.yml)
+[![Code Scanning](https://github.com/michaeljfazio/dugite/actions/workflows/code-scanning.yml/badge.svg)](https://github.com/michaeljfazio/dugite/actions/workflows/code-scanning.yml)
+[![codecov](https://codecov.io/gh/michaeljfazio/dugite/graph/badge.svg)](https://codecov.io/gh/michaeljfazio/dugite)
+[![Nightly Benchmarks](https://github.com/michaeljfazio/dugite/actions/workflows/benchmarks.yml/badge.svg)](https://github.com/michaeljfazio/dugite/actions/workflows/benchmarks.yml)
+[![Docs](https://github.com/michaeljfazio/dugite/actions/workflows/docs.yml/badge.svg)](https://michaeljfazio.github.io/dugite/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![Cardano](https://img.shields.io/badge/cardano-conway-blueviolet.svg)](https://cardano.org/)
-[![GitHub Discussions](https://img.shields.io/github/discussions/michaeljfazio/torsten)](https://github.com/michaeljfazio/torsten/discussions)
-[![GitHub Stars](https://img.shields.io/github/stars/michaeljfazio/torsten)](https://github.com/michaeljfazio/torsten/stargazers)
+[![GitHub Discussions](https://img.shields.io/github/discussions/michaeljfazio/dugite)](https://github.com/michaeljfazio/dugite/discussions)
+[![GitHub Stars](https://img.shields.io/github/stars/michaeljfazio/dugite)](https://github.com/michaeljfazio/dugite/stargazers)
 
 > [!CAUTION]
-> **Torsten is in early development and is NOT recommended for production use.**
+> **Dugite is in early development and is NOT recommended for production use.**
 > APIs, storage formats, and on-chain behavior may change without notice. Ledger validation is incomplete and may accept invalid transactions or reject valid ones. **Do not use this software to operate a stake pool, manage real funds, or participate in mainnet governance.** Use at your own risk on testnets only.
 
 ## Quick Start
@@ -28,12 +28,12 @@ Built by [Sandstone Pool](https://www.sandstone.io/)
 cargo build --release
 
 # Fast sync with Mithril snapshot (recommended)
-./target/release/torsten-node mithril-import \
+./target/release/dugite-node mithril-import \
   --network-magic 2 \
   --database-path ./db-preview
 
 # Run the node
-./target/release/torsten-node run \
+./target/release/dugite-node run \
   --config config/preview-config.json \
   --topology config/preview-topology.json \
   --database-path ./db-preview \
@@ -42,41 +42,41 @@ cargo build --release
   --port 3001
 ```
 
-See the [full documentation](https://michaeljfazio.github.io/torsten/) for detailed setup instructions, CLI reference, and architecture guides.
+See the [full documentation](https://michaeljfazio.github.io/dugite/) for detailed setup instructions, CLI reference, and architecture guides.
 
 ## Architecture
 
-Torsten is organized as a 14-crate Cargo workspace:
+Dugite is organized as a 14-crate Cargo workspace:
 
 | Crate | Description |
 |-------|-------------|
-| `torsten-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron-Conway) |
-| `torsten-crypto` | Ed25519 keys, VRF (ECVRF-ED25519-SHA512-Elligator2), KES (Sum6Kes), text envelope format |
-| `torsten-serialization` | CBOR encoding/decoding for Cardano wire format via pallas |
-| `torsten-lsm` | Pure Rust LSM-tree engine with WAL, compaction, bloom filters, snapshots |
-| `torsten-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N/N2C multiplexer |
-| `torsten-consensus` | Ouroboros Praos, chain selection, epoch transitions, VRF slot leader checks |
-| `torsten-ledger` | UTxO set (LSM-backed via UTxO-HD), transaction validation (Phase-1/Phase-2), ledger state, certificates, rewards, governance |
-| `torsten-mempool` | Thread-safe transaction mempool with Phase-1/Phase-2 admission control, input-conflict checking, and TTL sweep |
-| `torsten-storage` | ChainDB (ImmutableDB append-only chunk files + VolatileDB in-memory) |
-| `torsten-node` | Main binary: config, topology, pipelined sync, Mithril import, block forging, Prometheus metrics |
-| `torsten-cli` | cardano-cli compatible CLI (38+ subcommands) |
-| `torsten-monitor` | Terminal monitoring dashboard (ratatui-based, real-time metrics via Prometheus polling) |
-| `torsten-config` | Interactive TUI configuration editor with tree navigation, inline editing, type validation, search/filter, diff view, and init/validate/get/set CLI subcommands |
+| `dugite-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron-Conway) |
+| `dugite-crypto` | Ed25519 keys, VRF (ECVRF-ED25519-SHA512-Elligator2), KES (Sum6Kes), text envelope format |
+| `dugite-serialization` | CBOR encoding/decoding for Cardano wire format via pallas |
+| `dugite-lsm` | Pure Rust LSM-tree engine with WAL, compaction, bloom filters, snapshots |
+| `dugite-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N/N2C multiplexer |
+| `dugite-consensus` | Ouroboros Praos, chain selection, epoch transitions, VRF slot leader checks |
+| `dugite-ledger` | UTxO set (LSM-backed via UTxO-HD), transaction validation (Phase-1/Phase-2), ledger state, certificates, rewards, governance |
+| `dugite-mempool` | Thread-safe transaction mempool with Phase-1/Phase-2 admission control, input-conflict checking, and TTL sweep |
+| `dugite-storage` | ChainDB (ImmutableDB append-only chunk files + VolatileDB in-memory) |
+| `dugite-node` | Main binary: config, topology, pipelined sync, Mithril import, block forging, Prometheus metrics |
+| `dugite-cli` | cardano-cli compatible CLI (38+ subcommands) |
+| `dugite-monitor` | Terminal monitoring dashboard (ratatui-based, real-time metrics via Prometheus polling) |
+| `dugite-config` | Interactive TUI configuration editor with tree navigation, inline editing, type validation, search/filter, diff view, and init/validate/get/set CLI subcommands |
 
 ```mermaid
 graph TD
-    NODE[torsten-node] --> NET[torsten-network]
-    NODE --> CONS[torsten-consensus]
-    NODE --> LEDGER[torsten-ledger]
-    NODE --> STORE[torsten-storage]
-    NODE --> POOL[torsten-mempool]
-    CLI[torsten-cli] --> NET
-    CLI --> PRIM[torsten-primitives]
-    CLI --> CRYPTO[torsten-crypto]
-    CLI --> SER[torsten-serialization]
-    MON[torsten-monitor] --> PRIM
-    CFG[torsten-config] --> PRIM
+    NODE[dugite-node] --> NET[dugite-network]
+    NODE --> CONS[dugite-consensus]
+    NODE --> LEDGER[dugite-ledger]
+    NODE --> STORE[dugite-storage]
+    NODE --> POOL[dugite-mempool]
+    CLI[dugite-cli] --> NET
+    CLI --> PRIM[dugite-primitives]
+    CLI --> CRYPTO[dugite-crypto]
+    CLI --> SER[dugite-serialization]
+    MON[dugite-monitor] --> PRIM
+    CFG[dugite-config] --> PRIM
     NET --> PRIM
     NET --> CRYPTO
     NET --> SER
@@ -86,7 +86,7 @@ graph TD
     LEDGER --> PRIM
     LEDGER --> CRYPTO
     LEDGER --> SER
-    LEDGER --> LSM[torsten-lsm]
+    LEDGER --> LSM[dugite-lsm]
     STORE --> PRIM
     STORE --> SER
     POOL --> PRIM
@@ -107,7 +107,7 @@ graph TD
 - **Genesis Sync Manager (GSM)**: PreSyncing/Syncing/CaughtUp state machine with tip age tracking and ChainSync idle detection
 
 ### Ledger
-- **UTxO-HD** on-disk storage via torsten-lsm (pure Rust LSM-tree with WAL for crash recovery, lazy levelling compaction, bloom filters, 64KB pages for large inline datums)
+- **UTxO-HD** on-disk storage via dugite-lsm (pure Rust LSM-tree with WAL for crash recovery, lazy levelling compaction, bloom filters, 64KB pages for large inline datums)
 - **Phase-1 transaction validation**: inputs exist, fees sufficient, value conservation, TTL, witness verification, multi-asset, reference inputs, CIP-0112 tiered reference script fees
 - **Phase-2 Plutus evaluation**: V1/V2/V3 script execution via uplc CEK machine with full cost model application
 - **Native script evaluation**: timelock, sig, allOf, anyOf, nOf
@@ -126,7 +126,7 @@ graph TD
 
 ### Networking (N2N)
 - **Protocol versions**: V14/V15 (matching cardano-node 10.x)
-- **Pipelined ChainSync**: configurable pipeline depth (default 300, via `TORSTEN_PIPELINE_DEPTH`)
+- **Pipelined ChainSync**: configurable pipeline depth (default 300, via `DUGITE_PIPELINE_DEPTH`)
 - **Multi-peer BlockFetch**: up to 4 concurrent fetchers with chunk-based retry on failure
 - **N2N server**: handshake (magic verification), ChainSync, BlockFetch, KeepAlive, TxSubmission2, PeerSharing
 - **Block relay**: synced blocks announced to downstream peers via broadcast channel (full relay behavior)
@@ -163,7 +163,7 @@ graph TD
 ### Storage
 - **ImmutableDB**: append-only chunk files with sequential I/O, secondary index (56-byte entries, big-endian, CRC32), memory-mapped I/O (memmap2)
 - **VolatileDB**: in-memory HashMap for volatile chain tip, rollback support via DiffSeq
-- **torsten-lsm**: pure Rust LSM-tree engine (BTreeMap memtable, WAL with CRC32, SSTable pages, blocked bloom filters, fence pointer indexes, clock-sweep LRU cache, lazy levelling compaction T=4, jumbo pages for 13KB+ inline datums, hard-link snapshots, exclusive session lock)
+- **dugite-lsm**: pure Rust LSM-tree engine (BTreeMap memtable, WAL with CRC32, SSTable pages, blocked bloom filters, fence pointer indexes, clock-sweep LRU cache, lazy levelling compaction T=4, jumbo pages for 13KB+ inline datums, hard-link snapshots, exclusive session lock)
 - **io_uring async I/O**: optional Linux-only feature for high-performance disk access
 - **Mithril snapshot import**: digest verification (SHA256 beacon hash + file digests), secondary index parsing, resume support, ~2 minute import for 4M blocks
 - **Ledger snapshots**: TRSN magic + blake2b checksum, bincode serialization, time-based snapshot policy matching Haskell (72min normal, 50K blocks + 6min bulk, max 2 retained)
@@ -180,8 +180,8 @@ graph TD
 
 ### Observability
 - **28+ Prometheus metrics** on port 12798 (blocks, slots, epochs, UTxO count, delegations, treasury, mempool, peers, transactions, DReps, proposals, pools, disk, memory, uptime, tip age)
-- **torsten-monitor**: Terminal monitoring dashboard with real-time sync progress, block rate sparkline, peer breakdown (out/in/total, hot/warm/cold), governance summary, and color-coded health indicators. Run: `torsten-monitor --metrics-url http://localhost:12798/metrics`
-- **torsten-config**: Interactive TUI configuration editor with tree navigation, inline editing, type validation, search/filter, and diff view. Subcommands: `init`, `edit`, `validate`, `get`, `set`
+- **dugite-monitor**: Terminal monitoring dashboard with real-time sync progress, block rate sparkline, peer breakdown (out/in/total, hot/warm/cold), governance summary, and color-coded health indicators. Run: `dugite-monitor --metrics-url http://localhost:12798/metrics`
+- **dugite-config**: Interactive TUI configuration editor with tree navigation, inline editing, type validation, search/filter, and diff view. Subcommands: `init`, `edit`, `validate`, `get`, `set`
 - **Structured logging** with tracing-subscriber (env-filter, JSON output, journald)
 - **SIGHUP topology reload** for live configuration updates
 - **GSM state tracking**: PreSyncing/Syncing/CaughtUp with tip age monitoring
@@ -194,7 +194,7 @@ graph TD
 
 ## Testnet Validation
 
-Torsten has been validated on the **Cardano preview testnet** (network magic=2):
+Dugite has been validated on the **Cardano preview testnet** (network magic=2):
 
 | Metric | Value |
 |--------|-------|
@@ -210,18 +210,18 @@ Torsten has been validated on the **Cardano preview testnet** (network magic=2):
 ## Production Readiness
 
 > [!WARNING]
-> **Torsten is alpha-quality software.** It has not undergone the extensive human-driven QA, formal auditing, or prolonged mainnet soak testing required for production use. The assessments below reflect automated testing only and should not be taken as endorsement for mainnet deployment.
+> **Dugite is alpha-quality software.** It has not undergone the extensive human-driven QA, formal auditing, or prolonged mainnet soak testing required for production use. The assessments below reflect automated testing only and should not be taken as endorsement for mainnet deployment.
 
 ### Relay Node
 
-Torsten can function as a **testnet relay node** with the following capabilities:
+Dugite can function as a **testnet relay node** with the following capabilities:
 
 - Syncs to chain tip on preview/preprod testnets via pipelined ChainSync
 - Serves blocks to downstream peers (N2N server: ChainSync, BlockFetch, KeepAlive, TxSubmission2, PeerSharing)
 - Accepts and validates transactions (Phase-1 + Phase-2 Plutus) for mempool admission
 - Responds to all cardano-cli queries via N2C socket (V16-V22, all 39 query tags)
 - Handles graceful shutdown on SIGINT/SIGTERM with ChainDB + ledger snapshot persistence
-- Recovers from crash with WAL replay (torsten-lsm) + snapshot fallback (latest -> previous -> fresh)
+- Recovers from crash with WAL replay (dugite-lsm) + snapshot fallback (latest -> previous -> fresh)
 - Persists ChainDB at epoch transitions to limit replay window on crash
 - Correctly defers reward distribution matching Haskell's RUPD timing
 
@@ -265,18 +265,18 @@ See the [latest benchmark results](benches/results/2026-03-14-all-profiles.md) f
 
 ### Prometheus Metrics (port 12798)
 
-Torsten exports 28+ metrics including:
+Dugite exports 28+ metrics including:
 
-- `torsten_blocks_received_total` / `torsten_blocks_applied_total` - block counters
-- `torsten_slot_number` / `torsten_block_number` / `torsten_epoch_number` - chain position
-- `torsten_sync_progress_percent` - sync progress (100% = at tip)
-- `torsten_utxo_count` / `torsten_delegation_count` - ledger state
-- `torsten_peers_connected` / `torsten_peers_hot` / `torsten_peers_warm` / `torsten_peers_cold` - P2P
-- `torsten_mempool_tx_count` / `torsten_mempool_bytes` - mempool
-- `torsten_treasury_lovelace` / `torsten_drep_count` / `torsten_proposal_count` / `torsten_pool_count` - governance
-- `torsten_transactions_received_total` / `torsten_transactions_validated_total` / `torsten_transactions_rejected_total` - tx processing
-- `torsten_tip_age_seconds` / `torsten_chainsync_idle_secs` - freshness
-- `torsten_mem_resident_bytes` / `torsten_disk_available_bytes` - resources
+- `dugite_blocks_received_total` / `dugite_blocks_applied_total` - block counters
+- `dugite_slot_number` / `dugite_block_number` / `dugite_epoch_number` - chain position
+- `dugite_sync_progress_percent` - sync progress (100% = at tip)
+- `dugite_utxo_count` / `dugite_delegation_count` - ledger state
+- `dugite_peers_connected` / `dugite_peers_hot` / `dugite_peers_warm` / `dugite_peers_cold` - P2P
+- `dugite_mempool_tx_count` / `dugite_mempool_bytes` - mempool
+- `dugite_treasury_lovelace` / `dugite_drep_count` / `dugite_proposal_count` / `dugite_pool_count` - governance
+- `dugite_transactions_received_total` / `dugite_transactions_validated_total` / `dugite_transactions_rejected_total` - tx processing
+- `dugite_tip_age_seconds` / `dugite_chainsync_idle_secs` - freshness
+- `dugite_mem_resident_bytes` / `dugite_disk_available_bytes` - resources
 
 ## Network Magic
 
@@ -303,41 +303,41 @@ Zero-warning policy enforced - all code must compile cleanly with clippy and pas
 
 ### Running Benchmarks
 
-Torsten includes Criterion-based benchmarks for the storage and ledger subsystems:
+Dugite includes Criterion-based benchmarks for the storage and ledger subsystems:
 
 ```bash
 # Storage benchmarks (ChainDB, ImmutableDB, BlockIndex, scaling)
-cargo bench -p torsten-storage --bench storage_bench
+cargo bench -p dugite-storage --bench storage_bench
 
 # UTxO store benchmarks (insert, lookup, apply_tx, LSM configs, scaling)
-cargo bench -p torsten-ledger --bench utxo_bench
+cargo bench -p dugite-ledger --bench utxo_bench
 
 # Run a specific benchmark group
-cargo bench -p torsten-storage --bench storage_bench -- "scaling/"
-cargo bench -p torsten-ledger --bench utxo_bench -- "utxo_scaling/"
+cargo bench -p dugite-storage --bench storage_bench -- "scaling/"
+cargo bench -p dugite-ledger --bench utxo_bench -- "utxo_scaling/"
 ```
 
 Results are saved to `target/criterion/` with HTML reports at `target/criterion/report/index.html`. Baseline results are tracked in `benches/results/`.
 
 ### Storage Profiles
 
-Torsten supports configurable storage profiles via `--storage-profile`:
+Dugite supports configurable storage profiles via `--storage-profile`:
 
 ```bash
 # 32GB systems: 2GB memtable, 24GB cache (~27GB RSS)
-./target/release/torsten-node run --storage-profile ultra-memory ...
+./target/release/dugite-node run --storage-profile ultra-memory ...
 
 # 16GB systems (default): 1GB memtable, 12GB cache (~14GB RSS)
-./target/release/torsten-node run --storage-profile high-memory ...
+./target/release/dugite-node run --storage-profile high-memory ...
 
 # 8GB systems: 512MB memtable, 5GB cache (~6.5GB RSS)
-./target/release/torsten-node run --storage-profile low-memory ...
+./target/release/dugite-node run --storage-profile low-memory ...
 
 # 4GB systems: 256MB memtable, 2GB cache (~3GB RSS)
-./target/release/torsten-node run --storage-profile minimal ...
+./target/release/dugite-node run --storage-profile minimal ...
 
 # Individual parameter overrides
-./target/release/torsten-node run \
+./target/release/dugite-node run \
   --storage-profile low-memory \
   --utxo-memtable-size-mb 256 \
   --utxo-block-cache-size-mb 1024 ...
@@ -345,7 +345,7 @@ Torsten supports configurable storage profiles via `--storage-profile`:
 
 ## Soak Testing
 
-Torsten is actively soak-tested on the **Cardano preview testnet** via **Sandstone Pool [SAND]**:
+Dugite is actively soak-tested on the **Cardano preview testnet** via **Sandstone Pool [SAND]**:
 
 | Field | Value |
 |-------|-------|

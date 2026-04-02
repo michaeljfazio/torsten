@@ -15,10 +15,10 @@ type: project
 - Block producer: pool `6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856` (Sandstone [SAND])
 
 ### Bug #1 FIXED: blocking_read() Panic in connection_lifecycle.rs
-- **Symptom**: `thread 'tokio-rt-worker' panicked at crates/torsten-node/src/node/connection_lifecycle.rs:753:69: Cannot block the current thread from within a runtime.`
+- **Symptom**: `thread 'tokio-rt-worker' panicked at crates/dugite-node/src/node/connection_lifecycle.rs:753:69: Cannot block the current thread from within a runtime.`
 - **Root cause**: `chain_db.blocking_read()` called inside async task while holding `candidate_chains.read().await` lock
 - **Fix**: Move `chain_db.read().await` BEFORE acquiring `candidate_chains` lock; commit `6fa4886b`
-- **File**: `crates/torsten-node/src/node/connection_lifecycle.rs` lines ~755-778
+- **File**: `crates/dugite-node/src/node/connection_lifecycle.rs` lines ~755-778
 
 ### Bug #2 FOUND (NEW): Node Crash After ~21 Minutes at Tip
 - **Symptom**: Node PID 3328 died at 03:57 UTC; auto-restarted as PID 9737
@@ -42,7 +42,7 @@ type: project
 - **UTxO snapshot coverage**: After crash, node's LSM snapshot was at block 4141182; UTxOs from blocks 4141183+ not available until replayed. Submit txs spending UTxOs from blocks well before the snapshot (100+ blocks back)
 - **Tx confirmation time**: ~20-60 seconds from submit to on-chain confirmation at tip
 - **TTL recommendation**: Use TTL = current_slot + 600 (10 min window) for all soak transactions
-- **torsten-cli query utxo bug**: Shows 0 lovelace for all UTxOs and only displays first tx hash; use Koios for UTxO discovery
+- **dugite-cli query utxo bug**: Shows 0 lovelace for all UTxOs and only displays first tx hash; use Koios for UTxO discovery
 
 ### Confirmation Statistics (Koios-verified)
 - Confirmed on-chain: 35+ transactions (cycles 0–33, batch1, batch2, batch3, cycles 34b–38b)

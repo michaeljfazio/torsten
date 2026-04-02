@@ -88,9 +88,9 @@ For full CIP-1694 governance details, refer to:
 - **Conway formal spec**: https://intersectmbo.github.io/formal-ledger-specifications/conway-ledger.pdf
 - **Haskell cardano-ledger Conway implementation**: https://github.com/IntersectMBO/cardano-ledger/tree/master/eras/conway
 
-## Key Governance Constants (from Torsten project memory, not Blueprint)
+## Key Governance Constants (from Dugite project memory, not Blueprint)
 
-From torsten project implementation (not from Blueprint directly):
+From dugite project implementation (not from Blueprint directly):
 
 - 4 DRep PP group thresholds: `dvt_pp_network_group`, `dvt_pp_economic_group`, `dvt_pp_technical_group`, `dvt_pp_gov_group`
 - 5 SPO voting thresholds: `pvt_motion_no_confidence`, `pvt_committee_normal`, `pvt_committee_no_confidence`, `pvt_hard_fork`, `pvt_pp_security_group`

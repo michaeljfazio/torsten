@@ -10,7 +10,7 @@
 # Running a Node
 
 - [Configuration](./running/configuration.md)
-- [Configuration Editor (torsten-config)](./running/config-editor.md)
+- [Configuration Editor (dugite-config)](./running/config-editor.md)
 - [Topology](./running/topology.md)
 - [Networks](./running/networks.md)
 - [Mithril Snapshot Import](./running/mithril.md)
@@ -23,7 +23,7 @@
 # CLI Reference
 
 - [Overview](./cli/overview.md)
-- [torsten-node](./cli/torsten-node.md)
+- [dugite-node](./cli/dugite-node.md)
 - [Key Generation](./cli/key-generation.md)
 - [Transactions](./cli/transactions.md)
 - [Queries](./cli/queries.md)

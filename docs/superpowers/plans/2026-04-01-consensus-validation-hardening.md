@@ -6,7 +6,7 @@
 
 **Architecture:** Four independent changes to the consensus layer. Items 1 and 2 modify protocol version validation in `praos.rs`. Item 3 modifies chain selection tiebreaking in `chain_selection.rs`. Item 4 adds test vectors to `kes.rs`. All changes are backward-compatible — no public API signatures change in a breaking way.
 
-**Tech Stack:** Rust, torsten-consensus, torsten-crypto, pallas-crypto (Sum6Kes)
+**Tech Stack:** Rust, dugite-consensus, dugite-crypto, pallas-crypto (Sum6Kes)
 
 **Spec:** `docs/superpowers/specs/2026-04-01-consensus-validation-hardening-design.md`
 
@@ -16,21 +16,21 @@
 
 | File | Action | Responsibility |
 |------|--------|---------------|
-| `crates/torsten-consensus/src/praos.rs` | Modify | ObsoleteNode + HeaderProtVerTooHigh checks |
-| `crates/torsten-consensus/src/chain_selection.rs` | Modify | Remove hash tiebreaker, fix Conway VRF cutoff |
-| `crates/torsten-crypto/src/kes.rs` | Modify | Add Sum6Kes IOHK reference test vectors |
-| `crates/torsten-node/src/node/n2c_query/mod.rs` | Modify | Wire GetMaxMajorProtocolVersion to consensus config |
+| `crates/dugite-consensus/src/praos.rs` | Modify | ObsoleteNode + HeaderProtVerTooHigh checks |
+| `crates/dugite-consensus/src/chain_selection.rs` | Modify | Remove hash tiebreaker, fix Conway VRF cutoff |
+| `crates/dugite-crypto/src/kes.rs` | Modify | Add Sum6Kes IOHK reference test vectors |
+| `crates/dugite-node/src/node/n2c_query/mod.rs` | Modify | Wire GetMaxMajorProtocolVersion to consensus config |
 
 ---
 
 ### Task 1: Replace UnsupportedProtocolVersion with ObsoleteNode Check
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/praos.rs:15-88` (error enum), `:156-196` (OuroborosPraos struct), `:199-261` (constructors), `:301-399` (validate_header), `:417-453` (validate_header_full), `:3156-3181` (existing test)
+- Modify: `crates/dugite-consensus/src/praos.rs:15-88` (error enum), `:156-196` (OuroborosPraos struct), `:199-261` (constructors), `:301-399` (validate_header), `:417-453` (validate_header_full), `:3156-3181` (existing test)
 
 - [ ] **Step 1: Update the ConsensusError enum**
 
-In `crates/torsten-consensus/src/praos.rs`, replace the `UnsupportedProtocolVersion` variant with two new variants:
+In `crates/dugite-consensus/src/praos.rs`, replace the `UnsupportedProtocolVersion` variant with two new variants:
 
 ```rust
 // Replace this:
@@ -162,7 +162,7 @@ Replace the `MAX_SUPPORTED_PROTOCOL_MAJOR` check block (lines ~438-453) with the
 
 Search for all call sites and add the new `ledger_pv_major` parameter:
 
-In `crates/torsten-node/src/node/sync.rs` (line ~865):
+In `crates/dugite-node/src/node/sync.rs` (line ~865):
 ```rust
 // Before:
 self.consensus.validate_header_full(&header_with_nonce, block.slot(), issuer_info.as_ref(), mode)
@@ -181,7 +181,7 @@ For any other callers (search for `validate_header(` and `validate_header_full(`
 
 - [ ] **Step 7: Update the N2C GetMaxMajorProtocolVersion query**
 
-In `crates/torsten-node/src/node/n2c_query/mod.rs` (line ~528), the hardcoded `10` should be sourced from the consensus config. This requires passing the value through. For now, keep it as `10` but add a comment referencing the consensus config field:
+In `crates/dugite-node/src/node/n2c_query/mod.rs` (line ~528), the hardcoded `10` should be sourced from the consensus config. This requires passing the value through. For now, keep it as `10` but add a comment referencing the consensus config field:
 
 ```rust
 38 => {
@@ -231,7 +231,7 @@ fn test_header_prot_ver_too_high() {
 
     // Block header claiming PV 10 — should pass (10 <= 9 + 1)
     let mut header_ok = make_valid_header(100);
-    header_ok.protocol_version = torsten_primitives::block::ProtocolVersion {
+    header_ok.protocol_version = dugite_primitives::block::ProtocolVersion {
         major: 10,
         minor: 0,
     };
@@ -241,7 +241,7 @@ fn test_header_prot_ver_too_high() {
 
     // Block header claiming PV 11 — should fail (11 > 9 + 1)
     let mut header_bad = make_valid_header(100);
-    header_bad.protocol_version = torsten_primitives::block::ProtocolVersion {
+    header_bad.protocol_version = dugite_primitives::block::ProtocolVersion {
         major: 11,
         minor: 0,
     };
@@ -253,7 +253,7 @@ fn test_header_prot_ver_too_high() {
 
     // Block header claiming PV 9 — should pass (9 <= 9 + 1)
     let mut header_same = make_valid_header(100);
-    header_same.protocol_version = torsten_primitives::block::ProtocolVersion {
+    header_same.protocol_version = dugite_primitives::block::ProtocolVersion {
         major: 9,
         minor: 0,
     };
@@ -265,7 +265,7 @@ fn test_header_prot_ver_too_high() {
 
 - [ ] **Step 9: Run tests and verify**
 
-Run: `cargo nextest run -p torsten-consensus -E 'test(test_obsolete_node)' && cargo nextest run -p torsten-consensus -E 'test(test_header_prot_ver)'`
+Run: `cargo nextest run -p dugite-consensus -E 'test(test_obsolete_node)' && cargo nextest run -p dugite-consensus -E 'test(test_header_prot_ver)'`
 Expected: PASS
 
 Then run the full workspace to check for compilation errors from the signature change:
@@ -275,7 +275,7 @@ Expected: Compiles with zero warnings
 - [ ] **Step 10: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/praos.rs crates/torsten-node/
+git add crates/dugite-consensus/src/praos.rs crates/dugite-node/
 git commit -m "feat(consensus): replace UnsupportedProtocolVersion with ObsoleteNode and HeaderProtVerTooHigh checks (#323)
 
 Match Haskell's envelopeChecks: check ledger PV against node's
@@ -289,11 +289,11 @@ MAX_SUPPORTED_PROTOCOL_MAJOR constant."
 ### Task 2: Remove Hash-Based Tiebreaker from Chain Selection
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/chain_selection.rs:33-414` (ChainSelection impl, praos_tiebreak, hash_tiebreak)
+- Modify: `crates/dugite-consensus/src/chain_selection.rs:33-414` (ChainSelection impl, praos_tiebreak, hash_tiebreak)
 
 - [ ] **Step 1: Change `prefer_chain_with_headers` to return Equal for Byron ties**
 
-In `crates/torsten-consensus/src/chain_selection.rs`, in the `prefer_chain_with_headers` method (line ~106), change the Byron tiebreaker branch:
+In `crates/dugite-consensus/src/chain_selection.rs`, in the `prefer_chain_with_headers` method (line ~106), change the Byron tiebreaker branch:
 
 ```rust
 // Replace this:
@@ -436,7 +436,7 @@ fn test_praos_equal_length_no_hash_tiebreak() {
 
 - [ ] **Step 8: Run tests**
 
-Run: `cargo nextest run -p torsten-consensus`
+Run: `cargo nextest run -p dugite-consensus`
 Expected: PASS (all chain selection tests pass with updated expectations)
 
 - [ ] **Step 9: Verify full build**
@@ -447,7 +447,7 @@ Expected: Compiles with zero warnings (no lingering callers of the old prefer_ch
 - [ ] **Step 10: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/chain_selection.rs
+git add crates/dugite-consensus/src/chain_selection.rs
 git commit -m "feat(consensus): remove hash-based chain selection tiebreaker (#323)
 
 Match Haskell's chain selection: no hash comparison anywhere. On equal
@@ -460,7 +460,7 @@ wins. Remove hash parameters from prefer_chain/should_switch_chain."
 ### Task 3: Add Sum6Kes IOHK Reference Test Vectors
 
 **Files:**
-- Modify: `crates/torsten-crypto/src/kes.rs:237-511` (test module)
+- Modify: `crates/dugite-crypto/src/kes.rs:237-511` (test module)
 
 - [ ] **Step 1: Add deterministic key generation test vector**
 
@@ -594,13 +594,13 @@ fn test_sum6kes_public_key_stable_across_all_evolutions() {
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo nextest run -p torsten-crypto -E 'test(test_sum6kes)'`
+Run: `cargo nextest run -p dugite-crypto -E 'test(test_sum6kes)'`
 Expected: PASS (all new tests pass)
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/torsten-crypto/src/kes.rs
+git add crates/dugite-crypto/src/kes.rs
 git commit -m "test(crypto): add Sum6Kes reference test vectors (#323)
 
 Add comprehensive KES test vectors: deterministic keygen, cross-period

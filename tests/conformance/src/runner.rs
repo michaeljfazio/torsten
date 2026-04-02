@@ -1,6 +1,6 @@
 //! Conformance test runner.
 //!
-//! Loads test vectors from JSON files, converts them to Torsten types,
+//! Loads test vectors from JSON files, converts them to Dugite types,
 //! executes the corresponding ledger function, and compares the result
 //! against the expected output.
 
@@ -11,9 +11,9 @@ use crate::schema::{
     GovEnvironment, GovSignal, GovState, TestCertificate, TestTransaction, UtxoEnvironment,
     UtxoState,
 };
+use dugite_ledger::validate_transaction;
+use dugite_ledger::validation::ValidationError;
 use std::path::Path;
-use torsten_ledger::validate_transaction;
-use torsten_ledger::validation::ValidationError;
 
 /// Load a test vector from a JSON file.
 pub fn load_vector(path: &Path) -> Result<ConformanceTestVector, String> {
@@ -138,7 +138,7 @@ fn run_utxo_test(vector_path: &str, vector: &ConformanceTestVector) -> Conforman
         }
     };
 
-    // Convert to Torsten types
+    // Convert to Dugite types
     let utxo_set = match adapters::to_utxo_set(&input_state.utxo) {
         Ok(u) => u,
         Err(e) => {
@@ -162,7 +162,7 @@ fn run_utxo_test(vector_path: &str, vector: &ConformanceTestVector) -> Conforman
     let params = adapters::to_protocol_params_from_utxo_env(&env);
     let tx_size = test_tx.tx_size;
 
-    // Run Torsten validation
+    // Run Dugite validation
     let validation_result = validate_transaction(&tx, &utxo_set, &params, env.slot, tx_size, None);
 
     // Filter out witness-related errors: UTXO conformance tests exercise the UTXO
@@ -212,7 +212,7 @@ fn run_utxo_test(vector_path: &str, vector: &ConformanceTestVector) -> Conforman
                         }
                         if let Some(ref col_return) = tx.body.collateral_return {
                             let col_return_input =
-                                torsten_primitives::transaction::TransactionInput {
+                                dugite_primitives::transaction::TransactionInput {
                                     transaction_id: tx.hash,
                                     index: tx.body.outputs.len() as u32,
                                 };
@@ -314,10 +314,10 @@ fn run_utxo_test(vector_path: &str, vector: &ConformanceTestVector) -> Conforman
     }
 }
 
-/// Map a Torsten ValidationError to a category string that matches the
+/// Map a Dugite ValidationError to a category string that matches the
 /// formal specification's error types.
-fn categorize_validation_error(error: &torsten_ledger::ValidationError) -> String {
-    use torsten_ledger::ValidationError;
+fn categorize_validation_error(error: &dugite_ledger::ValidationError) -> String {
+    use dugite_ledger::ValidationError;
     match error {
         ValidationError::NoInputs => "NoInputs".to_string(),
         ValidationError::InputNotFound(_) => "InputNotFound".to_string(),

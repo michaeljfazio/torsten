@@ -1,6 +1,6 @@
 ---
 name: crate-pallas-math
-description: pallas-math fixed-point arithmetic, VRF leader check math, and comparison with torsten's ported implementation
+description: pallas-math fixed-point arithmetic, VRF leader check math, and comparison with dugite's ported implementation
 type: reference
 ---
 
@@ -96,20 +96,20 @@ Haskell reference:
 
 This requires `exp_cmp(taylorExpCmp)` for efficient comparison without computing exact exp value.
 
-## Torsten vs pallas-math
+## Dugite vs pallas-math
 
-**Key decision**: Torsten did NOT adopt pallas-math. Instead, it ported the algorithms directly into `torsten-crypto` using `dashu-int` IBig directly.
+**Key decision**: Dugite did NOT adopt pallas-math. Instead, it ported the algorithms directly into `dugite-crypto` using `dashu-int` IBig directly.
 
-### Why torsten ported instead of adopted:
+### Why dugite ported instead of adopted:
 
-From memory notes: "VRF math was ported FROM pallas-math into torsten-crypto using dashu directly"
+From memory notes: "VRF math was ported FROM pallas-math into dugite-crypto using dashu directly"
 
 Likely reasons:
 1. Wanted to avoid adding pallas-math as a dependency
-2. Needed to customize for torsten's specific VRF context types
+2. Needed to customize for dugite's specific VRF context types
 3. The algorithms are well-understood and small enough to maintain directly
 
-### Torsten's VRF implementation details (from project memory):
+### Dugite's VRF implementation details (from project memory):
 
 - Uses Euler continued fraction (NOT Taylor series) for ln(1+x) — matches Haskell's `lncf`
 - Uses Taylor series for `taylorExpCmp` with error bounds for early termination
@@ -118,6 +118,6 @@ Likely reasons:
 
 ## Adoption Recommendation
 
-**IMPLEMENT FROM SCRATCH** (already done). Torsten's ported implementation is already working correctly. Re-introducing pallas-math as a dependency would add no benefit and could introduce version incompatibility risks. The algorithms are stable and well-tested in torsten.
+**IMPLEMENT FROM SCRATCH** (already done). Dugite's ported implementation is already working correctly. Re-introducing pallas-math as a dependency would add no benefit and could introduce version incompatibility risks. The algorithms are stable and well-tested in dugite.
 
-**Monitoring note**: If pallas-math adds new functionality (e.g., reward calculation math, or new VRF modes for future protocol versions), re-evaluate. For now, maintain torsten's direct dashu implementation.
+**Monitoring note**: If pallas-math adds new functionality (e.g., reward calculation math, or new VRF modes for future protocol versions), re-evaluate. For now, maintain dugite's direct dashu implementation.

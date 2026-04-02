@@ -52,9 +52,9 @@ instance SerialiseHFC xs => SerialiseNodeToNode (HardForkBlock xs) (Header (Hard
 `encodeNS` produces `array(2)[era_index_u8(0-based), per_era_header_encoding]`.
 For Shelley+ headers: `[hfc_index, tag(24)(header_cbor)]` where hfc_index is 0-based (Conway=6).
 
-## The bug Torsten had
+## The bug Dugite had
 
-Torsten was emitting `array(2)[word(4), array(2)[hfc_index, tag(24)(body_cbor)]]`
+Dugite was emitting `array(2)[word(4), array(2)[hfc_index, tag(24)(body_cbor)]]`
 The `array(2)` HFC wrapper at position 2 caused `DeserialiseFailure 2 "expected tag"` because
 the Haskell decoder expected `tag(24)` at byte offset 2, but saw `0x82` (array start).
 

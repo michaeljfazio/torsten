@@ -1,5 +1,5 @@
 [package]
-name = "torsten-golden-tests"
+name = "dugite-golden-tests"
 version.workspace = true
 edition = "2021"
 publish = false
@@ -13,10 +13,10 @@ name = "nonce_golden"
 path = "tests/nonce_golden.rs"
 
 [dependencies]
-torsten-crypto = { path = "../../crates/torsten-crypto" }
-torsten-network = { path = "../../crates/torsten-network" }
-torsten-primitives = { path = "../../crates/torsten-primitives" }
-torsten-serialization = { path = "../../crates/torsten-serialization" }
+dugite-crypto = { path = "../../crates/dugite-crypto" }
+dugite-network = { path = "../../crates/dugite-network" }
+dugite-primitives = { path = "../../crates/dugite-primitives" }
+dugite-serialization = { path = "../../crates/dugite-serialization" }
 hex = "0.4"
 minicbor = { workspace = true }
 pallas-crypto = { workspace = true }

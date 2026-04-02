@@ -53,7 +53,7 @@ accounts += registered rewards from rs
 - When d >= 0.8: eta=1 (full expansion), apparent_perf=1 for any pool IN BlocksMade
 - BFT/overlay blocks do NOT appear in BlocksMade → those pools get nothing
 
-## Torsten divergences:
+## Dugite divergences:
 1. No unregistered→treasury pathway (gap)
 2. Accounting is algebraically equivalent but uses different fields (net_reserve_decrease vs deltaR)
 3. Early-return paths for zero total_stake/active_stake may have formula mismatch

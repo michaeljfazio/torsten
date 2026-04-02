@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run Torsten as a block producer on the Cardano preprod testnet.
+# Run Dugite as a block producer on the Cardano preprod testnet.
 #
 # Usage: ./scripts/run-bp-preprod.sh [--log FILE]
 #
@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-BIN=./target/release/torsten-node
+BIN=./target/release/dugite-node
 KEY_DIR=./keys/preprod/pool
 
 if [[ ! -x "$BIN" ]]; then
@@ -53,7 +53,7 @@ CMD=(
     --shelley-operational-certificate "$KEY_DIR/opcert.cert"
 )
 
-echo "Starting Torsten block producer (preprod testnet)..."
+echo "Starting Dugite block producer (preprod testnet)..."
 echo "Pool keys: $KEY_DIR"
 echo "Database:  ./db-preprod"
 echo "Socket:    ./node.sock"

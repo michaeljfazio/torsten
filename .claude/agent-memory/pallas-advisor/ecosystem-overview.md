@@ -10,7 +10,7 @@ Last researched: 2026-03-13 against v1.0.0-alpha.5
 
 ## Version Status
 
-- **Current torsten version**: v1.0.0-alpha.5 (Feb 28, 2026)
+- **Current dugite version**: v1.0.0-alpha.5 (Feb 28, 2026)
 - **Previous alpha**: v1.0.0-alpha.4 (Feb 4, 2026)
 - **Latest stable**: v0.35.0 (Feb 10, 2026)
 - **Prior stable**: v0.34.0 (Dec 16, 2025), v0.33.0 (Jul 13, 2025)
@@ -24,11 +24,11 @@ The 1.x alpha series runs alongside the 0.x stable series. Both are actively rel
 
 All published on crates.io at v1.0.0-alpha.5:
 
-| Crate | Description | Torsten Uses? |
+| Crate | Description | Dugite Uses? |
 |-------|-------------|---------------|
 | pallas-codec | CBOR encode/decode via minicbor | YES |
 | pallas-crypto | Ed25519, KES, VRF, Blake2b | YES (kes feature) |
-| pallas-math | Fixed-point arithmetic, VRF math | NO (ported algorithms to torsten-crypto) |
+| pallas-math | Fixed-point arithmetic, VRF math | NO (ported algorithms to dugite-crypto) |
 | pallas-network | Ouroboros mini-protocols + multiplexer | YES |
 | pallas-primitives | Block/tx types for Byron-Conway | YES |
 | pallas-traverse | Era-agnostic MultiEraBlock/Tx traversal | YES |
@@ -61,7 +61,7 @@ The 1.x series introduced breaking API changes from 0.x:
 
 ## Cargo.lock Notes
 
-Torsten's Cargo.lock shows BOTH 0.33.0 and 1.0.0-alpha.5 versions of several crates:
+Dugite's Cargo.lock shows BOTH 0.33.0 and 1.0.0-alpha.5 versions of several crates:
 - pallas-addresses: 0.33.0 AND 1.0.0-alpha.5
 - pallas-codec: 0.33.0 AND 1.0.0-alpha.5
 - pallas-crypto: 0.33.0 AND 1.0.0-alpha.5
@@ -73,7 +73,7 @@ The 0.33.x versions are likely pulled in transitively by cardano-lsm or another 
 
 ## Unpublished / Experimental
 
-- **pallas-network2**: Listed in workspace but NOT published to crates.io. Appears to be an experimental rewrite of pallas-network. Not relevant for torsten adoption until stable.
+- **pallas-network2**: Listed in workspace but NOT published to crates.io. Appears to be an experimental rewrite of pallas-network. Not relevant for dugite adoption until stable.
 - **pallas-bech32**: Appears in the repository; not confirmed published. Provides Bech32 encoding separate from pallas-addresses.
 
 ## Documentation & Stability

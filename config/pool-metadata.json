@@ -1,6 +1,6 @@
 {
   "name": "Sandstone Pool",
-  "description": "Sandstone Pool - Powered by Torsten, a Rust implementation of the Cardano node",
+  "description": "Sandstone Pool - Powered by Dugite, a Rust implementation of the Cardano node",
   "ticker": "SAND",
   "homepage": "https://sandstone.io"
 }

@@ -120,7 +120,7 @@ Source: ouroboros-consensus-cardano/.../Consensus/Cardano/Node.hs
 TPraos UPDN rule (Updn.hs line 64): `sp <- liftSTS $ asks stabilityWindow` reads Globals.stabilityWindow = 3k/f
 Praos reupdateChainDepState (Praos.hs line 503): uses PraosParams.praosRandomnessStabilisationWindow
 
-IMPORTANT: Torsten currently uses 4k/f unconditionally. Correct for Conway, WRONG for Babbage and earlier.
+IMPORTANT: Dugite currently uses 4k/f unconditionally. Correct for Conway, WRONG for Babbage and earlier.
 
 ## Candidate Nonce Semantics: TRACK EARLY, FREEZE LATE
 

@@ -12,7 +12,7 @@ After the e8b58c9 fix (Hash32-padded credential hashes truncated to 28 bytes), t
 
 **Effect:** Members who haven't run `CommitteeHotAuth` are invisible in `query committee-state` responses. cardano-cli transaction build may fail if it expects specific CC quorum.
 
-**Location:** `crates/torsten-node/src/node/query.rs`, lines 277-313
+**Location:** `crates/dugite-node/src/node/query.rs`, lines 277-313
 
 **How to apply:** Should iterate `committee_expiration` as the outer loop, then look up hot_keys and resigned status per member. Members absent from hot_keys and resigned should have hot_status=1 (MemberNotAuthorized).
 
@@ -22,7 +22,7 @@ After the e8b58c9 fix (Hash32-padded credential hashes truncated to 28 bytes), t
 
 **Effect:** Script hot credentials appear as key-hash type — cardano-cli may reject this if it validates the credential type.
 
-**Location:** `crates/torsten-network/src/n2c/query/encoding.rs`, line 1055
+**Location:** `crates/dugite-network/src/n2c/query/encoding.rs`, line 1055
 Fix: add `hot_credential_type: u8` to `CommitteeMemberSnapshot` and populate it from the certificate data.
 
 ## 3. committee_hot_keys stores hot credential as Hash32 but doesn't track hot cred type
@@ -31,7 +31,7 @@ Fix: add `hot_credential_type: u8` to `CommitteeMemberSnapshot` and populate it 
 
 **Effect:** Combined with Bug 2 — we can never correctly encode the hot credential type.
 
-**Location:** `crates/torsten-ledger/src/state/mod.rs`, line 204; `certificates.rs` CommitteeHotAuth handler.
+**Location:** `crates/dugite-ledger/src/state/mod.rs`, line 204; `certificates.rs` CommitteeHotAuth handler.
 
 ## Notes on what IS fixed (e8b58c9)
 

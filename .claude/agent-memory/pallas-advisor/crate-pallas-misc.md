@@ -1,6 +1,6 @@
 ---
 name: crate-pallas-misc
-description: pallas-addresses, pallas-primitives, pallas-codec, pallas-bech32, pallas-utxorpc — capabilities and torsten usage
+description: pallas-addresses, pallas-primitives, pallas-codec, pallas-bech32, pallas-utxorpc — capabilities and dugite usage
 type: reference
 ---
 
@@ -50,9 +50,9 @@ pub type CertIdx = u64
 - Script hash detection (`is_script()`)
 - Enterprise address detection
 
-### Torsten Usage
+### Dugite Usage
 
-Used in `torsten-node/src/` (from Cargo.toml) and `torsten-serialization/src/` (from Cargo.toml). Primary use is address parsing for UTxO outputs and query response formatting.
+Used in `dugite-node/src/` (from Cargo.toml) and `dugite-serialization/src/` (from Cargo.toml). Primary use is address parsing for UTxO outputs and query response formatting.
 
 ---
 
@@ -100,9 +100,9 @@ pub struct BoundedBytes(Vec<u8>)
 - `json` (default): serde + serde_json for JSON representation
 - `relaxed`: enables relaxed mode in pallas-crypto
 
-### Torsten Usage
+### Dugite Usage
 
-Heavy usage in `torsten-serialization/src/multi_era.rs`:
+Heavy usage in `dugite-serialization/src/multi_era.rs`:
 - Era-specific certificate types: `alonzo::Certificate`, `conway::Certificate`
 - DRep: `conway::DRep`
 - Governance: `conway::GovAction`, `conway::Vote`, `conway::Voter`
@@ -176,11 +176,11 @@ pub struct EmptyMap        // Empty map representation
 codec_by_datatype!  // Maps CBOR data types to enum variant constructors
 ```
 
-### Torsten Usage
+### Dugite Usage
 
 - `MaybeIndefArray` — in multi_era.rs for CBOR arrays
 - `BoundedBytes` — (actually in pallas-primitives, re-exported via codec)
-- `minicbor` — re-exported for use throughout torsten-serialization
+- `minicbor` — re-exported for use throughout dugite-serialization
 
 ---
 
@@ -194,17 +194,17 @@ Status: Appears in pallas workspace. Not confirmed published separately to crate
 
 Description: "Interoperability with the UTxO RPC specification"
 
-Provides integration with the UTxO RPC protocol (gRPC-based API for Cardano). Not relevant to torsten's current use case (direct Ouroboros node). Would only matter if torsten wanted to expose a UTxO RPC endpoint.
+Provides integration with the UTxO RPC protocol (gRPC-based API for Cardano). Not relevant to dugite's current use case (direct Ouroboros node). Would only matter if dugite wanted to expose a UTxO RPC endpoint.
 
 **Adoption Recommendation**: Ignore for now. UTxO RPC is a separate ecosystem concern.
 
 ---
 
-## API Quirks Relevant to Torsten
+## API Quirks Relevant to Dugite
 
 ### Nullable<T> vs Option<T> Change (alpha.1)
 
-In pallas v0.x, many fields used `Nullable<T>`. In v1.0.0-alpha.1+, these were changed to `Option<T>`. This was a breaking change torsten had to handle during the 0.x→1.x migration.
+In pallas v0.x, many fields used `Nullable<T>`. In v1.0.0-alpha.1+, these were changed to `Option<T>`. This was a breaking change dugite had to handle during the 0.x→1.x migration.
 
 If encountering old code or documentation using `Nullable`, it's now `Option<T>` in v1.x.
 
@@ -218,4 +218,4 @@ If encountering old code or documentation using `Nullable`, it's now `Option<T>`
 
 ### 28-byte Hash Padding
 
-`Hash<28>` types (DRep keys, pool voter keys, required signers) cannot be padded to `Hash<32>` via `Hash<32>::from()`. Torsten must manually extend with 4 zero bytes. This is an ongoing sharp edge.
+`Hash<28>` types (DRep keys, pool voter keys, required signers) cannot be padded to `Hash<32>` via `Hash<32>::from()`. Dugite must manually extend with 4 zero bytes. This is an ongoing sharp edge.

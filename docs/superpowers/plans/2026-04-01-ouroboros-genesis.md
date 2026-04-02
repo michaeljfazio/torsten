@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Wire the dormant GSM, GDD, and LoE code into Torsten's live sync pipeline using an event-based actor, giving eclipse resistance during initial sync.
+**Goal:** Wire the dormant GSM, GDD, and LoE code into Dugite's live sync pipeline using an event-based actor, giving eclipse resistance during initial sync.
 
 **Architecture:** A dedicated GSM actor tokio task owns the GenesisStateMachine exclusively. Producers (ChainSync, BlockFetch, networking) emit GsmEvents via an mpsc channel. The actor publishes state via a watch channel (GsmSnapshot) and GDD disconnect commands via a second mpsc channel. No Arc<RwLock<>> on the GSM.
 
-**Tech Stack:** Rust, tokio (mpsc, watch, select!, Interval), torsten-consensus DensityWindow, torsten-node gsm.rs
+**Tech Stack:** Rust, tokio (mpsc, watch, select!, Interval), dugite-consensus DensityWindow, dugite-node gsm.rs
 
 **Spec:** `docs/superpowers/specs/2026-04-01-ouroboros-genesis-design.md`
 
@@ -16,19 +16,19 @@
 
 | File | Role | Action |
 |------|------|--------|
-| `crates/torsten-consensus/src/chain_selection.rs` | DensityWindow — add helper methods | Modify |
-| `crates/torsten-node/src/gsm.rs` | GSM types, actor, GDD algorithm | Rewrite |
-| `crates/torsten-node/src/node/mod.rs` | Node struct, GSM init, actor spawn | Modify |
-| `crates/torsten-node/src/node/sync.rs` | Emit GsmEvents, consume GsmSnapshot | Modify |
-| `crates/torsten-node/src/node/networking.rs` | Emit PeerDisconnected, consume GddAction | Modify |
-| `crates/torsten-node/src/node/connection_lifecycle.rs` | Emit PeerDisconnected on conn close | Modify |
+| `crates/dugite-consensus/src/chain_selection.rs` | DensityWindow — add helper methods | Modify |
+| `crates/dugite-node/src/gsm.rs` | GSM types, actor, GDD algorithm | Rewrite |
+| `crates/dugite-node/src/node/mod.rs` | Node struct, GSM init, actor spawn | Modify |
+| `crates/dugite-node/src/node/sync.rs` | Emit GsmEvents, consume GsmSnapshot | Modify |
+| `crates/dugite-node/src/node/networking.rs` | Emit PeerDisconnected, consume GddAction | Modify |
+| `crates/dugite-node/src/node/connection_lifecycle.rs` | Emit PeerDisconnected on conn close | Modify |
 
 ---
 
 ### Task 1: Extend DensityWindow with Helper Methods
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/chain_selection.rs:396-461`
+- Modify: `crates/dugite-consensus/src/chain_selection.rs:396-461`
 
 - [ ] **Step 1: Write failing tests for new DensityWindow methods**
 
@@ -86,7 +86,7 @@ fn test_density_window_total_block_count() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo nextest run -p torsten-consensus -E 'test(test_density_window_blocks_before) | test(test_density_window_has_block_at_or_after) | test(test_density_window_head_slot) | test(test_density_window_total_block_count)'`
+Run: `cargo nextest run -p dugite-consensus -E 'test(test_density_window_blocks_before) | test(test_density_window_has_block_at_or_after) | test(test_density_window_head_slot) | test(test_density_window_total_block_count)'`
 
 Expected: FAIL — methods don't exist yet.
 
@@ -128,20 +128,20 @@ pub fn total_block_count(&self) -> u64 {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo nextest run -p torsten-consensus -E 'test(test_density_window_blocks_before) | test(test_density_window_has_block_at_or_after) | test(test_density_window_head_slot) | test(test_density_window_total_block_count)'`
+Run: `cargo nextest run -p dugite-consensus -E 'test(test_density_window_blocks_before) | test(test_density_window_has_block_at_or_after) | test(test_density_window_head_slot) | test(test_density_window_total_block_count)'`
 
 Expected: PASS
 
 - [ ] **Step 5: Run full consensus test suite + clippy**
 
-Run: `cargo nextest run -p torsten-consensus && cargo clippy -p torsten-consensus --all-targets -- -D warnings`
+Run: `cargo nextest run -p dugite-consensus && cargo clippy -p dugite-consensus --all-targets -- -D warnings`
 
 Expected: All pass, zero warnings.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/chain_selection.rs
+git add crates/dugite-consensus/src/chain_selection.rs
 git commit -m "feat(consensus): add DensityWindow helper methods for GDD (#316)"
 ```
 
@@ -150,7 +150,7 @@ git commit -m "feat(consensus): add DensityWindow helper methods for GDD (#316)"
 ### Task 2: Define GSM Event Types and GsmSnapshot
 
 **Files:**
-- Modify: `crates/torsten-node/src/gsm.rs`
+- Modify: `crates/dugite-node/src/gsm.rs`
 
 - [ ] **Step 1: Add the new types at the top of gsm.rs**
 
@@ -319,14 +319,14 @@ impl Default for GsmConfig {
 
 - [ ] **Step 4: Verify it compiles**
 
-Run: `cargo check -p torsten-node`
+Run: `cargo check -p dugite-node`
 
 Expected: Compilation errors from `GenesisStateMachine` methods that reference the old PeerChainInfo fields. That's fine — we'll fix those in Task 3.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-node/src/gsm.rs
+git add crates/dugite-node/src/gsm.rs
 git commit -m "feat(gsm): define GsmEvent, GsmSnapshot, GddAction types and update PeerChainInfo (#316)"
 ```
 
@@ -335,7 +335,7 @@ git commit -m "feat(gsm): define GsmEvent, GsmSnapshot, GddAction types and upda
 ### Task 3: Rewrite GenesisStateMachine with Correct GDD Algorithm
 
 **Files:**
-- Modify: `crates/torsten-node/src/gsm.rs`
+- Modify: `crates/dugite-node/src/gsm.rs`
 
 - [ ] **Step 1: Write failing tests for the 4-guard GDD algorithm**
 
@@ -1007,20 +1007,20 @@ impl GenesisStateMachine {
 
 - [ ] **Step 3: Run the tests**
 
-Run: `cargo nextest run -p torsten-node -E 'test(test_gdd_) | test(test_presyncing_) | test(test_syncing_) | test(test_caught_up_) | test(test_loe_)'`
+Run: `cargo nextest run -p dugite-node -E 'test(test_gdd_) | test(test_presyncing_) | test(test_syncing_) | test(test_caught_up_) | test(test_loe_)'`
 
 Expected: All PASS.
 
 - [ ] **Step 4: Run clippy**
 
-Run: `cargo clippy -p torsten-node --all-targets -- -D warnings`
+Run: `cargo clippy -p dugite-node --all-targets -- -D warnings`
 
 Fix any warnings. The `#[allow(dead_code)]` annotations should now be removed since the code is actively used.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-node/src/gsm.rs
+git add crates/dugite-node/src/gsm.rs
 git commit -m "feat(gsm): rewrite GSM with Haskell-correct 4-guard GDD algorithm (#316)
 
 - Integer-only density comparison (no floating point)
@@ -1036,7 +1036,7 @@ git commit -m "feat(gsm): rewrite GSM with Haskell-correct 4-guard GDD algorithm
 ### Task 4: Implement the GSM Actor
 
 **Files:**
-- Modify: `crates/torsten-node/src/gsm.rs`
+- Modify: `crates/dugite-node/src/gsm.rs`
 
 - [ ] **Step 1: Write a test for the actor lifecycle**
 
@@ -1319,20 +1319,20 @@ use std::time::Duration;
 
 - [ ] **Step 4: Run the actor tests**
 
-Run: `cargo nextest run -p torsten-node -E 'test(test_gsm_actor_)'`
+Run: `cargo nextest run -p dugite-node -E 'test(test_gsm_actor_)'`
 
 Expected: All PASS.
 
 - [ ] **Step 5: Run full test suite + clippy**
 
-Run: `cargo nextest run -p torsten-node && cargo clippy -p torsten-node --all-targets -- -D warnings`
+Run: `cargo nextest run -p dugite-node && cargo clippy -p dugite-node --all-targets -- -D warnings`
 
 Expected: There will be compilation errors in `node/mod.rs` because it still references `Arc<RwLock<GenesisStateMachine>>`. That's expected — we fix it in Task 5.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-node/src/gsm.rs
+git add crates/dugite-node/src/gsm.rs
 git commit -m "feat(gsm): implement GSM actor with event loop and GDD evaluation (#316)"
 ```
 
@@ -1341,7 +1341,7 @@ git commit -m "feat(gsm): implement GSM actor with event loop and GDD evaluation
 ### Task 5: Wire GSM Actor into Node Struct and Initialization
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/mod.rs`
+- Modify: `crates/dugite-node/src/node/mod.rs`
 
 - [ ] **Step 1: Replace GSM field in Node struct**
 
@@ -1532,14 +1532,14 @@ if genesis_enabled {
 
 - [ ] **Step 6: Verify compilation**
 
-Run: `cargo check -p torsten-node`
+Run: `cargo check -p dugite-node`
 
 Expected: May still have errors in sync.rs (Task 6 fixes those).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/mod.rs
+git add crates/dugite-node/src/node/mod.rs
 git commit -m "feat(node): wire GSM actor channels into Node struct and run() (#316)"
 ```
 
@@ -1548,7 +1548,7 @@ git commit -m "feat(node): wire GSM actor channels into Node struct and run() (#
 ### Task 6: Wire GsmEvent Producers into Sync Pipeline
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/sync.rs`
+- Modify: `crates/dugite-node/src/node/sync.rs`
 
 - [ ] **Step 1: Replace LoE reads with watch channel**
 
@@ -1620,20 +1620,20 @@ Similarly, if `process_forward_blocks` or other functions reference `self.gsm`, 
 
 - [ ] **Step 6: Verify compilation**
 
-Run: `cargo check -p torsten-node`
+Run: `cargo check -p dugite-node`
 
 Expected: PASS (or minor fixups needed).
 
 - [ ] **Step 7: Run full test suite**
 
-Run: `cargo nextest run -p torsten-node && cargo clippy -p torsten-node --all-targets -- -D warnings`
+Run: `cargo nextest run -p dugite-node && cargo clippy -p dugite-node --all-targets -- -D warnings`
 
 Expected: PASS, zero warnings.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/sync.rs
+git add crates/dugite-node/src/node/sync.rs
 git commit -m "feat(sync): emit GsmEvents from ChainSync pipeline and consume GsmSnapshot for LoE (#316)"
 ```
 
@@ -1642,8 +1642,8 @@ git commit -m "feat(sync): emit GsmEvents from ChainSync pipeline and consume Gs
 ### Task 7: Wire PeerDisconnected Events from Networking
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/networking.rs`
-- Modify: `crates/torsten-node/src/node/connection_lifecycle.rs`
+- Modify: `crates/dugite-node/src/node/networking.rs`
+- Modify: `crates/dugite-node/src/node/connection_lifecycle.rs`
 
 - [ ] **Step 1: Emit PeerDisconnected in peer_disconnected()**
 
@@ -1697,14 +1697,14 @@ Check all call sites of `peer_disconnected` and `remove_peer` to ensure coverage
 
 - [ ] **Step 4: Verify compilation and tests**
 
-Run: `cargo check -p torsten-node && cargo nextest run -p torsten-node`
+Run: `cargo check -p dugite-node && cargo nextest run -p dugite-node`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/networking.rs crates/torsten-node/src/node/connection_lifecycle.rs
+git add crates/dugite-node/src/node/networking.rs crates/dugite-node/src/node/connection_lifecycle.rs
 git commit -m "feat(networking): emit GsmEvent::PeerDisconnected on peer disconnect (#316)"
 ```
 

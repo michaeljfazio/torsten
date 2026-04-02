@@ -1,5 +1,5 @@
 [package]
-name = "torsten-fuzz"
+name = "dugite-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -11,10 +11,10 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 bincode = "1"
 minicbor = { version = "0.25", features = ["std"] }
-torsten-serialization = { path = "../crates/torsten-serialization" }
-torsten-network = { path = "../crates/torsten-network" }
-torsten-primitives = { path = "../crates/torsten-primitives" }
-torsten-ledger = { path = "../crates/torsten-ledger" }
+dugite-serialization = { path = "../crates/dugite-serialization" }
+dugite-network = { path = "../crates/dugite-network" }
+dugite-primitives = { path = "../crates/dugite-primitives" }
+dugite-ledger = { path = "../crates/dugite-ledger" }
 
 # Prevent this from interfering with workspaces
 [workspace]

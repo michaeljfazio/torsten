@@ -1,6 +1,6 @@
 apiVersion: v2
-name: torsten-node
-description: A Helm chart for deploying Torsten, a Rust implementation of the Cardano node
+name: dugite-node
+description: A Helm chart for deploying Dugite, a Rust implementation of the Cardano node
 type: application
 version: 0.1.0
 appVersion: "1.0.0-alpha"
@@ -9,8 +9,8 @@ keywords:
   - blockchain
   - relay
   - block-producer
-home: https://github.com/michaeljfazio/torsten
+home: https://github.com/michaeljfazio/dugite
 sources:
-  - https://github.com/michaeljfazio/torsten
+  - https://github.com/michaeljfazio/dugite
 maintainers:
   - name: Michael Fazio

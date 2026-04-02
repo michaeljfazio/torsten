@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# Torsten Node 3-Hour Transaction Submission Soak Test
-# Runs every 10 minutes for 3 hours (18 cycles)
-# Tests: single tx submission, batch submission (every 30 min), node restart (at 1 hour)
+# Dugite Node Transaction Submission Soak Test
+# Runs every 10 minutes for 6 hours (36 cycles) by default
+# Tests: single tx submission, batch submission (every 30 min), node restart (at ~70 min)
 # All results logged to /tmp/soak-test-results.log
 
 set -euo pipefail
 
 # ── Configuration ───────────────────────────────────────────────────────────
-TORSTEN_ROOT="/Users/michaelfazio/Source/torsten"
-CLI="$TORSTEN_ROOT/target/release/torsten-cli"
-NODE_BIN="$TORSTEN_ROOT/target/release/torsten-node"
-SOCKET="$TORSTEN_ROOT/node.sock"
-PAYMENT_ADDR="addr_test1qzultc5n46dl02n6v5f4zwhgf623m99ngda8cegynr7aaqtvnhgsytsr9zrwaz79h74dhlm4s3hy8dd9v0mzcye6l90setqluv"
-PAYMENT_SKEY="$TORSTEN_ROOT/keys/preview-test/payment.skey"
+DUGITE_ROOT="/Users/michaelfazio/Source/dugite"
+CLI="$DUGITE_ROOT/target/release/dugite-cli"
+NODE_BIN="$DUGITE_ROOT/target/release/dugite-node"
+SOCKET="$DUGITE_ROOT/node.sock"
+PAYMENT_ADDR="addr_test1qzs7h6ls9n957qd8hjyztx2urg4cfsyn9pc0cnl6k0wclwk4ujf0j6rs5yzp4xh7wlyvzus93qntyw0mdz54ma0s8k8q7sh4a8"
+PAYMENT_SKEY="$DUGITE_ROOT/keys/payment.skey"
 METRICS_URL="http://localhost:12798/metrics"
-KEY_DIR="$TORSTEN_ROOT/keys/preview-test/pool"
+KEY_DIR="$DUGITE_ROOT/keys"
 LOG_FILE="/tmp/soak-test-results.log"
-NODE_LOG="$TORSTEN_ROOT/logs/torsten-node.log"
+NODE_LOG="$DUGITE_ROOT/logs/dugite-node.log"
 TESTNET_MAGIC=2
 FEE=200000  # 0.2 ADA fixed fee
 SOAK_CYCLE=10      # minutes between cycles
-SOAK_DURATION=180  # total minutes (3 hours)
+SOAK_DURATION=${SOAK_DURATION:-360}  # total minutes (6 hours default, override via env)
 RESTART_AT_CYCLE=7 # cycle index (0-based) at which to do restart test (~70 min)
 
 # ── State tracking ───────────────────────────────────────────────────────────
@@ -57,7 +57,7 @@ get_metrics() {
 
 metric_value() {
     local name="$1"
-    get_metrics | grep "^torsten_${name} " | awk '{print $2}'
+    get_metrics | grep "^dugite_${name} " | awk '{print $2}'
 }
 
 get_node_tip_slot() {
@@ -229,10 +229,12 @@ health_check() {
     fi
 
     # Memory usage
+    local node_pid
+    node_pid=$(pgrep -f "dugite-node run" 2>/dev/null | head -1 || echo "0")
     local mem_kb
-    mem_kb=$(ps -o rss= -p 80373 2>/dev/null || echo "0")
+    mem_kb=$(ps -o rss= -p "$node_pid" 2>/dev/null || echo "0")
     local mem_mb=$(( mem_kb / 1024 ))
-    log "  Memory(PID=80373): ${mem_mb}MB RSS"
+    log "  Memory(PID=$node_pid): ${mem_mb}MB RSS"
 
     # Cumulative soak stats
     local avg_confirm=0
@@ -259,26 +261,36 @@ load_utxos() {
     # Parse from the statically known list (fetched at test start)
     # Format: hash index value
     local utxo_list=(
-        "3fc57ced2a11c2d36cd97157724df472a7fa7fe5615c3c5afef3ea7a80eaf331 0 2000000"
-        "13e3e959e83c97b6cb3399bad7b97f404f64b4cbfedfdea2b8600d8a31c5d3ec 0 2000000"
-        "18c92acc409af916c15d0a428dd7c335ba0420b7a19f0eaf8242b0666b3b52e3 0 2000000"
-        "54a36730d64b8fbf6cd1e0f59b28c919ec9ed7694265e407a83a45e1f91d9819 0 2000000"
-        "d33bccf6c78055c5517202f6805b2d8be773e1c61db3eb244fff8d3f74c945df 0 2000000"
-        "9f6a9d4e1fa989c45635486917da4309f860a5a0102671e40daa03755562b3f1 0 2000000"
-        "5f30c2acc1eb8d8fa61d86be850a5d2690abc9571165858f02486b01106d3092 0 2000000"
-        "8e9e58c575f973531c93011a5bf764b7698b6903e2b8ba097cc996cdb405abcc 0 2000000"
-        "cc73e990b389fb7b7cbcbbc09661d94e48583a38e80eb343b4208b1081919dd0 0 2000000"
-        "bac6834153cebaf76a3d6871399b65027ccc552029ad2ee0c12ca7bbf4c62021 0 2000000"
-        "65ce3185d4958121af2a26b5c8abaa250dc9182bbed482e8b60f8813fd02d423 0 2000000"
-        "2f2991bb21186d9c79624cf7e1cdd3439129251ba2f2a98adefe8af04854b224 0 2000000"
-        "951ff73e8b8839fe79ff323fa0e1d4e5c284c2ae1364ac4515d4ddd831c39074 0 2000000"
-        "5157dcd15fb1a5336fa44668dc56784e2db58af290bd240a0b514eb7bfa94adf 0 2000000"
-        "36373a586ff94d889e215ea3260e98a6bde47f0c0b4093f1a0fde47923968d5a 0 2000000"
-        "7d0e848745e65ecd4d5eb6a3cbeefd3f93c8106a1044c55455dbdd589599f3f1 0 2000000"
-        "cfeb5091e871aee669a819a4207413d439734ef88c3a377c76194f839966b8b1 0 2000000"
-        "8920a007a8989cac4f46454d01bfc36a65b023e34e4e7859746ed7437bb0cce0 0 2000000"
-        "2d84ddb91a5fe4f8b9a22335f7a4837c4f5629564be5c2a36cc52da6f193c7ff 0 2000000"
-        "1419f3f833773a1e82aab024d500deae7b84cbfc51c5273d08d056539d44d776 0 2000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 0 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 1 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 2 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 3 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 4 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 5 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 6 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 7 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 8 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 9 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 10 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 11 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 12 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 13 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 14 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 15 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 16 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 17 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 18 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 19 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 20 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 21 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 22 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 23 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 24 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 25 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 26 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 27 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 28 5000000"
+        "b58ecd5e6e64ccefa6065cc39ffb0a71e0880bdfc22c6497895f4fc07e3d8d02 29 5000000"
     )
 
     # Also add: the output of each submitted tx becomes a new 1.8ADA UTxO
@@ -392,14 +404,14 @@ add_change_utxo() {
 # ── Node restart logic ────────────────────────────────────────────────────────
 restart_node() {
     log_section "NODE RESTART TEST"
-    log "  Killing existing torsten-node processes..."
-    pkill -f torsten-node || true
+    log "  Killing existing dugite-node processes..."
+    pkill -f dugite-node || true
     sleep 3
 
     # Verify stopped
-    if pgrep -f torsten-node > /dev/null 2>&1; then
+    if pgrep -f dugite-node > /dev/null 2>&1; then
         log "  WARNING: processes still running after pkill, sending SIGKILL"
-        pkill -9 -f torsten-node || true
+        pkill -9 -f dugite-node || true
         sleep 2
     fi
 
@@ -411,9 +423,9 @@ restart_node() {
     local restart_ts; restart_ts=$(date +%s)
     log "  Starting node at $(date -u +%Y-%m-%dT%H:%M:%SZ)..."
     "$NODE_BIN" run \
-        --config "$TORSTEN_ROOT/config/preview-config.json" \
-        --topology "$TORSTEN_ROOT/config/preview-topology.json" \
-        --database-path "$TORSTEN_ROOT/db-preview" \
+        --config "$DUGITE_ROOT/config/preview-config.json" \
+        --topology "$DUGITE_ROOT/config/preview-topology.json" \
+        --database-path "$DUGITE_ROOT/db-preview" \
         --socket-path "$SOCKET" \
         --host-addr 0.0.0.0 --port 3001 \
         --shelley-kes-key "$KEY_DIR/kes.skey" \
@@ -487,7 +499,7 @@ check_pending_confirmations() {
             if check_confirmation "$tx_hash" "$submit_ts"; then
                 rm -f "$f"
                 # Add change UTxO
-                local change=$(( 2000000 - FEE ))
+                local change=$(( 5000000 - FEE ))
                 add_change_utxo "$tx_hash" "$change"
             elif (( age >= 300 )); then
                 # >5 min: mark as failed
@@ -580,7 +592,7 @@ hourly_report() {
 
 # Initialize
 echo "" > "$LOG_FILE"  # start fresh log
-log_section "TORSTEN NODE SOAK TEST — 3 HOURS"
+log_section "DUGITE NODE SOAK TEST — ${SOAK_DURATION}min ($(( SOAK_DURATION / 60 ))h)"
 log "Start time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 log "Config: $SOAK_DURATION min total, $SOAK_CYCLE min cycles, $TOTAL_CYCLES total cycles"
 log "Socket: $SOCKET"
@@ -589,7 +601,8 @@ log "Address: $PAYMENT_ADDR"
 load_utxos
 
 # Get initial Koios tip slot for gap tracking
-KOIOS_SLOT=107921360  # from startup check
+KOIOS_SLOT=$(curl -sf "https://preview.koios.rest/api/v1/tip" 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('abs_slot',0) if d else 0)" 2>/dev/null || echo "0")
 
 log_section "INITIAL STATE"
 health_check "$KOIOS_SLOT"
@@ -601,7 +614,7 @@ while (( CYCLE < TOTAL_CYCLES )); do
     # Wait until it's time for this cycle
     local_now=$(date +%s)
     if (( local_now < NEXT_CYCLE_TS )); then
-        local sleep_secs=$(( NEXT_CYCLE_TS - local_now ))
+        sleep_secs=$(( NEXT_CYCLE_TS - local_now ))
         log "Sleeping ${sleep_secs}s until cycle $CYCLE..."
         sleep "$sleep_secs"
     fi
@@ -617,13 +630,13 @@ while (( CYCLE < TOTAL_CYCLES )); do
         | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('abs_slot',0) if d else 0)" 2>/dev/null || echo "$KOIOS_SLOT")
     health_check "$KOIOS_SLOT"
 
-    # Special: restart at cycle $RESTART_AT_CYCLE
-    if (( CYCLE == RESTART_AT_CYCLE )); then
+    # Periodic restarts: at cycles 7 (~70 min), 21 (~3.5h), 30 (~5h)
+    if (( CYCLE == 7 || CYCLE == 21 || CYCLE == 30 )); then
         restart_node
     fi
 
     # Batch submission every 30 minutes (every 3rd cycle starting from cycle 3)
-    local elapsed_min=$(( (local_now - SOAK_START_TS) / 60 ))
+    elapsed_min=$(( (local_now - SOAK_START_TS) / 60 ))
     if (( elapsed_min > 0 && elapsed_min % 30 == 0 )); then
         submit_batch 4
     else
@@ -652,24 +665,24 @@ log "Submitted:   $SUBMITTED"
 log "Confirmed:   $CONFIRMED"
 log "Failed:      $FAILED"
 log "Rejected:    $REJECTED"
-local avg_confirm=0
+avg_confirm=0
 if (( CONFIRM_COUNT > 0 )); then
     avg_confirm=$(( TOTAL_CONFIRM_SECS / CONFIRM_COUNT ))
 fi
 log "Avg confirm: ${avg_confirm}s"
 
 # Final metrics
-local applied; applied=$(metric_value "blocks_applied_total")
-local forged; forged=$(metric_value "blocks_forged_total")
-local peers; peers=$(metric_value "peers_connected")
-local rollbacks; rollbacks=$(metric_value "rollback_count_total")
-local leader_checks; leader_checks=$(metric_value "leader_checks_total")
-local not_elected; not_elected=$(metric_value "leader_checks_not_elected_total")
+applied=$(metric_value "blocks_applied_total")
+forged=$(metric_value "blocks_forged_total")
+peers=$(metric_value "peers_connected")
+rollbacks=$(metric_value "rollback_count_total")
+leader_checks=$(metric_value "leader_checks_total")
+not_elected=$(metric_value "leader_checks_not_elected_total")
 log "Final metrics: blocks_applied=$applied forged=$forged peers=$peers rollbacks=$rollbacks"
 log "Final metrics: leader_checks=$leader_checks not_elected=$not_elected"
 
 # Error summary from log
-local error_lines; error_lines=$(grep " ERROR " "$NODE_LOG" 2>/dev/null | tail -20 || echo "none")
+error_lines=$(grep " ERROR " "$NODE_LOG" 2>/dev/null | tail -20 || echo "none")
 log "Recent ERROR lines from node log:"
 echo "$error_lines" | tee -a "$LOG_FILE"
 

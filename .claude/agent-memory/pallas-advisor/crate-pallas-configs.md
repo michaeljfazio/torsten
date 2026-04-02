@@ -1,6 +1,6 @@
 ---
 name: crate-pallas-configs
-description: Genesis file parsing capabilities of pallas-configs across all eras; comparison to torsten-node genesis.rs
+description: Genesis file parsing capabilities of pallas-configs across all eras; comparison to dugite-node genesis.rs
 type: reference
 ---
 
@@ -151,23 +151,23 @@ pub struct Committee {
 }
 ```
 
-## What pallas-configs Provides That torsten-node Doesn't
+## What pallas-configs Provides That dugite-node Doesn't
 
-1. **Structured Byron genesis parsing** — torsten's genesis.rs may not parse all Byron genesis fields
+1. **Structured Byron genesis parsing** — dugite's genesis.rs may not parse all Byron genesis fields
 2. **Shelley UTxO extraction helper** — `shelley_utxos()` function
 3. **Conway governance parameter parsing** — committee, DRep thresholds with proper Fraction type
 4. **Cost model utilities** — via `cost_models` submodule
 
-## What torsten-node/genesis.rs Has Beyond pallas-configs
+## What dugite-node/genesis.rs Has Beyond pallas-configs
 
-Need to verify, but torsten likely:
+Need to verify, but dugite likely:
 - Reads genesis files and extracts specific fields for ledger initialization
 - Handles the eras needed for its use cases
 - May parse fields pallas-configs omits (or vice versa)
 
 ## Adoption Recommendation
 
-**ADOPT** with low risk. pallas-configs is straightforward JSON deserialization with no complex logic. It would replace ad-hoc parsing in `torsten-node/src/genesis.rs`. The main consideration is ensuring field coverage (torsten may need fields pallas-configs doesn't expose).
+**ADOPT** with low risk. pallas-configs is straightforward JSON deserialization with no complex logic. It would replace ad-hoc parsing in `dugite-node/src/genesis.rs`. The main consideration is ensuring field coverage (dugite may need fields pallas-configs doesn't expose).
 
 **Key benefit**: The `shelley_utxos()` function and structured protocol parameter types that match what pallas-validate's `Environment` struct expects (reducing type conversion friction if also adopting pallas-validate).
 

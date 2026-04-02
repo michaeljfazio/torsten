@@ -15,7 +15,7 @@ comment:
   require_changes: true
 
 ignore:
-  - "crates/torsten-node/src/main.rs"
+  - "crates/dugite-node/src/main.rs"
   - "tests/**"
   - "scripts/**"
   - "benches/**"

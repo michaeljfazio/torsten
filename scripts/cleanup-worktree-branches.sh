@@ -5,7 +5,7 @@
 # This script MUST be run from the main repo directory (not from a worktree).
 #
 # Usage:
-#   cd /Users/michaelfazio/Source/torsten
+#   cd /Users/michaelfazio/Source/dugite
 #   bash scripts/cleanup-worktree-branches.sh
 #
 # What it does:

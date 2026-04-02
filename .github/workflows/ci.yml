@@ -80,7 +80,7 @@ jobs:
             ${{ runner.os }}-coverage-
 
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --workspace --exclude torsten-integration-tests --exclude torsten-conformance --lcov --output-path lcov.info
+        run: cargo llvm-cov --all-features --workspace --exclude dugite-integration-tests --exclude dugite-conformance --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -111,10 +111,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build binaries
-        run: cargo build --release -p torsten-cli -p torsten-node
+        run: cargo build --release -p dugite-cli -p dugite-node
 
       - name: Run offline integration tests
-        run: cargo test -p torsten-integration-tests -- tier0
+        run: cargo test -p dugite-integration-tests -- tier0
 
   release-binaries:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -124,22 +124,22 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: torsten-linux-x86_64
+            artifact: dugite-linux-x86_64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            artifact: torsten-linux-aarch64
+            artifact: dugite-linux-aarch64
             cross: true
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact: torsten-macos-x86_64
+            artifact: dugite-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: torsten-macos-aarch64
+            artifact: dugite-macos-aarch64
           # Windows disabled: fs2 file locking behaves differently on MSVC.
-          # Re-enable when torsten-lsm session_lock.rs is ported to Windows.
+          # Re-enable when dugite-lsm session_lock.rs is ported to Windows.
           # - os: windows-latest
           #   target: x86_64-pc-windows-msvc
-          #   artifact: torsten-windows-x86_64
+          #   artifact: dugite-windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -169,13 +169,13 @@ jobs:
       - name: Build release binaries
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target ${{ matrix.target }} -p torsten-node -p torsten-cli
+        run: cargo build --release --target ${{ matrix.target }} -p dugite-node -p dugite-cli
 
       - name: Package binaries
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/torsten-node dist/ 2>/dev/null || true
-          cp target/${{ matrix.target }}/release/torsten-cli dist/ 2>/dev/null || true
+          cp target/${{ matrix.target }}/release/dugite-node dist/ 2>/dev/null || true
+          cp target/${{ matrix.target }}/release/dugite-cli dist/ 2>/dev/null || true
           tar -czf ${{ matrix.artifact }}.tar.gz -C dist .
 
       - name: Upload artifact

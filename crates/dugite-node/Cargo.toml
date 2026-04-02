@@ -1,0 +1,70 @@
+[package]
+name = "dugite-node"
+version.workspace = true
+edition.workspace = true
+description = "Dugite Cardano node - main entry point"
+
+[features]
+default = []
+io-uring = ["dugite-storage/io-uring"]
+journald = ["dep:tracing-journald"]
+
+[lib]
+name = "dugite_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dugite-node"
+path = "src/main.rs"
+
+[dependencies]
+dugite-primitives = { workspace = true }
+dugite-crypto = { workspace = true }
+dugite-serialization = { workspace = true }
+dugite-network = { workspace = true }
+dugite-consensus = { workspace = true }
+dugite-ledger = { workspace = true }
+dugite-mempool = { workspace = true }
+dugite-storage = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-journald = { workspace = true, optional = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+hex.workspace = true
+bech32 = { workspace = true }
+bs58.workspace = true
+base64 = { workspace = true }
+chrono = { workspace = true }
+minicbor = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+zstd = { workspace = true }
+tar = { workspace = true }
+indicatif = { workspace = true }
+futures-util = { workspace = true }
+pallas-addresses = { workspace = true }
+pallas-crypto = { workspace = true }
+pallas-traverse = { workspace = true }
+sha2 = { workspace = true }
+memmap2 = { workspace = true }
+crc32fast = { workspace = true }
+fs2 = { workspace = true }
+rayon = { workspace = true }
+libc.workspace = true
+num-bigint = { workspace = true }
+tokio-util = { workspace = true }
+mithril-client = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

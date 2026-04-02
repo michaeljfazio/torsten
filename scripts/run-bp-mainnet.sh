@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run Torsten as a block producer on Cardano mainnet.
+# Run Dugite as a block producer on Cardano mainnet.
 #
 # Usage: ./scripts/run-bp-mainnet.sh [--log FILE]
 #
@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-BIN=./target/release/torsten-node
+BIN=./target/release/dugite-node
 KEY_DIR=./keys/mainnet/pool
 
 if [[ ! -x "$BIN" ]]; then
@@ -53,7 +53,7 @@ CMD=(
     --shelley-operational-certificate "$KEY_DIR/opcert.cert"
 )
 
-echo "Starting Torsten block producer (mainnet)..."
+echo "Starting Dugite block producer (mainnet)..."
 echo "Pool keys: $KEY_DIR"
 echo "Database:  ./db-mainnet"
 echo "Socket:    ./node.sock"

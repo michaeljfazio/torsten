@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "torsten-node.fullname" . }}
+  name: {{ include "dugite-node.fullname" . }}
   labels:
-    {{- include "torsten-node.labels" . | nindent 4 }}
+    {{- include "dugite-node.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      {{- include "torsten-node.selectorLabels" . | nindent 6 }}
+      {{- include "dugite-node.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -20,7 +20,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "torsten-node.labels" . | nindent 8 }}
+        {{- include "dugite-node.labels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -29,7 +29,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "torsten-node.serviceAccountName" . }}
+      serviceAccountName: {{ include "dugite-node.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if .Values.mithril.enabled }}
@@ -39,11 +39,11 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           command:
-            - torsten-node
+            - dugite-node
           args:
             - mithril-import
             - --network-magic
-            - {{ include "torsten-node.networkMagic" . | quote }}
+            - {{ include "dugite-node.networkMagic" . | quote }}
             - --database-path
             - /data/db
             - --temp-dir
@@ -64,9 +64,9 @@ spec:
           args:
             - run
             - --config
-            - /etc/torsten/config.json
+            - /etc/dugite/config.json
             - --topology
-            - /etc/torsten/topology.json
+            - /etc/dugite/topology.json
             - --database-path
             - /data/db
             - --socket-path
@@ -94,11 +94,11 @@ spec:
             - name: RUST_LOG
               value: {{ .Values.logging.rustLog | default "info" | quote }}
             {{- if .Values.ledger.pipelineDepth }}
-            - name: TORSTEN_PIPELINE_DEPTH
+            - name: DUGITE_PIPELINE_DEPTH
               value: {{ .Values.ledger.pipelineDepth | quote }}
             {{- end }}
             {{- if .Values.ledger.replayLimit }}
-            - name: TORSTEN_REPLAY_LIMIT
+            - name: DUGITE_REPLAY_LIMIT
               value: {{ .Values.ledger.replayLimit | quote }}
             {{- end }}
           ports:
@@ -126,11 +126,11 @@ spec:
             - name: ipc
               mountPath: /ipc
             - name: topology
-              mountPath: /etc/torsten/topology.json
+              mountPath: /etc/dugite/topology.json
               subPath: topology.json
               readOnly: true
             - name: node-config
-              mountPath: /etc/torsten/config.json
+              mountPath: /etc/dugite/config.json
               subPath: config.json
               readOnly: true
             {{- if eq .Values.role "producer" }}
@@ -142,7 +142,7 @@ spec:
         - name: data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "torsten-node.fullname" .)) }}
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "dugite-node.fullname" .)) }}
           {{- else }}
           emptyDir: {}
           {{- end }}
@@ -152,14 +152,14 @@ spec:
           emptyDir: {}
         - name: topology
           configMap:
-            name: {{ include "torsten-node.fullname" . }}-config
+            name: {{ include "dugite-node.fullname" . }}-config
         - name: node-config
           configMap:
-            name: {{ include "torsten-node.fullname" . }}-network
+            name: {{ include "dugite-node.fullname" . }}-network
         {{- if eq .Values.role "producer" }}
         - name: producer-keys
           secret:
-            secretName: {{ .Values.producer.existingSecret | default (printf "%s-producer-keys" (include "torsten-node.fullname" .)) }}
+            secretName: {{ .Values.producer.existingSecret | default (printf "%s-producer-keys" (include "dugite-node.fullname" .)) }}
             defaultMode: 0400
         {{- end }}
       {{- with .Values.nodeSelector }}

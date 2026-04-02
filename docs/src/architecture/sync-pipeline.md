@@ -1,6 +1,6 @@
 # Sync Pipeline
 
-Torsten uses a pipelined multi-peer architecture for block synchronization, separating header collection from block fetching for maximum throughput.
+Dugite uses a pipelined multi-peer architecture for block synchronization, separating header collection from block fetching for maximum throughput.
 
 ## Architecture
 
@@ -57,7 +57,7 @@ Blocks are fetched in batches of 500 headers, with sub-batches of 100 headers ea
 
 Fetched blocks are applied to the ledger state in order:
 
-1. **Deserialization** — Raw CBOR bytes are decoded into Torsten's internal `Block` type using pallas
+1. **Deserialization** — Raw CBOR bytes are decoded into Dugite's internal `Block` type using pallas
 2. **Ledger validation** — Each block is validated against the current ledger state (UTxO checks, fee validation, certificate processing)
 3. **Storage** — Valid blocks are added to the ChainDB (volatile database first, flushed to immutable when k-deep)
 4. **Epoch transitions** — At epoch boundaries, stake snapshots are rotated and rewards are calculated
@@ -88,13 +88,13 @@ Only blocks in the VolatileDB (the last k=2160 blocks) can be rolled back. Block
 
 ## Pipelined ChainSync
 
-Torsten uses pipelined ChainSync to avoid the round-trip latency bottleneck of serial header requests. Instead of waiting for each `MsgRollForward` before requesting the next header, the node sends up to 300 `MsgRequestNext` messages concurrently (configurable via `TORSTEN_PIPELINE_DEPTH`).
+Dugite uses pipelined ChainSync to avoid the round-trip latency bottleneck of serial header requests. Instead of waiting for each `MsgRollForward` before requesting the next header, the node sends up to 300 `MsgRequestNext` messages concurrently (configurable via `DUGITE_PIPELINE_DEPTH`).
 
 This bypasses pallas' serial ChainSync state machine in favor of a custom implementation that manages the pipeline depth directly.
 
 ## Performance Characteristics
 
-- **Header collection** is pipelined per peer (up to 300 in-flight requests, configurable via `TORSTEN_PIPELINE_DEPTH`)
+- **Header collection** is pipelined per peer (up to 300 in-flight requests, configurable via `DUGITE_PIPELINE_DEPTH`)
 - **Block fetching** is parallelized across up to 4 concurrent peers
 - **Block processing** is batched (500 blocks per batch) with single-lock acquisition
 - **Throughput** depends on network latency, peer count, and block sizes

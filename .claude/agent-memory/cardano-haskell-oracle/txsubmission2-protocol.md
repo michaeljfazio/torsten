@@ -1,6 +1,6 @@
 ---
 name: TxSubmission2 Protocol Roles and Wire Format
-description: Complete analysis of TxSubmission2 roles (client=outbound=serves mempool, server=inbound=pulls mempool), MsgInit flow, direction bits, init delay, and the critical role inversion bug in Torsten
+description: Complete analysis of TxSubmission2 roles (client=outbound=serves mempool, server=inbound=pulls mempool), MsgInit flow, direction bits, init delay, and the critical role inversion bug in Dugite
 type: reference
 ---
 
@@ -83,7 +83,7 @@ Note: Haskell uses indefinite-length arrays (encodeListLenIndef + encodeBreak) f
 | StTxIds StNonBlocking     | shortWait     |
 | StTxs                     | shortWait     |
 
-## Torsten Bug (Confirmed 2026-03-20)
+## Dugite Bug (Confirmed 2026-03-20)
 
 Both `serve_tx_submission` and `pull_tx_submission` in duplex.rs have their roles INVERTED:
 - The responder (subscribe_server) acts as the Client (waits for MsgRequestTxIds, replies)

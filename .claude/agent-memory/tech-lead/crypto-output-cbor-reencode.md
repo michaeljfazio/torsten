@@ -73,7 +73,7 @@ dispatches to `encode_legacy_transaction_output()` when `is_legacy` is true.
 ---
 
 ### Test Coverage Added
-`crates/torsten-serialization/tests/output_reencode.rs` — 6 tests:
+`crates/dugite-serialization/tests/output_reencode.rs` — 6 tests:
 1. `test_output_reencode_simple_indef_datum` — tx with indef-length 5-element list datum
 2. `test_output_reencode_nested_constr_datum` — deeply-nested Constr all using indef arrays
 3. `test_output_reencode_multi_output_mixed_datums` — 4-output tx with multiple datum shapes

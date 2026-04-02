@@ -1,19 +1,19 @@
 [workspace]
 members = [
-    "crates/torsten-primitives",
-    "crates/torsten-crypto",
-    "crates/torsten-serialization",
-    "crates/torsten-network",
-    "crates/torsten-consensus",
-    "crates/torsten-ledger",
-    "crates/torsten-mempool",
-    "crates/torsten-storage",
-    "crates/torsten-node",
-    "crates/torsten-cli",
-    "crates/torsten-lsm",
-    "crates/torsten-integration-tests",
-    "crates/torsten-monitor",
-    "crates/torsten-config",
+    "crates/dugite-primitives",
+    "crates/dugite-crypto",
+    "crates/dugite-serialization",
+    "crates/dugite-network",
+    "crates/dugite-consensus",
+    "crates/dugite-ledger",
+    "crates/dugite-mempool",
+    "crates/dugite-storage",
+    "crates/dugite-node",
+    "crates/dugite-cli",
+    "crates/dugite-lsm",
+    "crates/dugite-integration-tests",
+    "crates/dugite-monitor",
+    "crates/dugite-config",
     "tests/conformance",
     "tests/golden",
 ]
@@ -23,23 +23,23 @@ resolver = "2"
 version = "1.0.0-alpha"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/michaeljfazio/torsten"
-description = "Torsten - A Rust implementation of the Cardano node"
+repository = "https://github.com/michaeljfazio/dugite"
+description = "Dugite - A Rust implementation of the Cardano node"
 
 [workspace.dependencies]
 # Workspace crates
-torsten-primitives = { path = "crates/torsten-primitives" }
-torsten-crypto = { path = "crates/torsten-crypto" }
-torsten-serialization = { path = "crates/torsten-serialization" }
-torsten-network = { path = "crates/torsten-network" }
-torsten-consensus = { path = "crates/torsten-consensus" }
-torsten-ledger = { path = "crates/torsten-ledger" }
-torsten-mempool = { path = "crates/torsten-mempool" }
-torsten-storage = { path = "crates/torsten-storage" }
-torsten-node = { path = "crates/torsten-node" }
-torsten-cli = { path = "crates/torsten-cli" }
-torsten-lsm = { path = "crates/torsten-lsm" }
-torsten-monitor = { path = "crates/torsten-monitor" }
+dugite-primitives = { path = "crates/dugite-primitives" }
+dugite-crypto = { path = "crates/dugite-crypto" }
+dugite-serialization = { path = "crates/dugite-serialization" }
+dugite-network = { path = "crates/dugite-network" }
+dugite-consensus = { path = "crates/dugite-consensus" }
+dugite-ledger = { path = "crates/dugite-ledger" }
+dugite-mempool = { path = "crates/dugite-mempool" }
+dugite-storage = { path = "crates/dugite-storage" }
+dugite-node = { path = "crates/dugite-node" }
+dugite-cli = { path = "crates/dugite-cli" }
+dugite-lsm = { path = "crates/dugite-lsm" }
+dugite-monitor = { path = "crates/dugite-monitor" }
 
 # Terminal UI
 ratatui = "0.29"
@@ -128,7 +128,7 @@ proptest = "1"
 mithril-client = { version = "0.13", default-features = false, features = ["num-integer-backend", "rustls-tls-webpki-roots", "fs"] }
 
 ## [patch.crates-io]
-## Removed: cardano-lsm now used from crates.io (for UTxO store in torsten-ledger)
+## Removed: cardano-lsm now used from crates.io (for UTxO store in dugite-ledger)
 
 [profile.release]
 opt-level = 3

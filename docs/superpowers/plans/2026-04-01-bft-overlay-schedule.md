@@ -4,7 +4,7 @@
 
 **Goal:** Implement 100% Haskell-compatible BFT overlay schedule validation for historical Shelley-era blocks where the decentralization parameter d > 0.
 
-**Architecture:** New `overlay.rs` module in `torsten-consensus` implements the overlay schedule computation (`is_overlay_slot`, `classify_overlay_slot`) using exact rational arithmetic matching Haskell's `Cardano.Ledger.Slot` and `Cardano.Protocol.TPraos.Rules.Overlay`. The existing `validate_header_full()` in `praos.rs` gains a new optional `OverlayContext` parameter that branches between the Praos path (existing) and BFT path (new) based on slot classification. Genesis delegates are stored in `LedgerState` and passed through from the sync call site.
+**Architecture:** New `overlay.rs` module in `dugite-consensus` implements the overlay schedule computation (`is_overlay_slot`, `classify_overlay_slot`) using exact rational arithmetic matching Haskell's `Cardano.Ledger.Slot` and `Cardano.Protocol.TPraos.Rules.Overlay`. The existing `validate_header_full()` in `praos.rs` gains a new optional `OverlayContext` parameter that branches between the Praos path (existing) and BFT path (new) based on slot classification. Genesis delegates are stored in `LedgerState` and passed through from the sync call site.
 
 **Tech Stack:** Rust, exact i128 rational arithmetic (no f64), BTreeSet for sorted genesis key ordering
 
@@ -14,25 +14,25 @@
 
 | File | Action | Responsibility |
 |------|--------|---------------|
-| `crates/torsten-consensus/src/overlay.rs` | Create | Overlay schedule computation: `is_overlay_slot`, `classify_overlay_slot`, `lookup_in_overlay_schedule`, `OBftSlot`, `OverlayContext` |
-| `crates/torsten-consensus/src/lib.rs` | Modify | Add `pub mod overlay` and re-export key types |
-| `crates/torsten-consensus/src/praos.rs` | Modify | Add overlay-aware validation path in `validate_header_full()`, new `ConsensusError` variants |
-| `crates/torsten-ledger/src/state/mod.rs` | Modify | Add `genesis_delegates` field to `LedgerState` |
-| `crates/torsten-node/src/node/mod.rs` | Modify | Load genesis delegates into `LedgerState` at initialization |
-| `crates/torsten-node/src/node/sync.rs` | Modify | Build `OverlayContext` and pass to `validate_header_full()` when d > 0 |
+| `crates/dugite-consensus/src/overlay.rs` | Create | Overlay schedule computation: `is_overlay_slot`, `classify_overlay_slot`, `lookup_in_overlay_schedule`, `OBftSlot`, `OverlayContext` |
+| `crates/dugite-consensus/src/lib.rs` | Modify | Add `pub mod overlay` and re-export key types |
+| `crates/dugite-consensus/src/praos.rs` | Modify | Add overlay-aware validation path in `validate_header_full()`, new `ConsensusError` variants |
+| `crates/dugite-ledger/src/state/mod.rs` | Modify | Add `genesis_delegates` field to `LedgerState` |
+| `crates/dugite-node/src/node/mod.rs` | Modify | Load genesis delegates into `LedgerState` at initialization |
+| `crates/dugite-node/src/node/sync.rs` | Modify | Build `OverlayContext` and pass to `validate_header_full()` when d > 0 |
 
 ---
 
 ### Task 1: Overlay Schedule Core — `is_overlay_slot`
 
 **Files:**
-- Create: `crates/torsten-consensus/src/overlay.rs`
-- Modify: `crates/torsten-consensus/src/lib.rs`
+- Create: `crates/dugite-consensus/src/overlay.rs`
+- Modify: `crates/dugite-consensus/src/lib.rs`
 
 - [ ] **Step 1: Create overlay.rs with `is_overlay_slot` and tests**
 
 ```rust
-// crates/torsten-consensus/src/overlay.rs
+// crates/dugite-consensus/src/overlay.rs
 
 //! BFT overlay schedule for Shelley-era blocks (d > 0).
 //!
@@ -49,7 +49,7 @@
 //! overlay slot and all blocks use the pure Praos path.
 
 use std::collections::BTreeSet;
-use torsten_primitives::hash::Hash28;
+use dugite_primitives::hash::Hash28;
 
 /// Result of classifying an overlay slot.
 ///
@@ -203,7 +203,7 @@ mod tests {
 
 - [ ] **Step 2: Add module to lib.rs**
 
-Add to `crates/torsten-consensus/src/lib.rs`:
+Add to `crates/dugite-consensus/src/lib.rs`:
 
 ```rust
 pub mod overlay;
@@ -217,13 +217,13 @@ pub use overlay::{OBftSlot, OverlayContext};
 
 - [ ] **Step 3: Run tests to verify they pass**
 
-Run: `cargo nextest run -p torsten-consensus -E 'test(overlay)'`
+Run: `cargo nextest run -p dugite-consensus -E 'test(overlay)'`
 Expected: All overlay tests PASS
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/overlay.rs crates/torsten-consensus/src/lib.rs
+git add crates/dugite-consensus/src/overlay.rs crates/dugite-consensus/src/lib.rs
 git commit -m "feat(consensus): add BFT overlay slot detection matching Haskell isOverlaySlot"
 ```
 
@@ -232,11 +232,11 @@ git commit -m "feat(consensus): add BFT overlay slot detection matching Haskell 
 ### Task 2: Overlay Slot Classification — `classify_overlay_slot` and `lookup_in_overlay_schedule`
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/overlay.rs`
+- Modify: `crates/dugite-consensus/src/overlay.rs`
 
 - [ ] **Step 1: Add `classify_overlay_slot` and `lookup_in_overlay_schedule`**
 
-Append to `crates/torsten-consensus/src/overlay.rs` (before the `#[cfg(test)]` block):
+Append to `crates/dugite-consensus/src/overlay.rs` (before the `#[cfg(test)]` block):
 
 ```rust
 /// Classify an overlay slot to determine which genesis delegate should sign.
@@ -344,7 +344,7 @@ pub struct OverlayContext {
     /// Genesis delegates: genesis_key_hash → (delegate_key_hash, delegate_vrf_key_hash).
     /// The delegate_key_hash is Blake2b-224 of the delegate's cold verification key.
     /// The delegate_vrf_key_hash is Blake2b-256 of the delegate's VRF verification key.
-    pub genesis_delegates: std::collections::HashMap<Hash28, (Hash28, torsten_primitives::hash::Hash32)>,
+    pub genesis_delegates: std::collections::HashMap<Hash28, (Hash28, dugite_primitives::hash::Hash32)>,
     /// Sorted set of genesis key hashes for deterministic round-robin assignment.
     /// Must match Haskell's `Data.Set` ordering (lexicographic on 28-byte hash).
     pub genesis_keys: BTreeSet<Hash28>,
@@ -362,7 +362,7 @@ Append to the `tests` module in `overlay.rs`:
 
 ```rust
     use std::collections::HashMap;
-    use torsten_primitives::hash::Hash32;
+    use dugite_primitives::hash::Hash32;
 
     fn make_genesis_keys(n: usize) -> BTreeSet<Hash28> {
         (0..n)
@@ -477,13 +477,13 @@ Append to the `tests` module in `overlay.rs`:
 
 - [ ] **Step 3: Run tests to verify they pass**
 
-Run: `cargo nextest run -p torsten-consensus -E 'test(overlay)'`
+Run: `cargo nextest run -p dugite-consensus -E 'test(overlay)'`
 Expected: All overlay tests PASS
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/overlay.rs
+git add crates/dugite-consensus/src/overlay.rs
 git commit -m "feat(consensus): add overlay slot classification and lookup matching Haskell OVERLAY rule"
 ```
 
@@ -492,12 +492,12 @@ git commit -m "feat(consensus): add overlay slot classification and lookup match
 ### Task 3: Store Genesis Delegates in LedgerState
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/mod.rs`
-- Modify: `crates/torsten-node/src/node/mod.rs`
+- Modify: `crates/dugite-ledger/src/state/mod.rs`
+- Modify: `crates/dugite-node/src/node/mod.rs`
 
 - [ ] **Step 1: Add `genesis_delegates` field to `LedgerState`**
 
-In `crates/torsten-ledger/src/state/mod.rs`, add to the `LedgerState` struct (after the `pointer_map` field around line 174):
+In `crates/dugite-ledger/src/state/mod.rs`, add to the `LedgerState` struct (after the `pointer_map` field around line 174):
 
 ```rust
     /// Genesis delegates: genesis_key_hash (28 bytes) → (delegate_key_hash (28 bytes), vrf_key_hash (32 bytes)).
@@ -518,7 +518,7 @@ Import `Hash28` if not already imported at the top of the file.
 
 - [ ] **Step 2: Add setter method on LedgerState**
 
-In `crates/torsten-ledger/src/state/mod.rs`, add a method to `impl LedgerState`:
+In `crates/dugite-ledger/src/state/mod.rs`, add a method to `impl LedgerState`:
 
 ```rust
     /// Load genesis delegates from Shelley genesis data.
@@ -552,7 +552,7 @@ In `crates/torsten-ledger/src/state/mod.rs`, add a method to `impl LedgerState`:
 
 - [ ] **Step 3: Load genesis delegates during node initialization**
 
-In `crates/torsten-node/src/node/mod.rs`, find where Shelley genesis parameters are applied to ledger state (around line 399, the block starting with `if let Some(ref genesis) = shelley_genesis`). After the existing `state.set_update_quorum(genesis.update_quorum);` line, add:
+In `crates/dugite-node/src/node/mod.rs`, find where Shelley genesis parameters are applied to ledger state (around line 399, the block starting with `if let Some(ref genesis) = shelley_genesis`). After the existing `state.set_update_quorum(genesis.update_quorum);` line, add:
 
 ```rust
                         // Load genesis delegates for BFT overlay schedule validation
@@ -576,7 +576,7 @@ Expected: Compiles successfully
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-ledger/src/state/mod.rs crates/torsten-node/src/node/mod.rs
+git add crates/dugite-ledger/src/state/mod.rs crates/dugite-node/src/node/mod.rs
 git commit -m "feat(ledger): store genesis delegates in LedgerState for overlay validation"
 ```
 
@@ -585,11 +585,11 @@ git commit -m "feat(ledger): store genesis delegates in LedgerState for overlay 
 ### Task 4: Add Overlay-Aware Validation to `validate_header_full`
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/praos.rs`
+- Modify: `crates/dugite-consensus/src/praos.rs`
 
 - [ ] **Step 1: Add new `ConsensusError` variants**
 
-In `crates/torsten-consensus/src/praos.rs`, add to the `ConsensusError` enum:
+In `crates/dugite-consensus/src/praos.rs`, add to the `ConsensusError` enum:
 
 ```rust
     #[error("Not an active overlay slot: slot {slot} is in the overlay schedule but has no assigned signer")]
@@ -603,8 +603,8 @@ In `crates/torsten-consensus/src/praos.rs`, add to the `ConsensusError` enum:
     UnknownGenesisKey(Hash28),
     #[error("Genesis delegate VRF key mismatch: expected {expected}, got {got}")]
     GenesisVrfKeyMismatch {
-        expected: torsten_primitives::hash::Hash32,
-        got: torsten_primitives::hash::Hash32,
+        expected: dugite_primitives::hash::Hash32,
+        got: dugite_primitives::hash::Hash32,
     },
 ```
 
@@ -713,7 +713,7 @@ After the protocol version checks (step 1b, around line 492) and BEFORE the pool
                         // Verify block issuer key hash matches the delegate key hash.
                         // Haskell: hashKey(bheaderVk bhb) == coerceKeyRole(genDelegKeyHash)
                         let issuer_hash =
-                            torsten_primitives::hash::blake2b_224(&header.issuer_vkey);
+                            dugite_primitives::hash::blake2b_224(&header.issuer_vkey);
                         if issuer_hash != *delegate_hash {
                             if self.strict_verification {
                                 return Err(ConsensusError::WrongGenesisDelegate {
@@ -786,9 +786,9 @@ After the protocol version checks (step 1b, around line 492) and BEFORE the pool
 - [ ] **Step 4: Fix all call sites of `validate_header_full` to pass `None` for overlay_ctx**
 
 Search for all calls to `validate_header_full(` in the codebase. For each call, add `None,` as the new 4th argument (after `issuer_info`). This includes:
-- `crates/torsten-node/src/node/sync.rs` (will be updated properly in Task 5)
-- `crates/torsten-node/tests/forge_integration.rs`
-- All test calls in `crates/torsten-consensus/src/praos.rs`
+- `crates/dugite-node/src/node/sync.rs` (will be updated properly in Task 5)
+- `crates/dugite-node/tests/forge_integration.rs`
+- All test calls in `crates/dugite-consensus/src/praos.rs`
 
 For the test calls in `praos.rs`, the pattern is:
 ```rust
@@ -801,13 +801,13 @@ For the test calls in `praos.rs`, the pattern is:
 - [ ] **Step 5: Run build and tests**
 
 Run: `cargo build --all-targets 2>&1 | head -30`
-Run: `cargo nextest run -p torsten-consensus`
+Run: `cargo nextest run -p dugite-consensus`
 Expected: Build succeeds, all existing tests pass
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/praos.rs crates/torsten-node/src/node/sync.rs crates/torsten-node/tests/forge_integration.rs
+git add crates/dugite-consensus/src/praos.rs crates/dugite-node/src/node/sync.rs crates/dugite-node/tests/forge_integration.rs
 git commit -m "feat(consensus): add overlay-aware validation path in validate_header_full"
 ```
 
@@ -816,11 +816,11 @@ git commit -m "feat(consensus): add overlay-aware validation path in validate_he
 ### Task 5: Wire Up Overlay Context in Sync Pipeline
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/sync.rs`
+- Modify: `crates/dugite-node/src/node/sync.rs`
 
 - [ ] **Step 1: Build `OverlayContext` and pass to `validate_header_full`**
 
-In `crates/torsten-node/src/node/sync.rs`, inside the block validation loop (around line 770, inside the `{ let ls = ... }` block), after `let total_active_stake` is computed and before the `for block in &blocks` loop, build the overlay context:
+In `crates/dugite-node/src/node/sync.rs`, inside the block validation loop (around line 770, inside the `{ let ls = ... }` block), after `let total_active_stake` is computed and before the `for block in &blocks` loop, build the overlay context:
 
 ```rust
             // Build overlay context for BFT schedule validation.
@@ -834,9 +834,9 @@ In `crates/torsten-node/src/node/sync.rs`, inside the block validation loop (aro
                     blocks.first().map(|b| b.slot().0).unwrap_or(0),
                 );
                 let first_slot = ls.first_slot_of_epoch(epoch);
-                let genesis_keys: std::collections::BTreeSet<torsten_primitives::hash::Hash28> =
+                let genesis_keys: std::collections::BTreeSet<dugite_primitives::hash::Hash28> =
                     ls.genesis_delegates.keys().copied().collect();
-                Some(torsten_consensus::overlay::OverlayContext {
+                Some(dugite_consensus::overlay::OverlayContext {
                     genesis_delegates: ls.genesis_delegates.clone(),
                     genesis_keys,
                     d: (ls.protocol_params.d.numerator, ls.protocol_params.d.denominator),
@@ -914,7 +914,7 @@ Expected: Build succeeds, all tests pass
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/sync.rs
+git add crates/dugite-node/src/node/sync.rs
 git commit -m "feat(node): wire overlay context through sync pipeline for BFT validation"
 ```
 
@@ -923,7 +923,7 @@ git commit -m "feat(node): wire overlay context through sync pipeline for BFT va
 ### Task 6: Add Integration Tests for Overlay Validation
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/overlay.rs`
+- Modify: `crates/dugite-consensus/src/overlay.rs`
 
 - [ ] **Step 1: Add integration-style tests to overlay.rs**
 
@@ -1051,7 +1051,7 @@ Add these tests to the `tests` module in `overlay.rs`:
 
 - [ ] **Step 2: Run all tests**
 
-Run: `cargo nextest run -p torsten-consensus -E 'test(overlay)'`
+Run: `cargo nextest run -p dugite-consensus -E 'test(overlay)'`
 Expected: All tests PASS
 
 - [ ] **Step 3: Run full test suite and clippy**
@@ -1064,7 +1064,7 @@ Expected: All pass with zero warnings
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/overlay.rs
+git add crates/dugite-consensus/src/overlay.rs
 git commit -m "test(consensus): add comprehensive overlay schedule integration tests"
 ```
 

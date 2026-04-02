@@ -1,0 +1,360 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use fs2::available_space;
+use tokio::sync::watch;
+use tracing::{debug, error, warn};
+
+use crate::metrics::NodeMetrics;
+
+/// Disk space warning thresholds
+const WARNING_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GB
+const CRITICAL_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GB
+const FATAL_BYTES: u64 = 500 * 1024 * 1024; // 500 MB
+
+/// How often to check disk space (in seconds)
+const CHECK_INTERVAL_SECS: u64 = 60;
+
+/// Disk space severity levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskSpaceLevel {
+    /// Plenty of space available
+    Ok,
+    /// Below 10 GB — operator should investigate
+    Warning,
+    /// Below 2 GB — node may soon be unable to store blocks
+    Critical,
+    /// Below 500 MB — node should refuse new blocks to protect data integrity
+    Fatal,
+}
+
+impl std::fmt::Display for DiskSpaceLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiskSpaceLevel::Ok => write!(f, "ok"),
+            DiskSpaceLevel::Warning => write!(f, "warning"),
+            DiskSpaceLevel::Critical => write!(f, "critical"),
+            DiskSpaceLevel::Fatal => write!(f, "fatal"),
+        }
+    }
+}
+
+/// Returns the available disk space in bytes for the filesystem containing `path`.
+pub fn check_disk_space(path: &Path) -> std::io::Result<u64> {
+    available_space(path)
+}
+
+/// Returns (total_bytes, used_bytes) for the filesystem containing `path`.
+/// Returns None if the statvfs call fails or on non-Unix platforms.
+pub fn check_disk_total_used(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        let c_path = CString::new(path.to_string_lossy().as_bytes()).ok()?;
+
+        // SAFETY: `mem::zeroed()` is safe here because:
+        // 1. `statvfs` is a system call that writes all fields of the struct
+        // 2. We immediately call `statvfs` which fills the struct before reading
+        // 3. The struct is not used before being written by the syscall
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+
+        // SAFETY: `statvfs(c_path.as_ptr(), &mut stat)` is safe because:
+        // 1. `c_path` is a valid C string (CString::new succeeded)
+        // 2. `stat` points to valid, aligned memory
+        // 3. `statvfs` writes to the struct and we check return value for errors
+        let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+        if ret != 0 {
+            return None;
+        }
+        #[allow(clippy::unnecessary_cast)]
+        let block_size = stat.f_frsize as u64;
+        #[allow(clippy::unnecessary_cast)]
+        let total = stat.f_blocks as u64 * block_size;
+        #[allow(clippy::unnecessary_cast)]
+        let used = total.saturating_sub(stat.f_bfree as u64 * block_size);
+        Some((total, used))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Classify available bytes into a severity level.
+pub fn classify_disk_space(available_bytes: u64) -> DiskSpaceLevel {
+    if available_bytes < FATAL_BYTES {
+        DiskSpaceLevel::Fatal
+    } else if available_bytes < CRITICAL_BYTES {
+        DiskSpaceLevel::Critical
+    } else if available_bytes < WARNING_BYTES {
+        DiskSpaceLevel::Warning
+    } else {
+        DiskSpaceLevel::Ok
+    }
+}
+
+/// Format bytes as a human-readable string (e.g. "12.34 GB").
+fn format_bytes(bytes: u64) -> String {
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else {
+        format!("{:.2} MB", b / MB)
+    }
+}
+
+/// Spawn a background task that periodically checks disk space on the database volume,
+/// logs warnings at appropriate severity levels, and updates the Prometheus metric.
+pub async fn start_disk_monitor(
+    database_path: std::path::PathBuf,
+    metrics: Arc<NodeMetrics>,
+    mut shutdown_rx: watch::Receiver<bool>,
+    disk_level_tx: watch::Sender<DiskSpaceLevel>,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(CHECK_INTERVAL_SECS));
+
+    // Do the first check immediately
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = shutdown_rx.changed() => {
+                debug!("Disk monitor shutting down");
+                return;
+            }
+        }
+
+        match check_disk_space(&database_path) {
+            Ok(available) => {
+                metrics.set_disk_available_bytes(available);
+                // Also update total/used metrics for the monitor dashboard.
+                if let Some((total, used)) = check_disk_total_used(&database_path) {
+                    metrics.set_disk_total_bytes(total);
+                    metrics.set_disk_used_bytes(used);
+                }
+                let level = classify_disk_space(available);
+                // Publish the current disk space level so the sync loop can react
+                let _ = disk_level_tx.send(level);
+                let human = format_bytes(available);
+
+                match level {
+                    DiskSpaceLevel::Fatal => {
+                        error!(
+                            available_bytes = available,
+                            "FATAL: Disk space critically low ({human}) — \
+                             node should stop accepting new blocks to protect data integrity"
+                        );
+                    }
+                    DiskSpaceLevel::Critical => {
+                        error!(
+                            available_bytes = available,
+                            "CRITICAL: Disk space very low ({human}) — \
+                             node may soon be unable to store blocks"
+                        );
+                    }
+                    DiskSpaceLevel::Warning => {
+                        warn!(
+                            available_bytes = available,
+                            "Disk space low ({human}) — consider freeing space or expanding volume"
+                        );
+                    }
+                    DiskSpaceLevel::Ok => {
+                        // Only log at debug level when things are healthy
+                        tracing::debug!(
+                            available_bytes = available,
+                            "Disk space check: {human} available"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Failed to check disk space on {}: {e}",
+                    database_path.display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn test_check_disk_space_returns_reasonable_value() {
+        // Check disk space on the current directory — should always succeed and
+        // return a positive value on any system with a working filesystem.
+        let available = check_disk_space(Path::new(".")).expect("check_disk_space should succeed");
+        // Any modern OS should have at least 1 MB free on the root filesystem
+        assert!(
+            available > 1024 * 1024,
+            "expected at least 1 MB free, got {available} bytes"
+        );
+    }
+
+    #[test]
+    fn test_check_disk_space_nonexistent_path() {
+        let result = check_disk_space(Path::new("/nonexistent/path/that/does/not/exist"));
+        assert!(result.is_err(), "should fail for nonexistent path");
+    }
+
+    #[test]
+    fn test_classify_disk_space_ok() {
+        // 20 GB — well above all thresholds
+        let level = classify_disk_space(20 * 1024 * 1024 * 1024);
+        assert_eq!(level, DiskSpaceLevel::Ok);
+    }
+
+    #[test]
+    fn test_classify_disk_space_warning() {
+        // 5 GB — below warning (10 GB), above critical (2 GB)
+        let level = classify_disk_space(5 * 1024 * 1024 * 1024);
+        assert_eq!(level, DiskSpaceLevel::Warning);
+    }
+
+    #[test]
+    fn test_classify_disk_space_critical() {
+        // 1 GB — below critical (2 GB), above fatal (500 MB)
+        let level = classify_disk_space(1024 * 1024 * 1024);
+        assert_eq!(level, DiskSpaceLevel::Critical);
+    }
+
+    #[test]
+    fn test_classify_disk_space_fatal() {
+        // 100 MB — below fatal (500 MB)
+        let level = classify_disk_space(100 * 1024 * 1024);
+        assert_eq!(level, DiskSpaceLevel::Fatal);
+    }
+
+    #[test]
+    fn test_classify_disk_space_zero() {
+        let level = classify_disk_space(0);
+        assert_eq!(level, DiskSpaceLevel::Fatal);
+    }
+
+    #[test]
+    fn test_classify_disk_space_boundary_warning() {
+        // Exactly at the warning threshold — should be warning (strictly less than)
+        let level = classify_disk_space(WARNING_BYTES);
+        assert_eq!(level, DiskSpaceLevel::Ok);
+
+        let level = classify_disk_space(WARNING_BYTES - 1);
+        assert_eq!(level, DiskSpaceLevel::Warning);
+    }
+
+    #[test]
+    fn test_classify_disk_space_boundary_critical() {
+        let level = classify_disk_space(CRITICAL_BYTES);
+        assert_eq!(level, DiskSpaceLevel::Warning);
+
+        let level = classify_disk_space(CRITICAL_BYTES - 1);
+        assert_eq!(level, DiskSpaceLevel::Critical);
+    }
+
+    #[test]
+    fn test_classify_disk_space_boundary_fatal() {
+        let level = classify_disk_space(FATAL_BYTES);
+        assert_eq!(level, DiskSpaceLevel::Critical);
+
+        let level = classify_disk_space(FATAL_BYTES - 1);
+        assert_eq!(level, DiskSpaceLevel::Fatal);
+    }
+
+    #[test]
+    fn test_format_bytes_gb() {
+        let s = format_bytes(10 * 1024 * 1024 * 1024);
+        assert_eq!(s, "10.00 GB");
+    }
+
+    #[test]
+    fn test_format_bytes_mb() {
+        let s = format_bytes(512 * 1024 * 1024);
+        assert_eq!(s, "512.00 MB");
+    }
+
+    #[test]
+    fn test_disk_space_level_display() {
+        assert_eq!(DiskSpaceLevel::Ok.to_string(), "ok");
+        assert_eq!(DiskSpaceLevel::Warning.to_string(), "warning");
+        assert_eq!(DiskSpaceLevel::Critical.to_string(), "critical");
+        assert_eq!(DiskSpaceLevel::Fatal.to_string(), "fatal");
+    }
+
+    #[tokio::test]
+    async fn test_disk_level_watch_channel() {
+        use std::time::Duration;
+        use tokio::sync::watch;
+
+        let metrics = Arc::new(NodeMetrics::new());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (disk_level_tx, mut disk_level_rx) = watch::channel(DiskSpaceLevel::Ok);
+
+        // Spawn the monitor on the current directory (always has space)
+        let db_path = std::path::PathBuf::from(".");
+        tokio::spawn(async move {
+            start_disk_monitor(db_path, metrics, shutdown_rx, disk_level_tx).await;
+        });
+
+        // Wait for the first check to publish a level
+        tokio::time::timeout(Duration::from_secs(5), disk_level_rx.changed())
+            .await
+            .expect("timed out waiting for disk level update")
+            .expect("watch channel closed unexpectedly");
+
+        // On any dev machine, the level should be Ok (plenty of space)
+        let level = *disk_level_rx.borrow();
+        assert_eq!(
+            level,
+            DiskSpaceLevel::Ok,
+            "expected Ok disk level on dev machine, got {level:?}"
+        );
+
+        // Shutdown the monitor
+        shutdown_tx.send(true).ok();
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_timeout_completes() {
+        // Verify that a fast shutdown completes within the timeout
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            // Simulate shutdown work that completes quickly
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "fast shutdown should complete within timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_timeout_expires() {
+        // Verify that a slow shutdown is detected by the timeout
+        let result = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+            // Simulate shutdown work that takes too long
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        })
+        .await;
+        assert!(result.is_err(), "slow shutdown should trigger timeout");
+    }
+
+    #[test]
+    fn test_metrics_integration() {
+        let metrics = NodeMetrics::new();
+        assert_eq!(metrics.disk_available_bytes.load(Ordering::Relaxed), 0);
+
+        metrics.set_disk_available_bytes(42_000_000_000);
+        assert_eq!(
+            metrics.disk_available_bytes.load(Ordering::Relaxed),
+            42_000_000_000
+        );
+
+        let output = metrics.to_prometheus();
+        assert!(output.contains("dugite_disk_available_bytes 42000000000"));
+        assert!(output.contains("# TYPE dugite_disk_available_bytes gauge"));
+    }
+}

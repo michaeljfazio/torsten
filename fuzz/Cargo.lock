@@ -2390,7 +2390,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "torsten-crypto"
+name = "dugite-crypto"
 version = "0.4.5-alpha"
 dependencies = [
  "curve25519-dalek 3.2.0 (git+https://github.com/iquerejeta/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
@@ -2405,25 +2405,25 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.18",
- "torsten-primitives",
+ "dugite-primitives",
  "vrf_dalek",
 ]
 
 [[package]]
-name = "torsten-fuzz"
+name = "dugite-fuzz"
 version = "0.0.0"
 dependencies = [
  "bincode",
  "libfuzzer-sys",
  "minicbor 0.25.1",
- "torsten-ledger",
- "torsten-network",
- "torsten-primitives",
- "torsten-serialization",
+ "dugite-ledger",
+ "dugite-network",
+ "dugite-primitives",
+ "dugite-serialization",
 ]
 
 [[package]]
-name = "torsten-ledger"
+name = "dugite-ledger"
 version = "0.4.5-alpha"
 dependencies = [
  "bincode",
@@ -2435,16 +2435,16 @@ dependencies = [
  "rayon",
  "serde",
  "thiserror 2.0.18",
- "torsten-crypto",
- "torsten-lsm",
- "torsten-primitives",
- "torsten-serialization",
+ "dugite-crypto",
+ "dugite-lsm",
+ "dugite-primitives",
+ "dugite-serialization",
  "tracing",
  "uplc",
 ]
 
 [[package]]
-name = "torsten-lsm"
+name = "dugite-lsm"
 version = "0.4.5-alpha"
 dependencies = [
  "byteorder",
@@ -2455,7 +2455,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "torsten-network"
+name = "dugite-network"
 version = "0.4.5-alpha"
 dependencies = [
  "async-trait",
@@ -2473,14 +2473,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "torsten-crypto",
- "torsten-primitives",
- "torsten-serialization",
+ "dugite-crypto",
+ "dugite-primitives",
+ "dugite-serialization",
  "tracing",
 ]
 
 [[package]]
-name = "torsten-primitives"
+name = "dugite-primitives"
 version = "0.4.5-alpha"
 dependencies = [
  "bech32 0.11.1",
@@ -2499,7 +2499,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "torsten-serialization"
+name = "dugite-serialization"
 version = "0.4.5-alpha"
 dependencies = [
  "bytes",
@@ -2512,7 +2512,7 @@ dependencies = [
  "pallas-traverse 1.0.0-alpha.5",
  "serde",
  "thiserror 2.0.18",
- "torsten-primitives",
+ "dugite-primitives",
  "tracing",
 ]
 

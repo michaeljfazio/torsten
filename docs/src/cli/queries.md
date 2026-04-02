@@ -1,19 +1,19 @@
 # Queries
 
-Torsten CLI provides a comprehensive set of queries against a running node via the N2C (Node-to-Client) protocol over a Unix domain socket.
+Dugite CLI provides a comprehensive set of queries against a running node via the N2C (Node-to-Client) protocol over a Unix domain socket.
 
 ## Chain Tip
 
 Query the current chain tip:
 
 ```bash
-torsten-cli query tip --socket-path ./node.sock
+dugite-cli query tip --socket-path ./node.sock
 ```
 
 For testnets:
 
 ```bash
-torsten-cli query tip --socket-path ./node.sock --testnet-magic 2
+dugite-cli query tip --socket-path ./node.sock --testnet-magic 2
 ```
 
 Output:
@@ -34,7 +34,7 @@ Output:
 Query UTxOs at a specific address:
 
 ```bash
-torsten-cli query utxo \
+dugite-cli query utxo \
   --address addr_test1qz... \
   --socket-path ./node.sock \
   --testnet-magic 2
@@ -57,11 +57,11 @@ Query current protocol parameters:
 
 ```bash
 # Print to stdout
-torsten-cli query protocol-parameters \
+dugite-cli query protocol-parameters \
   --socket-path ./node.sock
 
 # Save to file
-torsten-cli query protocol-parameters \
+dugite-cli query protocol-parameters \
   --socket-path ./node.sock \
   --out-file protocol-params.json
 ```
@@ -73,7 +73,7 @@ The output is a JSON object containing all active protocol parameters, including
 Query the stake distribution across all registered pools:
 
 ```bash
-torsten-cli query stake-distribution \
+dugite-cli query stake-distribution \
   --socket-path ./node.sock
 ```
 
@@ -93,7 +93,7 @@ Total pools: 3200
 Query delegation and rewards for a stake address:
 
 ```bash
-torsten-cli query stake-address-info \
+dugite-cli query stake-address-info \
   --address stake_test1uz... \
   --socket-path ./node.sock \
   --testnet-magic 2
@@ -116,7 +116,7 @@ Output:
 List all registered stake pools with their parameters:
 
 ```bash
-torsten-cli query stake-pools \
+dugite-cli query stake-pools \
   --socket-path ./node.sock
 ```
 
@@ -136,7 +136,7 @@ Total pools: 3200
 Query detailed parameters for a specific pool:
 
 ```bash
-torsten-cli query pool-params \
+dugite-cli query pool-params \
   --socket-path ./node.sock \
   --stake-pool-id pool1abc...
 ```
@@ -146,11 +146,11 @@ torsten-cli query pool-params \
 Query the mark/set/go stake snapshots:
 
 ```bash
-torsten-cli query stake-snapshot \
+dugite-cli query stake-snapshot \
   --socket-path ./node.sock
 
 # Filter by pool
-torsten-cli query stake-snapshot \
+dugite-cli query stake-snapshot \
   --socket-path ./node.sock \
   --stake-pool-id pool1abc...
 ```
@@ -160,7 +160,7 @@ torsten-cli query stake-snapshot \
 Query the overall governance state:
 
 ```bash
-torsten-cli query gov-state --socket-path ./node.sock
+dugite-cli query gov-state --socket-path ./node.sock
 ```
 
 Output:
@@ -186,10 +186,10 @@ Query registered DReps:
 
 ```bash
 # All DReps
-torsten-cli query drep-state --socket-path ./node.sock
+dugite-cli query drep-state --socket-path ./node.sock
 
 # Specific DRep by key hash
-torsten-cli query drep-state \
+dugite-cli query drep-state \
   --socket-path ./node.sock \
   --drep-key-hash a1b2c3d4...
 ```
@@ -212,7 +212,7 @@ a1b2c3d4...                                                                500  
 Query the constitutional committee:
 
 ```bash
-torsten-cli query committee-state --socket-path ./node.sock
+dugite-cli query committee-state --socket-path ./node.sock
 ```
 
 Output:
@@ -237,10 +237,10 @@ Query the node's transaction mempool:
 
 ```bash
 # Mempool info (size, capacity, tx count)
-torsten-cli query tx-mempool info --socket-path ./node.sock
+dugite-cli query tx-mempool info --socket-path ./node.sock
 
 # Check if a specific transaction is in the mempool
-torsten-cli query tx-mempool has-tx \
+dugite-cli query tx-mempool has-tx \
   --socket-path ./node.sock \
   --tx-id a1b2c3d4...
 ```
@@ -259,7 +259,7 @@ Mempool snapshot at slot 73429851:
 Query the treasury and reserves:
 
 ```bash
-torsten-cli query treasury --socket-path ./node.sock
+dugite-cli query treasury --socket-path ./node.sock
 ```
 
 Output:
@@ -276,7 +276,7 @@ Reserves: 9876543 ADA
 Query the current constitution:
 
 ```bash
-torsten-cli query constitution --socket-path ./node.sock
+dugite-cli query constitution --socket-path ./node.sock
 ```
 
 Output:
@@ -294,7 +294,7 @@ Script Hash: none
 Query the ratification state (enacted/expired proposals from the most recent epoch transition):
 
 ```bash
-torsten-cli query ratify-state --socket-path ./node.sock
+dugite-cli query ratify-state --socket-path ./node.sock
 ```
 
 Output:
@@ -315,7 +315,7 @@ Delayed:           false
 Convert a wall-clock time to a Cardano slot number:
 
 ```bash
-torsten-cli query slot-number \
+dugite-cli query slot-number \
   --socket-path ./node.sock \
   --testnet-magic 2 \
   --utc-time "2026-03-20T12:00:00Z"
@@ -334,7 +334,7 @@ This is useful for computing TTL values or verifying that a specific point in ti
 Query KES period information for an operational certificate:
 
 ```bash
-torsten-cli query kes-period-info \
+dugite-cli query kes-period-info \
   --socket-path ./node.sock \
   --op-cert-file opcert.cert
 ```
@@ -364,7 +364,7 @@ Use this command to verify that a KES key is current and to determine when rotat
 Compute the leader schedule for a stake pool:
 
 ```bash
-torsten-cli query leadership-schedule \
+dugite-cli query leadership-schedule \
   --vrf-signing-key-file vrf.skey \
   --epoch-nonce a1b2c3d4... \
   --epoch-start-slot 73000000 \

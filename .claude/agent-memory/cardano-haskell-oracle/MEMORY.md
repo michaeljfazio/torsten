@@ -28,14 +28,14 @@
 
 ## Critical: ln' uses continued fraction, NOT Taylor series
 - See [nonintegral-ln-algorithm.md](nonintegral-ln-algorithm.md)
-- Torsten's fp_ln uses Taylor series -> different truncation -> boundary disagreements
-- Haskell uses exact Rational for sigma/f; Torsten uses f64 -> precision loss
+- Dugite's fp_ln uses Taylor series -> different truncation -> boundary disagreements
+- Haskell uses exact Rational for sigma/f; Dugite uses f64 -> precision loss
 - activeSlotLog precomputed once via ln', not per-block
 
 ## Pool Distribution for Leader Check
 - `nesPd` = `ssStakeMarkPoolDistr(esSnapshots es0)`, set once at epoch boundary
 - Mark snapshot (pre-rotation) = set snapshot (post-rotation); memoized, not recomputed mid-epoch
-- Torsten bug: uses snapshots.set on-the-fly instead of memoized pool_distr
+- Dugite bug: uses snapshots.set on-the-fly instead of memoized pool_distr
 - See [pool-distr-leader-check.md](pool-distr-leader-check.md)
 
 ## Block Validation: apply vs reapply
@@ -68,19 +68,19 @@
 - See [mux-connection-architecture.md](mux-connection-architecture.md) — Complete mux deep-dive: single TCP per peer, 3 core threads (muxer/demuxer/monitor), SDU framing, temperature lifecycle (Cold→Warm→Hot), all timeout values, BlockFetch decision loop, ingress queue limits
 
 ## TxSubmission2 Architecture
-- See [txsubmission2-architecture.md](txsubmission2-architecture.md) — Complete deep-dive: V1/V2 server, outbound client, governor lifecycle, decision logic, mempool sync, connection stability, Torsten gaps
+- See [txsubmission2-architecture.md](txsubmission2-architecture.md) — Complete deep-dive: V1/V2 server, outbound client, governor lifecycle, decision logic, mempool sync, connection stability, Dugite gaps
 
 ## Mempool Tx Ordering & Chained Tx Deep-Dive
-- See [mempool-tx-ordering.md](mempool-tx-ordering.md) — FIFO ordering (TicketNo), virtual ledger state for chained txs, TxSubmission2 serving order, block production prefix, revalidation logic, policy constants, Torsten divergences
+- See [mempool-tx-ordering.md](mempool-tx-ordering.md) — FIFO ordering (TicketNo), virtual ledger state for chained txs, TxSubmission2 serving order, block production prefix, revalidation logic, policy constants, Dugite divergences
 
 ## Reward Iteration & Zero-Reward Conditions
 - See [reward-iteration-deep-dive.md](reward-iteration-deep-dive.md) — startStep iterates GO snapshot pool params (not BlocksMade), mkPoolRewardInfo checks BlocksMade for each, effective intersection requirement, genesis pool 2-epoch warm-up, 6 zero-reward conditions, no active_epoch_no check
 
 ## Monetary Expansion & RUPD
 - See [monetary-expansion-rupd.md](monetary-expansion-rupd.md) — deltaR1, eta, expectedBlocks, block counting (incrBlocks/isOverlaySlot), snapshot system, TICK→RUPD data flow, Conway d=0 simplification, first-epoch behavior
-- See [rupd-timing-data-flow.md](rupd-timing-data-flow.md) — COMPLETE trace: timing windows (sr=4k/f not 3*(1/f-1)), TICK/RUPD env extraction, NEWEPOCH ordering (applyRUpd BEFORE SNAP), fee lifecycle (deltaF=-ssFee), epoch 0 behavior, Torsten snapshot divergence
+- See [rupd-timing-data-flow.md](rupd-timing-data-flow.md) — COMPLETE trace: timing windows (sr=4k/f not 3*(1/f-1)), TICK/RUPD env extraction, NEWEPOCH ordering (applyRUpd BEFORE SNAP), fee lifecycle (deltaF=-ssFee), epoch 0 behavior, Dugite snapshot divergence
 - See [newepoch-ordering-details.md](newepoch-ordering-details.md) — Exact NEWEPOCH operation order (applyRUpd→MIR→SNAP→POOLREAP→UPEC→record update), bprev source for RUPD (N-1 blocks), PP update timing (targeting epoch E applied at E-1→E boundary), incrBlocks uses post-TICK curPParams
-- See [reward-update-accounting.md](reward-update-accounting.md) — Complete deltaR/deltaT/deltaF formulas, sign conventions, conservation invariant (deltaT+deltaR+sum(rs)+deltaF=0), undistributed→reserves (NOT treasury), applyRUpd exact application, no-blocks behavior, d>=0.8 semantics, Torsten divergences
+- See [reward-update-accounting.md](reward-update-accounting.md) — Complete deltaR/deltaT/deltaF formulas, sign conventions, conservation invariant (deltaT+deltaR+sum(rs)+deltaF=0), undistributed→reserves (NOT treasury), applyRUpd exact application, no-blocks behavior, d>=0.8 semantics, Dugite divergences
 
 ## Mempool Revalidation After Block
 - See [mempool-revalidation-after-block.md](mempool-revalidation-after-block.md) — Full revalidation of ALL remaining txs via revalidateTxsFor/reapplyTxs; triggered by STM watcher on ledger tip change (NOT direct ChainSel call); reapplyTx skips crypto, runs UTxO/TTL/script checks; atomic metrics update
@@ -93,16 +93,16 @@
 - [conway-validation-rules.md](conway-validation-rules.md) - Complete validation rules, predicate failures, reward formula, epoch transition order
 - [n2n-protocols.md](n2n-protocols.md) - N2N protocol reference: mini-protocol IDs, CBOR/CDDL encodings, version negotiation, time limits, queue limits
 - [n2c-protocol-details.md](n2c-protocol-details.md) - N2C protocol: all 4 mini-protocols, message tags, 40 query types with CBOR tags, wire format
-- [vrf-input-construction.md](vrf-input-construction.md) - VRF seed construction: TPraos vs Praos, mkInputVRF, domain separation, Torsten bugs
+- [vrf-input-construction.md](vrf-input-construction.md) - VRF seed construction: TPraos vs Praos, mkInputVRF, domain separation, Dugite bugs
 - [pparams-cbor-encoding.md](pparams-cbor-encoding.md) - PParams array(31) encoding, PParamsUpdate map encoding, nested types, field ordering
 - [lsq-result-encoding.md](lsq-result-encoding.md) - MsgResult wire format, HFC success wrapper [result], era mismatch encoding
 - [peer-sharing-protocol.md](peer-sharing-protocol.md) - PeerSharing mini-protocol: wire format, address encoding, policy constants, governor integration
 - [gov-state-cbor-encoding.md](gov-state-cbor-encoding.md) - GetGovState (tag 24) response: ConwayGovState array(7), Proposals, GovActionState, Committee, Constitution, DRepPulsingState encoding
 - [shelley-genesis-cbor.md](shelley-genesis-cbor.md) - GetGenesisConfig (tag 11): CompactGenesis array(15), UTCTime encoding, legacy vs new PParams, activeSlotsCoeff NO tag(30)
 - [era-history-wire-format.md](era-history-wire-format.md) - GetInterpreter/GetEraHistory: query=[2,0,[2,2,[1,0]]], response=list of EraSummary (no HFC wrapper), Bound/EraParams/SafeZone encoding, RelativeTime=Pico integer, SlotLength=milliseconds
-- [epoch-nonce-calculation.md](epoch-nonce-calculation.md) - Praos epoch nonce: PraosState fields, per-block update, epoch boundary computation, stability windows, Torsten bugs
+- [epoch-nonce-calculation.md](epoch-nonce-calculation.md) - Praos epoch nonce: PraosState fields, per-block update, epoch boundary computation, stability windows, Dugite bugs
 - [vrf-leader-check.md](vrf-leader-check.md) - VRF leader eligibility: checkLeaderValue, taylorExpCmp, FixedPoint E34, certNat/certNatMax, exact algorithm
-- [block-forging-flow.md](block-forging-flow.md) - Complete block forging: slot tick→leader check→tx selection→body hash→header→KES sign, all key files and Torsten body hash bug
+- [block-forging-flow.md](block-forging-flow.md) - Complete block forging: slot tick→leader check→tx selection→body hash→header→KES sign, all key files and Dugite body hash bug
 - [utxo-hd-snapshot-format.md](utxo-hd-snapshot-format.md) - UTxO-HD in-memory backend snapshot: version wrapper array(2)[1,ext], HFC telescope, per-era version array(2)[2,...], NewEpochState array(7), EMPTY UTxO in state file, tables written separately
 - [query-version2-wire-format.md](query-version2-wire-format.md) - QueryVersion2 three-level nesting: Query(tag 0-4) → HFC(tag 0-2) → NS(era_idx, shelley_tag), EitherMismatch wrapping rules, golden test hex values
 - [ledger-peer-snapshot-encoding.md](ledger-peer-snapshot-encoding.md) - GetLedgerPeerSnapshot (tag 34): V1/V2/V3 wire format, relay CBOR, Rational encoding, big vs all peers

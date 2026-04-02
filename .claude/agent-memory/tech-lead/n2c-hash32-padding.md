@@ -72,5 +72,5 @@ Commit e8b58c9: "Fix N2C hash encoding: truncate padded Hash32 to 28 bytes for c
 GitHub issue #97.
 
 Files changed:
-- `crates/torsten-node/src/node/query.rs` — fix all snapshot field assignments
-- `crates/torsten-network/src/n2c/query/encoding.rs` — 16 regression tests
+- `crates/dugite-node/src/node/query.rs` — fix all snapshot field assignments
+- `crates/dugite-network/src/n2c/query/encoding.rs` — 16 regression tests

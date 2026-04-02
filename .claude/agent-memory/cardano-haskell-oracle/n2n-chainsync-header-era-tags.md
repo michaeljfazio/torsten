@@ -101,6 +101,6 @@ Key differences from Praos:
 
 ## Fix Location
 
-`crates/torsten-network/src/protocol/chainsync/server.rs`:
+`crates/dugite-network/src/protocol/chainsync/server.rs`:
 - `storage_era_tag_to_hfc_index()` — converts storage tag to HFC NS index
 - `extract_header_for_chainsync()` — calls the conversion before encoding

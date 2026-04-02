@@ -48,8 +48,8 @@ hashVRF _ use certVRF =
 - `vrfNonceValue`: hash with "N", then hash AGAIN with Blake2b-256, wrap as Nonce
 - Double hash: first is domain separation, second converts to Nonce type
 
-## Torsten Bug (as of 2026-03-09)
-Torsten's `vrf_input()` in both `slot_leader.rs` and `praos.rs` does:
+## Dugite Bug (as of 2026-03-09)
+Dugite's `vrf_input()` in both `slot_leader.rs` and `praos.rs` does:
 ```rust
 data = epoch_nonce || slot_be64  // WRONG ORDER
 ```
@@ -59,5 +59,5 @@ data = Blake2b256(slot_be64 || epoch_nonce)  // Correct: hash of (slot || nonce)
 ```
 Two bugs:
 1. Order is reversed (nonce||slot vs slot||nonce)
-2. Missing Blake2b-256 hash — Haskell hashes the concatenation, Torsten uses raw concat
+2. Missing Blake2b-256 hash — Haskell hashes the concatenation, Dugite uses raw concat
 3. Missing domain-separated leader/nonce value extraction from VRF output

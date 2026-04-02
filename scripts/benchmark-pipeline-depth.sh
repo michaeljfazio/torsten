@@ -9,11 +9,11 @@
 set -euo pipefail
 
 DURATION=${1:-180}
-BINARY="./target/release/torsten-node"
+BINARY="./target/release/dugite-node"
 CONFIG="./config/preview-config.json"
 TOPOLOGY="./config/preview-topology.json"
-SOCKET="/tmp/torsten-bench.socket"
-BASE_DB_DIR="/tmp/torsten-bench"
+SOCKET="/tmp/dugite-bench.socket"
+BASE_DB_DIR="/tmp/dugite-bench"
 
 # Pipeline depths to test
 DEPTHS=(25 50 100 150 200 300 500)
@@ -30,7 +30,7 @@ results=()
 
 for depth in "${DEPTHS[@]}"; do
     DB_DIR="${BASE_DB_DIR}/depth-${depth}"
-    LOG_FILE="/tmp/torsten-bench-depth-${depth}.log"
+    LOG_FILE="/tmp/dugite-bench-depth-${depth}.log"
 
     echo "--- Testing pipeline depth: ${depth} ---"
 
@@ -41,8 +41,8 @@ for depth in "${DEPTHS[@]}"; do
 
     # Run the node with the specified pipeline depth (sync from genesis)
     echo "  Syncing with depth=${depth} for ${DURATION}s..."
-    TORSTEN_PIPELINE_DEPTH=${depth} \
-    TORSTEN_HEADER_BATCH_SIZE=${BATCH_SIZE} \
+    DUGITE_PIPELINE_DEPTH=${depth} \
+    DUGITE_HEADER_BATCH_SIZE=${BATCH_SIZE} \
     timeout "${DURATION}" ${BINARY} run \
         --config "${CONFIG}" \
         --topology "${TOPOLOGY}" \

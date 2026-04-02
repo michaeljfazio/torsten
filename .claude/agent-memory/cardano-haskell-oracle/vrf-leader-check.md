@@ -49,8 +49,8 @@ go(maxN=1000, n=0, err=x, acc=1, divisor=1):
 - fpPrecision = 10^34
 - All arithmetic in exact fixed-point, no floating point
 
-### Torsten Bug
-Current Torsten uses f64 floating point (`vrf_output_to_fraction_full` + `powf`), which DOES NOT match Haskell's exact integer/fixed-point arithmetic. Edge cases near the threshold boundary will differ.
+### Dugite Bug
+Current Dugite uses f64 floating point (`vrf_output_to_fraction_full` + `powf`), which DOES NOT match Haskell's exact integer/fixed-point arithmetic. Edge cases near the threshold boundary will differ.
 
 ### Correct Rust Implementation Requirements
 1. Convert 32-byte leader hash to BigUint (certNat)

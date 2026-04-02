@@ -6,7 +6,7 @@ type: project
 
 # Issue #173: DRep Count Phantom Entries
 
-**Why:** Torsten reported 8,791 DReps vs Koios ~1,569–2,975 because the Prometheus metric
+**Why:** Dugite reported 8,791 DReps vs Koios ~1,569–2,975 because the Prometheus metric
 and N2C query snapshot were using `governance.dreps.len()` — the total size of the
 registered-DRep HashMap — rather than the count of *active* DReps.
 

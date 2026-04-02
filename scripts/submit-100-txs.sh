@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Submit 100 Transactions to Torsten Node (Preview Testnet)
+# Submit 100 Transactions to Dugite Node (Preview Testnet)
 # =============================================================================
 # Self-to-self transactions, each consuming a separate UTxO.
-# Uses torsten-cli for build-raw, sign, and submit.
+# Uses dugite-cli for build-raw, sign, and submit.
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CLI="./target/release/torsten-cli"
+CLI="./target/release/dugite-cli"
 SOCKET="./node.sock"
 MAGIC=2
 KEY_DIR="./keys/preview-test"
@@ -27,7 +27,7 @@ NC='\033[0m'
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "================================================================"
-echo " Submitting $TX_COUNT transactions to Torsten node"
+echo " Submitting $TX_COUNT transactions to Dugite node"
 echo " Address: $ADDR"
 echo " Socket:  $SOCKET"
 echo " Fee:     $FEE lovelace"
@@ -35,7 +35,7 @@ echo "================================================================"
 echo ""
 
 # Get current slot from Prometheus metrics (N2C query tip can lag behind)
-CURRENT_SLOT=$(curl -s http://localhost:12798/metrics | grep '^torsten_slot_number ' | awk '{print int($2)}')
+CURRENT_SLOT=$(curl -s http://localhost:12798/metrics | grep '^dugite_slot_number ' | awk '{print int($2)}')
 if [[ -z "$CURRENT_SLOT" || "$CURRENT_SLOT" == "0" ]]; then
     # Fallback to query tip
     CURRENT_SLOT=$("$CLI" query tip --socket-path "$SOCKET" --testnet-magic $MAGIC 2>/dev/null | grep '"slot"' | head -1 | sed 's/[^0-9]//g')

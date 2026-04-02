@@ -1,6 +1,6 @@
 ---
 name: Mempool Transaction Ordering and Chained Tx Handling
-description: Complete deep-dive into Haskell mempool ordering (FIFO with TicketNo), chained tx validation (virtual ledger state), TxSubmission2 serving order, block production selection, and revalidation on new blocks. Critical for Torsten conformance.
+description: Complete deep-dive into Haskell mempool ordering (FIFO with TicketNo), chained tx validation (virtual ledger state), TxSubmission2 serving order, block production selection, and revalidation on new blocks. Critical for Dugite conformance.
 type: reference
 ---
 
@@ -78,9 +78,9 @@ txInflightMultiplicity = 2      -- download same tx from max 2 peers
 bufferedTxsMinLifetime = 2s     -- keep buffered txs 2s to avoid re-download
 ```
 
-## Torsten Divergences Identified
+## Dugite Divergences Identified
 
 1. **Block production uses fee-density sorting** — Haskell uses FIFO prefix
 2. **TxSubmission2 server serves from `snapshot.tx_hashes`** (FIFO order from VecDeque) — this is correct-ish but uses no TicketNo cursor
-3. **No TicketNo-based cursor** for incremental tx serving — Torsten filters by inflight set instead
-4. **No `isLedgerState` equivalent** — Torsten uses `virtual_utxo` DashMap instead of sequentially-applied ledger diffs
+3. **No TicketNo-based cursor** for incremental tx serving — Dugite filters by inflight set instead
+4. **No `isLedgerState` equivalent** — Dugite uses `virtual_utxo` DashMap instead of sequentially-applied ledger diffs

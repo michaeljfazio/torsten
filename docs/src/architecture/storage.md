@@ -1,6 +1,6 @@
 # Storage
 
-Torsten's storage layer is implemented in the `torsten-storage` and `torsten-ledger` crates. It closely mirrors the cardano-node architecture with three distinct storage subsystems coordinated by ChainDB.
+Dugite's storage layer is implemented in the `dugite-storage` and `dugite-ledger` crates. It closely mirrors the cardano-node architecture with three distinct storage subsystems coordinated by ChainDB.
 
 ## Storage Architecture
 
@@ -17,7 +17,7 @@ flowchart TD
 
     ROLL[Rollback] -->|remove from volatile| VOL
 
-    LS[LedgerState] --> UTXO[UtxoStore<br/>torsten-lsm LSM tree<br/>On-disk UTxO set]
+    LS[LedgerState] --> UTXO[UtxoStore<br/>dugite-lsm LSM tree<br/>On-disk UTxO set]
     LS --> DIFF[DiffSeq<br/>Last k UTxO diffs<br/>For rollback]
 ```
 
@@ -65,18 +65,18 @@ ChainDB supports querying blocks by slot range:
 
 ## UTxO Storage (UTxO-HD)
 
-The UTxO set is stored on disk using `torsten-lsm`, a pure Rust LSM tree. This matches Haskell cardano-node's UTxO-HD architecture, where the UTxO set lives in an LSM-backed on-disk store rather than entirely in memory.
+The UTxO set is stored on disk using `dugite-lsm`, a pure Rust LSM tree. This matches Haskell cardano-node's UTxO-HD architecture, where the UTxO set lives in an LSM-backed on-disk store rather than entirely in memory.
 
 ### UtxoStore
 
-The `UtxoStore` (in `torsten-ledger`) wraps a torsten-lsm `LsmTree` and provides:
+The `UtxoStore` (in `dugite-ledger`) wraps a dugite-lsm `LsmTree` and provides:
 
 - **Disk-backed UTxO set** — the full UTxO set lives on disk, not in memory
 - **Efficient point lookups** — bloom filters for fast negative lookups
 - **Batch writes** — UTxO inserts and deletes are batched per block
 - **Snapshots** — periodic snapshots for crash recovery
 
-torsten-lsm is configured via storage profiles that maximize available system memory:
+dugite-lsm is configured via storage profiles that maximize available system memory:
 
 | Profile | Target System | Memtable | Block Cache | Expected RSS |
 |---------|--------------|----------|-------------|-------------|
@@ -89,7 +89,7 @@ All profiles use 10 bits per key bloom filters and hybrid compaction (tiered L0,
 
 ### DiffSeq (Rollback Support)
 
-The `DiffSeq` (in `torsten-ledger`) maintains the last k blocks of UTxO diffs, enabling rollback without replaying blocks:
+The `DiffSeq` (in `dugite-ledger`) maintains the last k blocks of UTxO diffs, enabling rollback without replaying blocks:
 
 - Each block produces a `UtxoDiff` recording which UTxOs were added and removed
 - The `DiffSeq` holds the last k=2160 diffs
@@ -107,7 +107,7 @@ On other platforms (macOS, Windows), the feature flag is accepted but falls back
 
 ## Snapshot Policy
 
-Torsten uses a time-based snapshot policy matching Haskell's cardano-node:
+Dugite uses a time-based snapshot policy matching Haskell's cardano-node:
 
 - **Normal sync**: snapshots every 72 minutes (k * 2 seconds, where k=2160)
 - **Bulk sync**: snapshots every 50,000 blocks plus 6 minutes of wall-clock time
@@ -132,7 +132,7 @@ database-path/
     chunks/           # Block data files
     index/            # Secondary indexes (slot, hash)
     hash_index.dat    # Mmap block index (open-addressing hash table)
-  utxo-store/         # torsten-lsm database (UTxO set)
+  utxo-store/         # dugite-lsm database (UTxO set)
     active/           # Current SSTables
     snapshots/        # Durable snapshots
   ledger/             # Ledger state snapshots
@@ -147,14 +147,14 @@ database-path/
 
 ## Storage Profiles
 
-Torsten provides four storage profiles sized to maximize available system memory:
+Dugite provides four storage profiles sized to maximize available system memory:
 
 ```bash
 # Select a profile via CLI
-./torsten-node run --storage-profile high-memory ...
+./dugite-node run --storage-profile high-memory ...
 
 # Override individual parameters
-./torsten-node run --storage-profile low-memory --utxo-block-cache-size-mb 4096 ...
+./dugite-node run --storage-profile low-memory --utxo-block-cache-size-mb 4096 ...
 ```
 
 Profiles can also be set in the node configuration file:
@@ -178,7 +178,7 @@ When a forged block loses a slot battle, `flush_all_to_immutable` on graceful sh
 
 ```mermaid
 sequenceDiagram
-    participant Node as Torsten Node
+    participant Node as Dugite Node
     participant Vol as VolatileDB
     participant Imm as ImmutableDB
     participant Peer as Upstream Peer
@@ -208,16 +208,16 @@ Run storage benchmarks with:
 
 ```bash
 # Storage benchmarks (block index, ImmutableDB, ChainDB, scaling to 1M entries)
-cargo bench -p torsten-storage --bench storage_bench
+cargo bench -p dugite-storage --bench storage_bench
 
 # UTxO store benchmarks (insert, lookup, apply_tx, LSM configs, scaling to 1M entries)
-cargo bench -p torsten-ledger --bench utxo_bench
+cargo bench -p dugite-ledger --bench utxo_bench
 
 # Crypto benchmarks (Ed25519, blake2b keyhash)
-cargo bench -p torsten-crypto --bench crypto_bench
+cargo bench -p dugite-crypto --bench crypto_bench
 
 # Hash benchmarks (blake2b_256, blake2b_224, batch hashing)
-cargo bench -p torsten-primitives --bench hash_bench
+cargo bench -p dugite-primitives --bench hash_bench
 ```
 
 Results are saved to `target/criterion/` with HTML reports. Baseline results are tracked in `benches/results/`.
@@ -234,7 +234,7 @@ Results are saved to `target/criterion/` with HTML reports. Baseline results are
 
 Mmap lookup advantage grows with scale — at mainnet block counts (~10M), the gap widens further.
 
-#### UTxO Store Scaling (torsten-lsm LSM tree)
+#### UTxO Store Scaling (dugite-lsm LSM tree)
 
 | Size | Insert (per-entry) | Lookup (per-entry) | Total Lovelace Scan |
 |------|-------------------|-------------------|-------------------|

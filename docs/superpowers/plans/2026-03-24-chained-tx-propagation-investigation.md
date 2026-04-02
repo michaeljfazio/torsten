@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Diagnose why chained transactions cause an infinite TxSubmission2 message exchange loop when propagating between Torsten and connected peers.
+**Goal:** Diagnose why chained transactions cause an infinite TxSubmission2 message exchange loop when propagating between Dugite and connected peers.
 
-**Architecture:** Isolated two-node testbed — Torsten (block producer) and Haskell cardano-node peered exclusively with each other on preview testnet. A tcpdump sidecar container captures the TCP connection between them (macOS Docker Desktop does not expose container bridge interfaces to the host). Chained transactions are submitted to each node independently to observe propagation behavior differences.
+**Architecture:** Isolated two-node testbed — Dugite (block producer) and Haskell cardano-node peered exclusively with each other on preview testnet. A tcpdump sidecar container captures the TCP connection between them (macOS Docker Desktop does not expose container bridge interfaces to the host). Chained transactions are submitted to each node independently to observe propagation behavior differences.
 
-**Tech Stack:** Docker Compose (network isolation), cardano-node 10.4.1 (Haskell), torsten-node (Rust), tcpdump sidecar container + tshark/Wireshark (pcap analysis), cardano-cli + torsten-cli (tx construction/submission), bash scripts.
+**Tech Stack:** Docker Compose (network isolation), cardano-node 10.4.1 (Haskell), dugite-node (Rust), tcpdump sidecar container + tshark/Wireshark (pcap analysis), cardano-cli + dugite-cli (tx construction/submission), bash scripts.
 
 **Prerequisites:**
 - `cardano-cli` installed on host (for building/signing transactions offline)
-- `torsten-cli` built (`cargo build --release`)
+- `dugite-cli` built (`cargo build --release`)
 - Docker Desktop running
 - Pool keys in `./keys/preview-test/pool/` (kes.skey, vrf.skey, opcert.cert)
 - Payment keys in `./keys/preview-test/` (payment.addr, payment.skey)
@@ -24,7 +24,7 @@
 
 **Files:**
 - Create: `scripts/chained-tx-investigation/docker-compose.yml`
-- Create: `scripts/chained-tx-investigation/torsten-topology.json`
+- Create: `scripts/chained-tx-investigation/dugite-topology.json`
 - Create: `scripts/chained-tx-investigation/haskell-topology.json`
 - Create: `scripts/chained-tx-investigation/haskell-config.json`
 
@@ -34,9 +34,9 @@
 mkdir -p scripts/chained-tx-investigation
 ```
 
-- [ ] **Step 2: Create Torsten topology (peers only with Haskell node)**
+- [ ] **Step 2: Create Dugite topology (peers only with Haskell node)**
 
-Create `scripts/chained-tx-investigation/torsten-topology.json`:
+Create `scripts/chained-tx-investigation/dugite-topology.json`:
 ```json
 {
   "bootstrapPeers": [],
@@ -57,7 +57,7 @@ Create `scripts/chained-tx-investigation/torsten-topology.json`:
 
 `bootstrapPeers` and `publicRoots` are empty — no external peers. `useLedgerAfterSlot: -1` disables ledger peer discovery.
 
-- [ ] **Step 3: Create Haskell node topology (peers only with Torsten)**
+- [ ] **Step 3: Create Haskell node topology (peers only with Dugite)**
 
 Create `scripts/chained-tx-investigation/haskell-topology.json`:
 ```json
@@ -66,7 +66,7 @@ Create `scripts/chained-tx-investigation/haskell-topology.json`:
   "localRoots": [
     {
       "accessPoints": [
-        { "address": "torsten-node", "port": 3001 }
+        { "address": "dugite-node", "port": 3001 }
       ],
       "advertise": false,
       "trustable": true,
@@ -134,35 +134,35 @@ networks:
     driver: bridge
 
 services:
-  torsten-node:
+  dugite-node:
     build:
       context: ../..
       dockerfile: Dockerfile
-    container_name: torsten-node
-    hostname: torsten-node
+    container_name: dugite-node
+    hostname: dugite-node
     networks:
       - cardano-isolated
     ports:
       - "3001:3001"
       - "12798:12798"
     volumes:
-      - torsten-db:/opt/torsten/db
-      - ./ipc/torsten:/opt/torsten/ipc
-      - ./torsten-topology.json:/opt/torsten/config/topology-override.json:ro
-      - ../../keys/preview-test/pool:/opt/torsten/keys:ro
+      - dugite-db:/opt/dugite/db
+      - ./ipc/dugite:/opt/dugite/ipc
+      - ./dugite-topology.json:/opt/dugite/config/topology-override.json:ro
+      - ../../keys/preview-test/pool:/opt/dugite/keys:ro
     environment:
-      - RUST_LOG=info,torsten_network=debug
+      - RUST_LOG=info,dugite_network=debug
     command: >
       run
-      --config /opt/torsten/config/preview-config.json
-      --topology /opt/torsten/config/topology-override.json
-      --database-path /opt/torsten/db
-      --socket-path /opt/torsten/ipc/node.sock
+      --config /opt/dugite/config/preview-config.json
+      --topology /opt/dugite/config/topology-override.json
+      --database-path /opt/dugite/db
+      --socket-path /opt/dugite/ipc/node.sock
       --host-addr 0.0.0.0
       --port 3001
-      --shelley-kes-key /opt/torsten/keys/kes.skey
-      --shelley-vrf-key /opt/torsten/keys/vrf.skey
-      --shelley-operational-certificate /opt/torsten/keys/opcert.cert
+      --shelley-kes-key /opt/dugite/keys/kes.skey
+      --shelley-vrf-key /opt/dugite/keys/vrf.skey
+      --shelley-operational-certificate /opt/dugite/keys/opcert.cert
 
   haskell-node:
     image: ghcr.io/intersectmbo/cardano-node:10.4.1
@@ -210,25 +210,25 @@ services:
       - NET_ADMIN
       - NET_RAW
     depends_on:
-      - torsten-node
+      - dugite-node
       - haskell-node
 
 volumes:
-  torsten-db:
+  dugite-db:
   haskell-db:
 ```
 
 - [ ] **Step 6: Create IPC and captures directories**
 
 ```bash
-mkdir -p scripts/chained-tx-investigation/ipc/torsten
+mkdir -p scripts/chained-tx-investigation/ipc/dugite
 mkdir -p scripts/chained-tx-investigation/ipc/haskell
 mkdir -p scripts/chained-tx-investigation/captures
 ```
 
 Add `.gitkeep` files so git tracks the empty directories:
 ```bash
-touch scripts/chained-tx-investigation/ipc/torsten/.gitkeep
+touch scripts/chained-tx-investigation/ipc/dugite/.gitkeep
 touch scripts/chained-tx-investigation/ipc/haskell/.gitkeep
 touch scripts/chained-tx-investigation/captures/.gitkeep
 ```
@@ -253,7 +253,7 @@ git commit -m "chore: add isolated two-node testbed for chained tx investigation
 ### Task 2: Sync Both Nodes to Preview Tip
 
 Both nodes need to be at the preview tip before we can submit transactions. Since they only peer with each other in isolation, we bootstrap them first:
-- **Torsten**: Mithril snapshot import (~2 minutes for preview)
+- **Dugite**: Mithril snapshot import (~2 minutes for preview)
 - **Haskell**: Start with a temporary topology that includes an IOG bootstrap peer. Preview testnet sync from genesis takes **4-8 hours**. Alternatively, use `mithril-client` CLI to download a Mithril snapshot directly into the Haskell DB volume.
 
 - [ ] **Step 1: Create bootstrap script**
@@ -263,7 +263,7 @@ Create `scripts/chained-tx-investigation/bootstrap.sh`:
 #!/usr/bin/env bash
 # Bootstrap both nodes to preview tip, then switch to isolated peering.
 #
-# Torsten: Mithril snapshot import (~2 min)
+# Dugite: Mithril snapshot import (~2 min)
 # Haskell: Temporary IOG bootstrap peer (4-8 hours for preview sync)
 #
 # For faster Haskell bootstrap, manually download a Mithril snapshot:
@@ -274,12 +274,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # Create IPC directories if they don't exist
-mkdir -p ipc/torsten ipc/haskell captures
+mkdir -p ipc/dugite ipc/haskell captures
 
-echo "=== Phase 1: Bootstrap Torsten with Mithril ==="
-docker compose run --rm torsten-node mithril-import \
+echo "=== Phase 1: Bootstrap Dugite with Mithril ==="
+docker compose run --rm dugite-node mithril-import \
     --network-magic 2 \
-    --database-path /opt/torsten/db
+    --database-path /opt/dugite/db
 
 echo ""
 echo "=== Phase 2: Bootstrap Haskell with IOG peer ==="
@@ -351,9 +351,9 @@ echo "=== Starting Isolated Two-Node Testbed ==="
 docker compose up -d
 
 echo ""
-echo "Torsten N2N:     localhost:3001"
-echo "Torsten metrics: http://localhost:12798/metrics"
-echo "Torsten socket:  $(pwd)/ipc/torsten/node.sock"
+echo "Dugite N2N:     localhost:3001"
+echo "Dugite metrics: http://localhost:12798/metrics"
+echo "Dugite socket:  $(pwd)/ipc/dugite/node.sock"
 echo ""
 echo "Haskell N2N:     localhost:3002"
 echo "Haskell metrics: http://localhost:12799/metrics"
@@ -391,7 +391,7 @@ Create `scripts/chained-tx-investigation/submit-chained-txs.sh`:
 # Build and submit a chain of N dependent transactions to a node.
 #
 # Usage:
-#   ./submit-chained-txs.sh --target torsten --chain-length 10
+#   ./submit-chained-txs.sh --target dugite --chain-length 10
 #   ./submit-chained-txs.sh --target haskell --chain-length 10
 #
 # Prerequisites: cardano-cli (for offline tx building/signing)
@@ -404,7 +404,7 @@ cd "$(dirname "$0")"
 PROJECT_ROOT="../.."
 
 CCLI="cardano-cli"
-TARGET="torsten"
+TARGET="dugite"
 CHAIN_LEN=10
 MAGIC=2
 ADDR=$(cat "$PROJECT_ROOT/keys/preview-test/payment.addr")
@@ -422,18 +422,18 @@ done
 
 # Determine socket path and query CLI based on target.
 # Sockets are bind-mounted from the containers to ./ipc/<target>/
-if [[ "$TARGET" == "torsten" ]]; then
-    SOCKET="$(pwd)/ipc/torsten/node.sock"
-    QUERY_CLI="$PROJECT_ROOT/target/release/torsten-cli"
-    SUBMIT_CLI="$PROJECT_ROOT/target/release/torsten-cli"
-    echo "=== Submitting $CHAIN_LEN chained txs to TORSTEN ==="
+if [[ "$TARGET" == "dugite" ]]; then
+    SOCKET="$(pwd)/ipc/dugite/node.sock"
+    QUERY_CLI="$PROJECT_ROOT/target/release/dugite-cli"
+    SUBMIT_CLI="$PROJECT_ROOT/target/release/dugite-cli"
+    echo "=== Submitting $CHAIN_LEN chained txs to DUGITE ==="
 elif [[ "$TARGET" == "haskell" ]]; then
     SOCKET="$(pwd)/ipc/haskell/node.socket"
     QUERY_CLI="$CCLI conway"
     SUBMIT_CLI="$CCLI conway"
     echo "=== Submitting $CHAIN_LEN chained txs to HASKELL ==="
 else
-    echo "ERROR: --target must be 'torsten' or 'haskell'"
+    echo "ERROR: --target must be 'dugite' or 'haskell'"
     exit 1
 fi
 
@@ -540,7 +540,7 @@ echo "Failed:    $failed"
 sleep 2
 echo ""
 echo "=== Mempool State ==="
-if [[ "$TARGET" == "torsten" ]]; then
+if [[ "$TARGET" == "dugite" ]]; then
     curl -s http://localhost:12798/metrics 2>/dev/null | grep "mempool" | grep -v "^#" || echo "(metrics unavailable)"
 else
     curl -s http://localhost:12799/metrics 2>/dev/null | grep "mempool\|Mempool" | grep -v "^#" || echo "(metrics unavailable)"
@@ -595,10 +595,10 @@ echo "File: $PCAP ($(du -h "$PCAP" | cut -f1))"
 echo ""
 
 # Get container IPs for labeling
-TORSTEN_IP=$(docker inspect torsten-node -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "unknown")
+DUGITE_IP=$(docker inspect dugite-node -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "unknown")
 HASKELL_IP=$(docker inspect haskell-node -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "unknown")
 
-echo "Torsten IP: $TORSTEN_IP"
+echo "Dugite IP: $DUGITE_IP"
 echo "Haskell IP: $HASKELL_IP"
 echo ""
 
@@ -650,7 +650,7 @@ git commit -m "chore: add pcap analysis script for tx propagation investigation"
 
 This task describes the steps to execute the investigation.
 
-- [ ] **Step 1: Build Torsten**
+- [ ] **Step 1: Build Dugite**
 
 ```bash
 cargo build --release
@@ -663,7 +663,7 @@ cd scripts/chained-tx-investigation
 ./bootstrap.sh
 ```
 
-Torsten bootstrap completes in ~2 minutes (Mithril). Haskell sync takes 4-8 hours. Monitor:
+Dugite bootstrap completes in ~2 minutes (Mithril). Haskell sync takes 4-8 hours. Monitor:
 
 ```bash
 # Haskell sync progress
@@ -687,15 +687,15 @@ docker compose logs 2>&1 | grep -i "handshake\|connected\|peer"
 
 The tcpdump sidecar starts automatically and writes to `captures/n2n-traffic.pcap`.
 
-- [ ] **Step 4: Submit chained txs to Torsten**
+- [ ] **Step 4: Submit chained txs to Dugite**
 
 ```bash
-./submit-chained-txs.sh --target torsten --chain-length 10
+./submit-chained-txs.sh --target dugite --chain-length 10
 ```
 
-Immediately watch Torsten logs for the TxSubmission2 "flurry":
+Immediately watch Dugite logs for the TxSubmission2 "flurry":
 ```bash
-docker compose logs -f torsten-node 2>&1 | grep -i "txsubmission\|mempool"
+docker compose logs -f dugite-node 2>&1 | grep -i "txsubmission\|mempool"
 ```
 
 **What to look for:** Rapid repeated `TxSubmission2: sending MsgReplyTxIds` or `TxSubmission2: received MsgRequestTxIds` logs after the txs are submitted. If messages continue at high rate (>1/sec) for more than 30 seconds after all txs should have been exchanged, the loop is confirmed.
@@ -730,17 +730,17 @@ docker compose stop tcpdump
 Look for these specific patterns in the capture:
 
 1. **Infinite loop indicator**: Sustained >10 packets/second on port 3001 after tx submission period, with <100ms intervals between MsgRequestTxIds → MsgReplyTxIds pairs
-2. **Blocking violation**: Torsten responding to `MsgRequestTxIds(blocking=true)` immediately with empty `MsgReplyTxIds` — visible as a CBOR payload starting with `82 01 80` (array(2), tag 1, array(0)) sent within milliseconds of receiving `84 00 f5` (array(4), tag 0, true)
+2. **Blocking violation**: Dugite responding to `MsgRequestTxIds(blocking=true)` immediately with empty `MsgReplyTxIds` — visible as a CBOR payload starting with `82 01 80` (array(2), tag 1, array(0)) sent within milliseconds of receiving `84 00 f5` (array(4), tag 0, true)
 3. **Re-advertisement**: Same tx ID bytes appearing in multiple MsgReplyTxIds from the same source IP
-4. **Asymmetry**: Compare packet rates for Torsten→Haskell vs Haskell→Torsten direction. If Haskell→Torsten is quiet while Torsten→Haskell is noisy, it confirms the Haskell server correctly holds blocking requests while Torsten's doesn't.
+4. **Asymmetry**: Compare packet rates for Dugite→Haskell vs Haskell→Dugite direction. If Haskell→Dugite is quiet while Dugite→Haskell is noisy, it confirms the Haskell server correctly holds blocking requests while Dugite's doesn't.
 
 ---
 
 ### Task 6: Fix Blocking Semantics (If Confirmed)
 
 **Files:**
-- Modify: `crates/torsten-network/src/n2n_server.rs` — `handle_n2n_txsubmission` (tag 0 handler) and `PeerState` struct
-- Modify: `crates/torsten-network/src/n2n_server.rs` — connection handler loop that calls `handle_n2n_txsubmission`
+- Modify: `crates/dugite-network/src/n2n_server.rs` — `handle_n2n_txsubmission` (tag 0 handler) and `PeerState` struct
+- Modify: `crates/dugite-network/src/n2n_server.rs` — connection handler loop that calls `handle_n2n_txsubmission`
 
 This task is contingent on Task 5 confirming the blocking semantics hypothesis.
 
@@ -841,8 +841,8 @@ fn test_txsubmission_non_blocking_request_empty_mempool_replies_immediately() {
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
-cargo test -p torsten-network -- test_txsubmission_blocking_request_empty_mempool_defers -v
-cargo test -p torsten-network -- test_txsubmission_non_blocking_request_empty_mempool_replies -v
+cargo test -p dugite-network -- test_txsubmission_blocking_request_empty_mempool_defers -v
+cargo test -p dugite-network -- test_txsubmission_non_blocking_request_empty_mempool_replies -v
 ```
 
 Expected: First test FAILS (current code always returns Some). Second test PASSES (current behavior is correct for non-blocking).
@@ -992,7 +992,7 @@ Recommend Option B as it requires fewer changes.
 - [ ] **Step 8: Run tests to verify they pass**
 
 ```bash
-cargo test -p torsten-network -- test_txsubmission_blocking -v
+cargo test -p dugite-network -- test_txsubmission_blocking -v
 ```
 
 Expected: Both new tests PASS.
@@ -1008,7 +1008,7 @@ cargo fmt --all -- --check
 - [ ] **Step 10: Commit the fix**
 
 ```bash
-git add crates/torsten-network/ crates/torsten-mempool/
+git add crates/dugite-network/ crates/dugite-mempool/
 git commit -m "$(cat <<'EOF'
 fix: implement blocking semantics for TxSubmission2 MsgRequestTxIds
 
@@ -1034,7 +1034,7 @@ EOF
 
 ### Task 7: Re-run Experiment to Verify Fix
 
-- [ ] **Step 1: Rebuild Torsten with fix**
+- [ ] **Step 1: Rebuild Dugite with fix**
 
 ```bash
 cargo build --release
@@ -1045,7 +1045,7 @@ cargo build --release
 ```bash
 cd scripts/chained-tx-investigation
 docker compose down
-docker compose build torsten-node
+docker compose build dugite-node
 rm -f captures/n2n-traffic.pcap
 ./start-isolated.sh
 ```
@@ -1056,8 +1056,8 @@ rm -f captures/n2n-traffic.pcap
 # Wait for tcpdump sidecar to start
 sleep 10
 
-# Submit to Torsten
-./submit-chained-txs.sh --target torsten --chain-length 10
+# Submit to Dugite
+./submit-chained-txs.sh --target dugite --chain-length 10
 
 # Wait, then submit to Haskell
 sleep 60

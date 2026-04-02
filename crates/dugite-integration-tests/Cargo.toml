@@ -1,0 +1,15 @@
+[package]
+name = "dugite-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "End-to-end integration tests for Dugite"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

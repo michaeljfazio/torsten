@@ -3,7 +3,7 @@ role: relay
 
 # -- Container image settings
 image:
-  repository: ghcr.io/michaeljfazio/torsten
+  repository: ghcr.io/michaeljfazio/dugite
   tag: ""  # Defaults to Chart appVersion
   pullPolicy: IfNotPresent
 

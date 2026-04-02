@@ -111,13 +111,13 @@ array(7)
   [6] ensPrevGovActionIds — GovRelation StrictMaybe = array(4) [...]
 ```
 
-## Torsten Bugs Found (2026-03-17)
+## Dugite Bugs Found (2026-03-17)
 
-1. **PulsingSnapshot field order wrong**: Torsten encodes [drep_distr, map, map, pool_distr].
+1. **PulsingSnapshot field order wrong**: Dugite encodes [drep_distr, map, map, pool_distr].
    Haskell is [proposals, drep_distr, drep_state, pool_distr].
 2. **PulsingSnapshot field types wrong**: Field [0] should be StrictSeq(GovActionState), not map.
    Field [2] should be Map<Credential,DRepState>, not map.
-3. **RatifyState structure completely wrong**: Torsten encodes [enacted, expired, delayed, future_pparams].
+3. **RatifyState structure completely wrong**: Dugite encodes [enacted, expired, delayed, future_pparams].
    Haskell is [EnactState(array(7)), enacted_seq, expired_set, delayed_bool].
    - First field should be EnactState (the entire enact state), not enacted proposals
    - NO FuturePParams in RatifyState

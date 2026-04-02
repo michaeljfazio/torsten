@@ -99,7 +99,7 @@ and its rejection reason.
 - `ouroboros-consensus/src/ouroboros-consensus/Ouroboros/Consensus/Ledger/SupportsMempool.hs`
   — `reapplyTx`, `reapplyTxs`, `ReapplyTxsResult`, `Invalidated`
 
-## Torsten Implications
+## Dugite Implications
 
 1. Must do FULL revalidation of ALL mempool txs after every block, not just remove confirmed ones.
 2. Revalidation uses `reapplyTx` semantics — skip crypto, run everything else.

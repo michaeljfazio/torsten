@@ -3,7 +3,7 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: "torsten"
+  - job_name: "dugite"
     static_configs:
       - targets: ["host.docker.internal:12798"]
         labels:

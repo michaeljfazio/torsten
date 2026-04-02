@@ -1,6 +1,6 @@
 ---
 name: crate-pallas-network
-description: pallas-network mini-protocols, multiplexer, facades, version tables, and where torsten diverges
+description: pallas-network mini-protocols, multiplexer, facades, version tables, and where dugite diverges
 type: reference
 ---
 
@@ -98,7 +98,7 @@ pub struct VersionData {
 // v7_to_v10() — V7-V10 only
 ```
 
-**Gap**: Torsten uses N2N V14/V15. Pallas N2N only goes to V14. If torsten negotiates V15, it's doing so outside of pallas handshake helpers.
+**Gap**: Dugite uses N2N V14/V15. Pallas N2N only goes to V14. If dugite negotiates V15, it's doing so outside of pallas handshake helpers.
 
 ## N2C Handshake
 
@@ -110,7 +110,7 @@ pub struct VersionData(NetworkMagic, Option<bool>);
 // DMQ V1: protocol variant 4097
 ```
 
-**Gap**: Torsten supports N2C V16-V22 with bit-15 version encoding. Pallas N2C only defines up to V16. Torsten extends this significantly beyond what pallas provides.
+**Gap**: Dugite supports N2C V16-V22 with bit-15 version encoding. Pallas N2C only defines up to V16. Dugite extends this significantly beyond what pallas provides.
 
 ## ChainSync Mini-Protocol
 
@@ -139,7 +139,7 @@ pub enum NextResponse<CONTENT> {
 }
 ```
 
-**CRITICAL GAP — NO PIPELINING**: pallas-network ChainSync Client enforces strict request-response ordering. No support for sending multiple MsgRequestNext before reading responses. Torsten bypasses this entirely with its `PipelinedPeerClient` which directly manipulates `ChannelBuffer` to send N requests before reading N responses.
+**CRITICAL GAP — NO PIPELINING**: pallas-network ChainSync Client enforces strict request-response ordering. No support for sending multiple MsgRequestNext before reading responses. Dugite bypasses this entirely with its `PipelinedPeerClient` which directly manipulates `ChannelBuffer` to send N requests before reading N responses.
 
 ## BlockFetch Mini-Protocol
 
@@ -153,7 +153,7 @@ pub fn recv_while_streaming() -> Result<Option<Body>>
 pub fn send_done() -> Result<()>
 ```
 
-**No pipelining here either** — strict sequential. Torsten uses `blockfetch::Client` directly (not bypassed), so this is fine for batch block fetching.
+**No pipelining here either** — strict sequential. Dugite uses `blockfetch::Client` directly (not bypassed), so this is fine for batch block fetching.
 
 ## LocalState Query (N2C)
 
@@ -178,7 +178,7 @@ pub enum LedgerQuery {
 // GetDRepState, GetProposals, GetRatifyState, GetFuturePParams, ...
 ```
 
-**Gap**: Pallas localstate queries_v16 only goes to v16. Torsten implements tags 0-38 (V17-V22 additions). Pallas would need extension for V17+ queries like GetStakeDistribution2 (tag 37), GetPoolDistr2 (tag 36), GetMaxMajorProtocolVersion (tag 38).
+**Gap**: Pallas localstate queries_v16 only goes to v16. Dugite implements tags 0-38 (V17-V22 additions). Pallas would need extension for V17+ queries like GetStakeDistribution2 (tag 37), GetPoolDistr2 (tag 36), GetMaxMajorProtocolVersion (tag 38).
 
 ## TxSubmission Mini-Protocol (N2N)
 
@@ -196,21 +196,21 @@ pub fn send_done() -> Result<()>
 
 Has client, protocol, server modules (re-exported). Provides peer exchange functionality.
 
-## Torsten's Divergences from pallas-network
+## Dugite's Divergences from pallas-network
 
-1. **Pipelined ChainSync**: Torsten's `PipelinedPeerClient` directly manipulates `ChannelBuffer` + `Plexer` raw channels to pipeline N requests without the pallas state machine. This is the most significant divergence.
+1. **Pipelined ChainSync**: Dugite's `PipelinedPeerClient` directly manipulates `ChannelBuffer` + `Plexer` raw channels to pipeline N requests without the pallas state machine. This is the most significant divergence.
 
-2. **N2C server beyond V16**: Torsten implements LocalStateQuery tags 0-38 (V17-V22); pallas only defines queries up to ~V16.
+2. **N2C server beyond V16**: Dugite implements LocalStateQuery tags 0-38 (V17-V22); pallas only defines queries up to ~V16.
 
-3. **N2N server**: Pallas provides N2N server facades (PeerServer) but torsten implements its own complete N2N server for serving blocks to downstream peers.
+3. **N2N server**: Pallas provides N2N server facades (PeerServer) but dugite implements its own complete N2N server for serving blocks to downstream peers.
 
-4. **TxSubmission server**: Torsten has custom N2N TxSubmission server handling; pallas provides client-side only.
+4. **TxSubmission server**: Dugite has custom N2N TxSubmission server handling; pallas provides client-side only.
 
-5. **N2C DMQ**: Pallas has DmqClient/DmqServer but torsten doesn't use CIP-0137 DMQ.
+5. **N2C DMQ**: Pallas has DmqClient/DmqServer but dugite doesn't use CIP-0137 DMQ.
 
-6. **N2N V15**: Pallas N2N goes to V14; torsten supports V14/V15.
+6. **N2N V15**: Pallas N2N goes to V14; dugite supports V14/V15.
 
-## What Torsten DOES Use From pallas-network
+## What Dugite DOES Use From pallas-network
 
 - `PeerClient::connect()` facade for initial upstream connections
 - `ChannelBuffer` directly for pipelined chainsync

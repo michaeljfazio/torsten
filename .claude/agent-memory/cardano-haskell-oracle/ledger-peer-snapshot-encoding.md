@@ -74,7 +74,7 @@ IPv6: `toCBOR (IP.fromIPv6 ip6)` = `(Int, Int, Int, Int)` = array(4) of 4 Ints (
 ## Rational Encoding
 `array(2)[numerator_integer, denominator_integer]` — NO tag 30
 
-## Torsten Current Implementation Issues
+## Dugite Current Implementation Issues
 - Uses `u64` for stakes instead of `Rational` (numerator/denominator)
 - Uses definite-length array for pools instead of indefinite
 - Missing WithOrigin wrapper for V1, Point for V2/V3

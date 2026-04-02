@@ -1,19 +1,19 @@
 {{/*
   Network-specific node configuration.
-  Genesis files are bundled in the container image at /opt/torsten/config/.
+  Genesis files are bundled in the container image at /opt/dugite/config/.
   The config file references genesis files using absolute paths to the image's config dir.
 */}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "torsten-node.fullname" . }}-network
+  name: {{ include "dugite-node.fullname" . }}-network
   labels:
-    {{- include "torsten-node.labels" . | nindent 4 }}
+    {{- include "dugite-node.labels" . | nindent 4 }}
 data:
   config.json: |
     {
       "Network": {{ if eq .Values.network.name "mainnet" }}"Mainnet"{{ else }}"Testnet"{{ end }},
-      "NetworkMagic": {{ include "torsten-node.networkMagic" . }},
+      "NetworkMagic": {{ include "dugite-node.networkMagic" . }},
       "RequiresNetworkMagic": {{ if eq .Values.network.name "mainnet" }}"RequiresNoMagic"{{ else }}"RequiresMagic"{{ end }},
       "EnableP2P": true,
       "PeerSharing": {{ .Values.network.peerSharing | default "PeerSharingPublic" | quote }},
@@ -25,10 +25,10 @@ data:
       "TargetNumberOfEstablishedBigLedgerPeers": {{ .Values.network.targetEstablishedBigLedgerPeers | default 10 }},
       "TargetNumberOfKnownBigLedgerPeers": {{ .Values.network.targetKnownBigLedgerPeers | default 15 }},
       "Protocol": "Cardano",
-      "ByronGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-byron-genesis.json",
-      "ShelleyGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-shelley-genesis.json",
-      "AlonzoGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-alonzo-genesis.json",
-      "ConwayGenesisFile": "/opt/torsten/config/{{ .Values.network.name }}-conway-genesis.json",
+      "ByronGenesisFile": "/opt/dugite/config/{{ .Values.network.name }}-byron-genesis.json",
+      "ShelleyGenesisFile": "/opt/dugite/config/{{ .Values.network.name }}-shelley-genesis.json",
+      "AlonzoGenesisFile": "/opt/dugite/config/{{ .Values.network.name }}-alonzo-genesis.json",
+      "ConwayGenesisFile": "/opt/dugite/config/{{ .Values.network.name }}-conway-genesis.json",
       "MinSeverity": {{ .Values.logging.minSeverity | default "Info" | quote }},
       {{- if .Values.peerGovernor }}
       "ChurnIntervalNormalSecs": {{ .Values.peerGovernor.churnIntervalNormalSecs | default 3300 }},

@@ -18,7 +18,7 @@ These are the authoritative golden files produced by the Haskell cardano-node te
 - Binary CBOR files, download via `curl -sL <raw.githubusercontent.com URL>` (NOT via GitHub API which mangles binary)
 - Files containing indefinite-length CBOR arrays (0x9F...0xFF) cannot be decoded with a simple recursive decoder
 
-**Downloaded into torsten at:** `tests/golden/n2c/` (HFC-wrapped, no MsgResult) and `tests/golden/n2c/oc/` (OC-specific goldens with real on-chain data)
+**Downloaded into dugite at:** `tests/golden/n2c/` (HFC-wrapped, no MsgResult) and `tests/golden/n2c/oc/` (OC-specific goldens with real on-chain data)
 
 **Key Conway query tag numbers:**
 - 0 = GetLedgerTip
@@ -61,7 +61,7 @@ Path: `src/network/node-to-node/handshake/test-data/test-0` through `test-4`
 
 Files contain hex-ASCII strings (NOT raw binary). Decode with `xxd -r -p`.
 
-**Downloaded into torsten at:** `tests/golden/handshake/blueprint_test_0` through `_4`
+**Downloaded into dugite at:** `tests/golden/handshake/blueprint_test_0` through `_4`
 
 **Handshake test vectors (decoded):**
 - test-0: `8200a0` = [0, {}] — MsgProposeVersions with empty version table
@@ -72,7 +72,7 @@ Files contain hex-ASCII strings (NOT raw binary). Decode with `xxd -r -p`.
 
 **CDDL reference:** `src/network/node-to-node/handshake/messages.cddl`
 - nodeToNodeVersionData = [networkMagic, initiatorOnlyDiffusionMode, peerSharing(0..1), query]
-- versionNumbers: 13, 14 (in Blueprint CDDL — torsten uses 14, 15, 16)
+- versionNumbers: 13, 14 (in Blueprint CDDL — dugite uses 14, 15, 16)
 
 ## Key CBOR Encoding Rules
 

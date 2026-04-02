@@ -111,5 +111,5 @@ Map value: array(2) [delegate_keyhash_28, vrf_hash_32]
 NeutralNonce: array(1) [0]
 Nonce hash:   array(2) [1, hash_32_bytes]
 
-## Torsten Bug (as of 2026-03-09)
+## Dugite Bug (as of 2026-03-09)
 Current encoding uses JSON-like map(5) with string keys. Must be CBOR array(15) per ShelleyGenesis.

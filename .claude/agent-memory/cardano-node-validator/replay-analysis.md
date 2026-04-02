@@ -3,8 +3,8 @@
 ## Test Conditions
 - DB: `./db-preview/` (Mithril snapshot, 4,093,131 blocks, slot ~106.4M)
 - Ledger snapshot deleted before start (`rm -f ./db-preview/ledger-snapshot.bin`)
-- TORSTEN_REPLAY_LIMIT: unset (default = u64::MAX = replay all)
-- Command: `TORSTEN_PIPELINE_DEPTH=150 ./target/release/torsten-node run ...`
+- DUGITE_REPLAY_LIMIT: unset (default = u64::MAX = replay all)
+- Command: `DUGITE_PIPELINE_DEPTH=150 ./target/release/dugite-node run ...`
 
 ## Replay Performance
 - Total blocks replayed: 4,093,131
@@ -36,7 +36,7 @@ UTxO count at various progress points:
 Expected: hundreds of thousands of UTxOs for preview testnet.
 
 ### Root Cause
-In `crates/torsten-ledger/src/state.rs` lines 623-632:
+In `crates/dugite-ledger/src/state.rs` lines 623-632:
 ```rust
 if let Err(e) = self.utxo_set.apply_transaction(&tx.hash, &tx.body.inputs, &tx.body.outputs) {
     // During initial sync without full history, inputs won't be found.
@@ -45,7 +45,7 @@ if let Err(e) = self.utxo_set.apply_transaction(&tx.hash, &tx.body.inputs, &tx.b
 }
 ```
 
-`apply_transaction()` in `crates/torsten-ledger/src/utxo.rs` lines 51-78:
+`apply_transaction()` in `crates/dugite-ledger/src/utxo.rs` lines 51-78:
 - Validates ALL inputs exist BEFORE removing any or adding outputs
 - Returns Err if ANY input is missing
 - Mithril import starts from mid-chain with empty UTxO set
@@ -72,7 +72,7 @@ all inputs (set is empty). So:
 Result: stake accumulates without decay → some credentials have inflated stake, never reduced.
 
 ### Observed Comparison (Set snapshot, epoch 1232)
-| Pool | Torsten σ | Koios σ | Ratio |
+| Pool | Dugite σ | Koios σ | Ratio |
 |------|-----------|---------|-------|
 | pool1xgmqwh23 | 0.004254 (0.43%) | 0.04509 (4.51%) | 10x too low |
 | pool1fw7yf4me | 0.020433 (2.04%) | 0.00147 (0.15%) | 13x too high |
@@ -81,7 +81,7 @@ The discrepancy goes in BOTH directions, confirming the credits-without-debits m
 the stake accounting in complex ways.
 
 ### Epoch Nonce Mismatch (Secondary Issue)
-- Torsten epoch 1232 nonce: `68727533dd7ba820be27e194df11bc20395b9f0d41d5f3c57c0e439749476a3d`
+- Dugite epoch 1232 nonce: `68727533dd7ba820be27e194df11bc20395b9f0d41d5f3c57c0e439749476a3d`
 - Koios Set snapshot nonce: `737c9befe36e706842fcb38245f15807b6a7763fd3825108df007f9c145fdcf1`
 - These differ, meaning the VRF inputs used for leader eligibility checks are wrong
 - Even if stake distribution were fixed, the epoch nonce mismatch would still cause VRF failures
@@ -103,8 +103,8 @@ Conway governance ratification events fired:
 
 But the enacted governance actions did not update protocol parameters.
 
-Final state (Torsten) vs actual (Koios epoch 1232):
-| Parameter | Torsten | Actual |
+Final state (Dugite) vs actual (Koios epoch 1232):
+| Parameter | Dugite | Actual |
 |-----------|---------|--------|
 | maxBlockBodySize | 65536 | 90112 |
 | protocolVersion | {8, 0} | {10, 0} |

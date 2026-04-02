@@ -1,6 +1,6 @@
-# Torsten Fuzz Targets
+# Dugite Fuzz Targets
 
-Fuzz testing for Torsten's untrusted-input parsers using
+Fuzz testing for Dugite's untrusted-input parsers using
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (libFuzzer backend).
 
 ## Prerequisites

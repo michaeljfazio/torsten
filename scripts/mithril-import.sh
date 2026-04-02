@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NETWORK="${1:-preview}"
-BIN=./target/release/torsten-node
+BIN=./target/release/dugite-node
 
 if [[ ! -x "$BIN" ]]; then
     echo "Binary not found. Building..."

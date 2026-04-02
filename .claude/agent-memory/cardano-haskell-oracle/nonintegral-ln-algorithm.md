@@ -42,7 +42,7 @@ The `c = activeSlotLog f` is the precomputed ln value.
 ## VRF Leader Value Range Extension
 - Haskell hashes: Blake2b_256("L" || vrf_output_bytes) → 32 bytes
 - certNatMax = 2^(8*32) = 2^256 (NOT 2^512)
-- This matches Torsten's implementation
+- This matches Dugite's implementation
 
 ## Critical Precision Notes
 - Haskell passes sigma as exact Rational (ratio of two Integer)
@@ -50,8 +50,8 @@ The `c = activeSlotLog f` is the precomputed ln value.
 - fromRational on Fixed E34 does exact integer division: floor(num/denom * 10^34)
 - f64 cannot exactly represent 0.05 (binary: 0x3FA999999999999A ≈ 0.050000000000000003)
 
-## Torsten Bug: Uses Taylor series instead of continued fraction
+## Dugite Bug: Uses Taylor series instead of continued fraction
 The Taylor series `ln(1+y) = y - y^2/2 + y^3/3 - ...` gives different fixed-point
 truncation than the continued fraction, causing boundary-case disagreements.
-Additionally, Torsten converts f64→fixed-point losing precision vs Haskell's
+Additionally, Dugite converts f64→fixed-point losing precision vs Haskell's
 exact Rational→Fixed conversion.

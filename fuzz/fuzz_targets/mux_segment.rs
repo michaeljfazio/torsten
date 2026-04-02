@@ -13,10 +13,10 @@ fuzz_target!(|data: &[u8]| {
     // Segment::decode must never panic, regardless of input.
     // Valid segments return Ok((Segment, consumed_bytes)).
     // Invalid data returns Err(MuxError).
-    let _ = torsten_network::multiplexer::Segment::decode(data);
+    let _ = dugite_network::multiplexer::Segment::decode(data);
 
     // If decode succeeds, verify the returned segment re-encodes without panicking
-    if let Ok((segment, _consumed)) = torsten_network::multiplexer::Segment::decode(data) {
+    if let Ok((segment, _consumed)) = dugite_network::multiplexer::Segment::decode(data) {
         let _ = segment.encode();
     }
 });

@@ -1,22 +1,22 @@
 # Logging
 
-Torsten uses the [tracing](https://docs.rs/tracing) ecosystem for structured logging. It supports multiple output targets, structured and human-readable formats, log rotation for file output, and fine-grained level control.
+Dugite uses the [tracing](https://docs.rs/tracing) ecosystem for structured logging. It supports multiple output targets, structured and human-readable formats, log rotation for file output, and fine-grained level control.
 
 ## Output Formats
 
-Torsten supports two log formats, selectable via the `--log-format` flag:
+Dugite supports two log formats, selectable via the `--log-format` flag:
 
 ### Text (default)
 
 Human-readable compact output with timestamps, level, target module, and structured fields:
 
 ```bash
-torsten-node run --log-format text ...
+dugite-node run --log-format text ...
 ```
 
 ```
-2026-03-12T12:34:56.789Z  INFO torsten_node::node: Syncing progress="95.42%" epoch=512 block=11283746 tip=11300000 remaining=16254 speed="312 blk/s" utxos=15234892
-2026-03-12T12:34:56.790Z  INFO torsten_node::node: Peer connected peer=1.2.3.4:3001 rtt_ms=42
+2026-03-12T12:34:56.789Z  INFO dugite_node::node: Syncing progress="95.42%" epoch=512 block=11283746 tip=11300000 remaining=16254 speed="312 blk/s" utxos=15234892
+2026-03-12T12:34:56.790Z  INFO dugite_node::node: Peer connected peer=1.2.3.4:3001 rtt_ms=42
 ```
 
 ### JSON
@@ -24,29 +24,29 @@ torsten-node run --log-format text ...
 Structured JSON output, one object per line. Ideal for log aggregation systems (ELK, Loki, Datadog):
 
 ```bash
-torsten-node run --log-format json ...
+dugite-node run --log-format json ...
 ```
 
 ```json
-{"timestamp":"2026-03-12T12:34:56.789Z","level":"INFO","target":"torsten_node::node","fields":{"message":"Syncing","progress":"95.42%","epoch":512,"block":11283746}}
+{"timestamp":"2026-03-12T12:34:56.789Z","level":"INFO","target":"dugite_node::node","fields":{"message":"Syncing","progress":"95.42%","epoch":512,"block":11283746}}
 ```
 
 ## Output Targets
 
-Torsten can log to one or more output targets simultaneously using the `--log-output` flag. You can specify this flag multiple times to enable multiple targets:
+Dugite can log to one or more output targets simultaneously using the `--log-output` flag. You can specify this flag multiple times to enable multiple targets:
 
 ```bash
 # Stdout only (default)
-torsten-node run --log-output stdout ...
+dugite-node run --log-output stdout ...
 
 # File only
-torsten-node run --log-output file ...
+dugite-node run --log-output file ...
 
 # Both stdout and file
-torsten-node run --log-output stdout --log-output file ...
+dugite-node run --log-output stdout --log-output file ...
 
 # Systemd journal (requires journald feature)
-torsten-node run --log-output journald ...
+dugite-node run --log-output journald ...
 ```
 
 ### Stdout
@@ -61,12 +61,12 @@ Logs are written to rotating log files in the directory specified by `--log-dir`
 |----------|-------------|
 | `daily` | Rotate log files daily (default) |
 | `hourly` | Rotate log files every hour |
-| `never` | Write to a single `torsten.log` file with no rotation |
+| `never` | Write to a single `dugite.log` file with no rotation |
 
 ```bash
-torsten-node run \
+dugite-node run \
   --log-output file \
-  --log-dir /var/log/torsten \
+  --log-dir /var/log/dugite \
   --log-file-rotation daily \
   ...
 ```
@@ -75,7 +75,7 @@ File output uses non-blocking I/O with buffered writes. The buffer is flushed au
 
 ### Journald
 
-Native systemd journal integration. This requires building Torsten with the `journald` feature:
+Native systemd journal integration. This requires building Dugite with the `journald` feature:
 
 ```bash
 cargo build --release --features journald
@@ -84,14 +84,14 @@ cargo build --release --features journald
 Then run with:
 
 ```bash
-torsten-node run --log-output journald ...
+dugite-node run --log-output journald ...
 ```
 
 View logs with `journalctl`:
 
 ```bash
-journalctl -u torsten-node -f
-journalctl -u torsten-node --since "1 hour ago"
+journalctl -u dugite-node -f
+journalctl -u dugite-node --since "1 hour ago"
 ```
 
 ## Log Levels
@@ -100,10 +100,10 @@ The log level can be set via the `--log-level` CLI flag or the `RUST_LOG` enviro
 
 ```bash
 # Via CLI flag
-torsten-node run --log-level debug ...
+dugite-node run --log-level debug ...
 
 # Via environment variable (takes priority)
-RUST_LOG=debug torsten-node run ...
+RUST_LOG=debug dugite-node run ...
 ```
 
 Available levels (from most to least verbose):
@@ -122,13 +122,13 @@ Use `RUST_LOG` for fine-grained control over which components produce output:
 
 ```bash
 # Debug only for specific crates
-RUST_LOG=torsten_network=debug,torsten_consensus=debug torsten-node run ...
+RUST_LOG=dugite_network=debug,dugite_consensus=debug dugite-node run ...
 
 # Trace storage operations, debug everything else
-RUST_LOG=torsten_storage=trace,debug torsten-node run ...
+RUST_LOG=dugite_storage=trace,debug dugite-node run ...
 
 # Silence noisy crates
-RUST_LOG=info,torsten_network=warn torsten-node run ...
+RUST_LOG=info,dugite_network=warn dugite-node run ...
 ```
 
 ## CLI Reference
@@ -149,11 +149,11 @@ All logging flags are shared between the `run` and `mithril-import` subcommands:
 For production deployments with log aggregation:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --log-output file \
   --log-output journald \
   --log-format json \
-  --log-dir /var/log/torsten \
+  --log-dir /var/log/dugite \
   --log-file-rotation daily \
   ...
 ```
@@ -166,11 +166,11 @@ This configuration:
 For human operators monitoring the console:
 
 ```bash
-torsten-node run --log-output stdout --log-format text ...
+dugite-node run --log-output stdout --log-format text ...
 ```
 
 For containerized deployments (Docker, Kubernetes), stdout with JSON is ideal since the container runtime captures output and log drivers can parse the structured format:
 
 ```bash
-torsten-node run --log-output stdout --log-format json ...
+dugite-node run --log-output stdout --log-format json ...
 ```

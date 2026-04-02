@@ -1,6 +1,6 @@
 # Kubernetes Deployment
 
-Torsten includes a Helm chart for deploying to Kubernetes as either a **relay node** or a **block producer**.
+Dugite includes a Helm chart for deploying to Kubernetes as either a **relay node** or a **block producer**.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ Torsten includes a Helm chart for deploying to Kubernetes as either a **relay no
 Deploy a relay node on the preview testnet:
 
 ```bash
-helm install torsten-relay ./charts/torsten-node \
+helm install dugite-relay ./charts/dugite-node \
   --set network.name=preview
 ```
 
@@ -115,7 +115,7 @@ A relay node connects to the Cardano network, syncs blocks, and serves them to c
 ### Minimal Relay
 
 ```bash
-helm install torsten-relay ./charts/torsten-node \
+helm install dugite-relay ./charts/dugite-node \
   --set network.name=mainnet \
   --set persistence.size=500Gi
 ```
@@ -123,7 +123,7 @@ helm install torsten-relay ./charts/torsten-node \
 ### Relay with Custom Topology
 
 ```bash
-helm install torsten-relay ./charts/torsten-node \
+helm install dugite-relay ./charts/dugite-node \
   --set network.name=mainnet \
   --set persistence.size=500Gi \
   -f relay-values.yaml
@@ -138,7 +138,7 @@ topology:
       port: 3001
   localRoots:
     - accessPoints:
-        - address: torsten-producer.default.svc.cluster.local
+        - address: dugite-producer.default.svc.cluster.local
           port: 3001
       advertise: false
       trustable: true
@@ -154,7 +154,7 @@ topology:
 ### Relay with Prometheus Operator
 
 ```bash
-helm install torsten-relay ./charts/torsten-node \
+helm install dugite-relay ./charts/dugite-node \
   --set network.name=mainnet \
   --set metrics.serviceMonitor.enabled=true \
   --set metrics.serviceMonitor.labels.release=prometheus
@@ -169,7 +169,7 @@ A block producer creates blocks when elected as slot leader. It requires KES, VR
 First, create a Kubernetes secret with your block producer keys:
 
 ```bash
-kubectl create secret generic torsten-producer-keys \
+kubectl create secret generic dugite-producer-keys \
   --from-file=kes.skey=kes.skey \
   --from-file=vrf.skey=vrf.skey \
   --from-file=node.cert=node.cert
@@ -178,10 +178,10 @@ kubectl create secret generic torsten-producer-keys \
 ### Deploy the Producer
 
 ```bash
-helm install torsten-producer ./charts/torsten-node \
+helm install dugite-producer ./charts/dugite-node \
   --set role=producer \
   --set network.name=mainnet \
-  --set producer.existingSecret=torsten-producer-keys \
+  --set producer.existingSecret=dugite-producer-keys \
   --set persistence.size=500Gi
 ```
 
@@ -210,14 +210,14 @@ Deploy both:
 
 ```bash
 # Deploy the block producer
-helm install torsten-producer ./charts/torsten-node \
+helm install dugite-producer ./charts/dugite-node \
   --set role=producer \
   --set network.name=mainnet \
-  --set producer.existingSecret=torsten-producer-keys \
+  --set producer.existingSecret=dugite-producer-keys \
   -f producer-values.yaml
 
 # Deploy relay(s) pointing to the producer
-helm install torsten-relay ./charts/torsten-node \
+helm install dugite-relay ./charts/dugite-node \
   --set role=relay \
   --set network.name=mainnet \
   -f relay-values.yaml
@@ -230,7 +230,7 @@ topology:
   bootstrapPeers: []
   localRoots:
     - accessPoints:
-        - address: torsten-relay-torsten-node.default.svc.cluster.local
+        - address: dugite-relay-dugite-node.default.svc.cluster.local
           port: 3001
       advertise: false
       trustable: true
@@ -248,7 +248,7 @@ topology:
       port: 3001
   localRoots:
     - accessPoints:
-        - address: torsten-producer-torsten-node.default.svc.cluster.local
+        - address: dugite-producer-dugite-node.default.svc.cluster.local
           port: 3001
       advertise: false
       trustable: true
@@ -266,26 +266,26 @@ topology:
 Check pod status:
 
 ```bash
-kubectl get pods -l app.kubernetes.io/name=torsten-node
+kubectl get pods -l app.kubernetes.io/name=dugite-node
 ```
 
 View logs:
 
 ```bash
-kubectl logs -f deploy/torsten-relay-torsten-node
+kubectl logs -f deploy/dugite-relay-dugite-node
 ```
 
 Query the node tip:
 
 ```bash
-kubectl exec deploy/torsten-relay-torsten-node -- \
-  torsten-cli query tip --testnet-magic 2
+kubectl exec deploy/dugite-relay-dugite-node -- \
+  dugite-cli query tip --testnet-magic 2
 ```
 
 Check metrics:
 
 ```bash
-kubectl port-forward svc/torsten-relay-torsten-node 12798:12798
+kubectl port-forward svc/dugite-relay-dugite-node 12798:12798
 curl -s http://localhost:12798/metrics | grep sync_progress
 ```
 
@@ -296,7 +296,7 @@ All configurable values with defaults:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `role` | `relay` | Node role: `relay` or `producer` |
-| `image.repository` | `ghcr.io/michaeljfazio/torsten` | Container image |
+| `image.repository` | `ghcr.io/michaeljfazio/dugite` | Container image |
 | `image.tag` | Chart appVersion | Image tag |
 | `network.name` | `preview` | Network: `mainnet`, `preview`, `preprod` |
 | `network.port` | `3001` | N2N port |

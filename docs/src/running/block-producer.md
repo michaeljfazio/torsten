@@ -1,6 +1,6 @@
 # Block Producer
 
-Torsten can operate as a block-producing node (stake pool). This requires KES keys, VRF keys, and an operational certificate.
+Dugite can operate as a block-producing node (stake pool). This requires KES keys, VRF keys, and an operational certificate.
 
 ## Architecture
 
@@ -25,7 +25,7 @@ Cold keys identify the stake pool and should be kept offline (air-gapped) after 
 Generate cold keys using the CLI:
 
 ```bash
-torsten-cli node key-gen \
+dugite-cli node key-gen \
   --cold-verification-key-file cold.vkey \
   --cold-signing-key-file cold.skey \
   --operational-certificate-counter-file opcert.counter
@@ -38,7 +38,7 @@ KES (Key Evolving Signature) keys are rotated periodically. Each KES key is vali
 Generate KES keys:
 
 ```bash
-torsten-cli node key-gen-kes \
+dugite-cli node key-gen-kes \
   --verification-key-file kes.vkey \
   --signing-key-file kes.skey
 ```
@@ -50,7 +50,7 @@ VRF (Verifiable Random Function) keys are used for slot leader election. They ar
 Generate VRF keys:
 
 ```bash
-torsten-cli node key-gen-vrf \
+dugite-cli node key-gen-vrf \
   --verification-key-file vrf.vkey \
   --signing-key-file vrf.skey
 ```
@@ -62,7 +62,7 @@ The operational certificate binds the cold key to the current KES key. It must b
 Issue an operational certificate:
 
 ```bash
-torsten-cli node issue-op-cert \
+dugite-cli node issue-op-cert \
   --kes-verification-key-file kes.vkey \
   --cold-signing-key-file cold.skey \
   --operational-certificate-counter-file opcert.counter \
@@ -83,7 +83,7 @@ On mainnet, `slots_per_kes_period` is 129600.
 Pass the key and certificate paths when starting the node:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --config config.json \
   --topology topology.json \
   --database-path ./db \
@@ -132,7 +132,7 @@ Key points:
 You can compute your pool's leader schedule for an epoch:
 
 ```bash
-torsten-cli query leadership-schedule \
+dugite-cli query leadership-schedule \
   --vrf-signing-key-file vrf.skey \
   --epoch-nonce <64-char-hex> \
   --epoch-start-slot <slot> \
@@ -149,14 +149,14 @@ KES keys must be rotated before they expire. The rotation process:
 
 1. Generate new KES keys:
    ```bash
-   torsten-cli node key-gen-kes \
+   dugite-cli node key-gen-kes \
      --verification-key-file kes-new.vkey \
      --signing-key-file kes-new.skey
    ```
 
 2. Issue a new operational certificate with the new KES key (on the air-gapped machine):
    ```bash
-   torsten-cli node issue-op-cert \
+   dugite-cli node issue-op-cert \
      --kes-verification-key-file kes-new.vkey \
      --cold-signing-key-file cold.skey \
      --operational-certificate-counter-file opcert.counter \
@@ -177,7 +177,7 @@ KES keys must be rotated before they expire. The rotation process:
 
 - Keep cold keys on an air-gapped machine. They are only needed to issue new operational certificates.
 - Restrict access to the block producer machine. Only your relay nodes should be able to connect.
-- Monitor your pool's block production. Use the [Prometheus metrics endpoint](./monitoring.md) to track `torsten_blocks_applied_total`.
+- Monitor your pool's block production. Use the [Prometheus metrics endpoint](./monitoring.md) to track `dugite_blocks_applied_total`.
 - Set up KES key rotation reminders well before expiry (2 weeks in advance is a good practice).
 - Use firewalls to ensure the block producer is not reachable from the public internet.
 
@@ -236,7 +236,7 @@ Without this correction, `apply_block` would attempt to process hundreds of spur
 
 ## Fork Recovery
 
-When a block producer forges a block but another pool wins the slot battle (their block is adopted by the network instead), the forged block becomes orphaned. Torsten detects this situation during chain synchronization and recovers automatically.
+When a block producer forges a block but another pool wins the slot battle (their block is adopted by the network instead), the forged block becomes orphaned. Dugite detects this situation during chain synchronization and recovers automatically.
 
 ### How Fork Detection Works
 
@@ -333,14 +333,14 @@ graph TB
 ### Deployment Checklist
 
 1. **Set up relay nodes** ([Relay Node guide](./relay.md))
-   - Install Torsten on relay machines
+   - Install Dugite on relay machines
    - Import Mithril snapshot for fast initial sync
    - Configure relay topology with bootstrap peers and BP as local root
    - Open port 3001 to the public
    - Start relay nodes and verify they sync to tip
 
 2. **Set up the block producer** (this page)
-   - Install Torsten on the BP machine
+   - Install Dugite on the BP machine
    - Import Mithril snapshot
    - Generate cold keys, VRF keys, and KES keys
    - Issue an operational certificate

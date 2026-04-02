@@ -725,7 +725,7 @@ MIR is completely removed in Conway — replaced by `TreasuryWithdrawal` governa
 
 ---
 
-## 12. Rust Translation Notes for Torsten
+## 12. Rust Translation Notes for Dugite
 
 ### Hash type mismatches
 - `KeyHash`/`ScriptHash`/`PolicyID` = 28 bytes (Blake2b-224). Use `[u8; 28]` or a newtype.
@@ -758,7 +758,7 @@ fn stake_is_script(h: u8) -> bool { is_base(h) && h & 0x20 != 0 }
 ### Rational CBOR
 ```rust
 // tag(30) array(2)[numerator, denominator]
-// Torsten must encode/decode this for UnitInterval, NonNegativeInterval, etc.
+// Dugite must encode/decode this for UnitInterval, NonNegativeInterval, etc.
 fn encode_rational(n: i64, d: i64) -> Vec<u8> {
     // d6_1e = tag(30), 82 = array(2), then two ints
 }

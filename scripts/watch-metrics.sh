@@ -11,8 +11,8 @@ echo ""
 
 while true; do
     clear
-    echo "=== Torsten Metrics ($(date)) ==="
+    echo "=== Dugite Metrics ($(date)) ==="
     echo ""
-    curl -s "$URL" 2>/dev/null | grep "^torsten_" | sort || echo "Node not reachable at $URL"
+    curl -s "$URL" 2>/dev/null | grep "^dugite_" | sort || echo "Node not reachable at $URL"
     sleep 5
 done

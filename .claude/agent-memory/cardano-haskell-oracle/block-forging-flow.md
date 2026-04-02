@@ -49,7 +49,7 @@ kes_vkey_raw || counter_u64_BE || kes_period_u64_BE
 ## KES Signs
 HeaderBody CBOR serialization (serialize' using protocol version)
 
-## Torsten Divergence: body hash is WRONG
-Torsten computes: Blake2b-256(CBOR_array(tx_bodies))
+## Dugite Divergence: body hash is WRONG
+Dugite computes: Blake2b-256(CBOR_array(tx_bodies))
 Haskell computes: Blake2b-256(hash(bodies) || hash(wits) || hash(auxdata) || hash(isvalid))
 This is a critical bug for block production compatibility.

@@ -1,13 +1,13 @@
 # Stake Pool Commands
 
-The `torsten-cli stake-pool` subcommands manage stake pool key generation, pool registration, and operational certificate issuance.
+The `dugite-cli stake-pool` subcommands manage stake pool key generation, pool registration, and operational certificate issuance.
 
 ## key-gen
 
 Generate pool cold keys and an operational certificate counter:
 
 ```bash
-torsten-cli stake-pool key-gen \
+dugite-cli stake-pool key-gen \
   --cold-verification-key-file cold.vkey \
   --cold-signing-key-file cold.skey \
   --operational-certificate-counter-file opcert.counter
@@ -24,7 +24,7 @@ torsten-cli stake-pool key-gen \
 Get the pool ID (Blake2b-224 hash of the cold verification key):
 
 ```bash
-torsten-cli stake-pool id \
+dugite-cli stake-pool id \
   --cold-verification-key-file cold.vkey
 ```
 
@@ -37,7 +37,7 @@ torsten-cli stake-pool id \
 Generate a VRF key pair:
 
 ```bash
-torsten-cli stake-pool vrf-key-gen \
+dugite-cli stake-pool vrf-key-gen \
   --verification-key-file vrf.vkey \
   --signing-key-file vrf.skey
 ```
@@ -52,7 +52,7 @@ torsten-cli stake-pool vrf-key-gen \
 Generate a KES key pair:
 
 ```bash
-torsten-cli stake-pool kes-key-gen \
+dugite-cli stake-pool kes-key-gen \
   --verification-key-file kes.vkey \
   --signing-key-file kes.skey
 ```
@@ -67,7 +67,7 @@ torsten-cli stake-pool kes-key-gen \
 Issue an operational certificate:
 
 ```bash
-torsten-cli stake-pool issue-op-cert \
+dugite-cli stake-pool issue-op-cert \
   --kes-verification-key-file kes.vkey \
   --cold-signing-key-file cold.skey \
   --operational-certificate-counter-file opcert.counter \
@@ -88,7 +88,7 @@ torsten-cli stake-pool issue-op-cert \
 Create a stake pool registration certificate:
 
 ```bash
-torsten-cli stake-pool registration-certificate \
+dugite-cli stake-pool registration-certificate \
   --cold-verification-key-file cold.vkey \
   --vrf-verification-key-file vrf.vkey \
   --pledge 500000000 \
@@ -124,7 +124,7 @@ torsten-cli stake-pool registration-certificate \
 Compute the Blake2b-256 hash of a pool metadata file:
 
 ```bash
-torsten-cli stake-pool metadata-hash \
+dugite-cli stake-pool metadata-hash \
   --pool-metadata-file pool-metadata.json
 ```
 
@@ -141,7 +141,7 @@ This hash is required when registering a pool. The metadata file must be served 
 ```json
 {
   "name": "Sandstone Pool",
-  "description": "A Cardano stake pool running Torsten",
+  "description": "A Cardano stake pool running Dugite",
   "ticker": "SAND",
   "homepage": "https://sandstone.io"
 }
@@ -152,7 +152,7 @@ This hash is required when registering a pool. The metadata file must be served 
 Create a stake pool retirement certificate:
 
 ```bash
-torsten-cli stake-pool retirement-certificate \
+dugite-cli stake-pool retirement-certificate \
   --cold-verification-key-file cold.vkey \
   --epoch 500 \
   --out-file pool-retire.cert
@@ -168,21 +168,21 @@ torsten-cli stake-pool retirement-certificate \
 
 ```bash
 # 1. Generate all keys
-torsten-cli stake-pool key-gen \
+dugite-cli stake-pool key-gen \
   --cold-verification-key-file cold.vkey \
   --cold-signing-key-file cold.skey \
   --operational-certificate-counter-file opcert.counter
 
-torsten-cli stake-pool vrf-key-gen \
+dugite-cli stake-pool vrf-key-gen \
   --verification-key-file vrf.vkey \
   --signing-key-file vrf.skey
 
-torsten-cli stake-pool kes-key-gen \
+dugite-cli stake-pool kes-key-gen \
   --verification-key-file kes.vkey \
   --signing-key-file kes.skey
 
 # 2. Issue operational certificate
-torsten-cli stake-pool issue-op-cert \
+dugite-cli stake-pool issue-op-cert \
   --kes-verification-key-file kes.vkey \
   --cold-signing-key-file cold.skey \
   --operational-certificate-counter-file opcert.counter \
@@ -190,7 +190,7 @@ torsten-cli stake-pool issue-op-cert \
   --out-file opcert.cert
 
 # 3. Create registration certificate
-torsten-cli stake-pool registration-certificate \
+dugite-cli stake-pool registration-certificate \
   --cold-verification-key-file cold.vkey \
   --vrf-verification-key-file vrf.vkey \
   --pledge 500000000 \
@@ -204,7 +204,7 @@ torsten-cli stake-pool registration-certificate \
   --out-file pool-reg.cert
 
 # 4. Submit registration in a transaction
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in "abc123...#0" \
   --tx-out "addr_test1qz...+5000000" \
   --change-address "addr_test1qp..." \
@@ -212,14 +212,14 @@ torsten-cli transaction build \
   --certificate-file pool-reg.cert \
   --out-file tx.body
 
-torsten-cli transaction sign \
+dugite-cli transaction sign \
   --tx-body-file tx.body \
   --signing-key-file payment.skey \
   --signing-key-file cold.skey \
   --signing-key-file stake.skey \
   --out-file tx.signed
 
-torsten-cli transaction submit \
+dugite-cli transaction submit \
   --tx-file tx.signed \
   --socket-path ./node.sock
 ```

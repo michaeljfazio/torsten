@@ -12,7 +12,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: michaeljfazio/torsten
+  IMAGE_NAME: michaeljfazio/dugite
 
 jobs:
   # ──────────────────────────────────────────────
@@ -24,16 +24,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: torsten-x86_64-linux
+            artifact: dugite-x86_64-linux
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact: torsten-aarch64-linux
+            artifact: dugite-aarch64-linux
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact: torsten-x86_64-macos
+            artifact: dugite-x86_64-macos
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: torsten-aarch64-macos
+            artifact: dugite-aarch64-macos
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -56,15 +56,15 @@ jobs:
             ${{ matrix.target }}-cargo-
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} --bin torsten-node --bin torsten-cli
+        run: cargo build --release --target ${{ matrix.target }} --bin dugite-node --bin dugite-cli
         env:
           RUSTFLAGS: "-D warnings"
 
       - name: Package binaries
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/torsten-node dist/
-          cp target/${{ matrix.target }}/release/torsten-cli dist/
+          cp target/${{ matrix.target }}/release/dugite-node dist/
+          cp target/${{ matrix.target }}/release/dugite-cli dist/
           cp -r config dist/
           cp README.md LICENSE* dist/ 2>/dev/null || true
           cd dist && tar czf ../${{ matrix.artifact }}.tar.gz *
@@ -112,10 +112,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
-            org.opencontainers.image.title=torsten
+            org.opencontainers.image.title=dugite
             org.opencontainers.image.description=Cardano node implementation in Rust
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.source=https://github.com/michaeljfazio/torsten
+            org.opencontainers.image.source=https://github.com/michaeljfazio/dugite
 
   # ──────────────────────────────────────────────
   # Create GitHub Release with binary assets
@@ -144,7 +144,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Torsten ${{ github.ref_name }}
+          name: Dugite ${{ github.ref_name }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
@@ -155,7 +155,7 @@ jobs:
             ## Container Image
 
             ```bash
-            docker pull ghcr.io/michaeljfazio/torsten:${{ steps.version.outputs.version }}
+            docker pull ghcr.io/michaeljfazio/dugite:${{ steps.version.outputs.version }}
             ```
 
             Available for `linux/amd64` and `linux/arm64`.
@@ -164,9 +164,9 @@ jobs:
 
             | Platform | Architecture | Download |
             |----------|-------------|----------|
-            | Linux | x86_64 | `torsten-x86_64-linux.tar.gz` |
-            | Linux | aarch64 | `torsten-aarch64-linux.tar.gz` |
-            | macOS | x86_64 | `torsten-x86_64-macos.tar.gz` |
-            | macOS | Apple Silicon | `torsten-aarch64-macos.tar.gz` |
+            | Linux | x86_64 | `dugite-x86_64-linux.tar.gz` |
+            | Linux | aarch64 | `dugite-aarch64-linux.tar.gz` |
+            | macOS | x86_64 | `dugite-x86_64-macos.tar.gz` |
+            | macOS | Apple Silicon | `dugite-aarch64-macos.tar.gz` |
 
             Verify checksums: `sha256sum -c SHA256SUMS.txt`

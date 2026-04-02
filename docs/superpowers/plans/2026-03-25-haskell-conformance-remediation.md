@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Bring Torsten into full protocol conformance with the Haskell cardano-node across serialization, networking, consensus, ledger validation, and storage.
+**Goal:** Bring Dugite into full protocol conformance with the Haskell cardano-node across serialization, networking, consensus, ledger validation, and storage.
 
 **Architecture:** This plan addresses 45+ issues found in a deep comparative review, organized into 6 phases by severity. Each phase produces independently testable, committable work. Phases are ordered so that earlier phases unblock later ones (e.g., fixing wire encoding before fixing validation that depends on correct encoding).
 
@@ -31,10 +31,10 @@ These issues cause immediate protocol incompatibility with Haskell nodes. Nothin
 ### Task 1.1: Fix TxSubmission2 Indefinite-Length Arrays
 
 **Files:**
-- Modify: `crates/torsten-network/src/protocol/txsubmission/mod.rs:109,119,127,159-162,181-184,198-201`
-- Test: `crates/torsten-network/src/protocol/txsubmission/mod.rs` (inline tests)
+- Modify: `crates/dugite-network/src/protocol/txsubmission/mod.rs:109,119,127,159-162,181-184,198-201`
+- Test: `crates/dugite-network/src/protocol/txsubmission/mod.rs` (inline tests)
 
-**Context:** The CDDL spec requires all inner lists in TxSubmission2 (`txIdList`, `txList`, `txIdsAndSizes`) to use indefinite-length CBOR arrays. Torsten uses definite-length arrays for encoding and rejects indefinite arrays on decode. This breaks ALL tx propagation with Haskell nodes.
+**Context:** The CDDL spec requires all inner lists in TxSubmission2 (`txIdList`, `txList`, `txIdsAndSizes`) to use indefinite-length CBOR arrays. Dugite uses definite-length arrays for encoding and rejects indefinite arrays on decode. This breaks ALL tx propagation with Haskell nodes.
 
 - [ ] **Step 1: Write failing test for indefinite-length encoding**
 
@@ -56,7 +56,7 @@ fn test_msg_reply_tx_ids_uses_indefinite_array() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p torsten-network -- test_msg_reply_tx_ids_uses_indefinite_array -v`
+Run: `cargo test -p dugite-network -- test_msg_reply_tx_ids_uses_indefinite_array -v`
 Expected: FAIL — currently uses definite-length encoding
 
 - [ ] **Step 3: Fix encoding — change all three inner lists to indefinite-length**
@@ -122,22 +122,22 @@ Apply this pattern to all three decode sites (MsgReplyTxIds, MsgRequestTxs, MsgR
 - [ ] **Step 5: Fix the same pattern in PeerSharing and ChainSync**
 
 The same `"indefinite array not supported"` rejection exists in:
-- `crates/torsten-network/src/protocol/peersharing/mod.rs:83`
-- `crates/torsten-network/src/protocol/chainsync/mod.rs:252`
+- `crates/dugite-network/src/protocol/peersharing/mod.rs:83`
+- `crates/dugite-network/src/protocol/chainsync/mod.rs:252`
 
 Apply the same fix: accept both definite and indefinite arrays on decode. For encoding, check the CDDL for each protocol — PeerSharing and ChainSync may use definite arrays (verify before changing encoding).
 
 - [ ] **Step 6: Run all network tests**
 
-Run: `cargo test -p torsten-network -v`
+Run: `cargo test -p dugite-network -v`
 Expected: All PASS
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/torsten-network/src/protocol/txsubmission/mod.rs \
-       crates/torsten-network/src/protocol/peersharing/mod.rs \
-       crates/torsten-network/src/protocol/chainsync/mod.rs
+git add crates/dugite-network/src/protocol/txsubmission/mod.rs \
+       crates/dugite-network/src/protocol/peersharing/mod.rs \
+       crates/dugite-network/src/protocol/chainsync/mod.rs
 git commit -m "fix(network): use indefinite-length CBOR arrays in TxSubmission2 and accept indefinite arrays in all protocols"
 ```
 
@@ -146,9 +146,9 @@ git commit -m "fix(network): use indefinite-length CBOR arrays in TxSubmission2 
 ### Task 1.2: Fix ChainSync Server — Send Header, Not Full Block
 
 **Files:**
-- Modify: `crates/torsten-network/src/protocol/chainsync/server.rs:163-206`
-- Modify: `crates/torsten-network/src/block_provider.rs` (or wherever `BlockProvider` trait is defined)
-- Test: integration test in `crates/torsten-network/`
+- Modify: `crates/dugite-network/src/protocol/chainsync/server.rs:163-206`
+- Modify: `crates/dugite-network/src/block_provider.rs` (or wherever `BlockProvider` trait is defined)
+- Test: integration test in `crates/dugite-network/`
 
 **Context:** N2N ChainSync `MsgRollForward` must send only the block header, not the full block. Headers are 10-100x smaller. Sending full blocks doubles bandwidth and may confuse Haskell decoders.
 
@@ -215,7 +215,7 @@ fn test_extract_header_from_block() {
 
 - [ ] **Step 3: Run test to verify extraction works**
 
-Run: `cargo test -p torsten-network -- test_extract_header -v`
+Run: `cargo test -p dugite-network -- test_extract_header -v`
 
 - [ ] **Step 4: Update ChainSync server to use header extraction**
 
@@ -236,13 +236,13 @@ header: match extract_header_from_block(&block_cbor) {
 
 - [ ] **Step 5: Run full test suite**
 
-Run: `cargo test -p torsten-network -v`
+Run: `cargo test -p dugite-network -v`
 Expected: All PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-network/src/protocol/chainsync/server.rs
+git add crates/dugite-network/src/protocol/chainsync/server.rs
 git commit -m "fix(network): send block header (not full block) in N2N ChainSync MsgRollForward"
 ```
 
@@ -251,10 +251,10 @@ git commit -m "fix(network): send block header (not full block) in N2N ChainSync
 ### Task 1.3: Fix `required_signers` Hash Length (32 -> 28 bytes)
 
 **Files:**
-- Modify: `crates/torsten-serialization/src/encode/transaction.rs:426-433`
-- Test: `crates/torsten-serialization/` (inline or test module)
+- Modify: `crates/dugite-serialization/src/encode/transaction.rs:426-433`
+- Test: `crates/dugite-serialization/` (inline or test module)
 
-**Context:** CDDL requires `required_signers = nonempty_set<addr_keyhash>` where `addr_keyhash = hash28` (28 bytes). Torsten stores as `Hash32` (padded) and encodes 32 bytes. Must emit only the first 28 bytes.
+**Context:** CDDL requires `required_signers = nonempty_set<addr_keyhash>` where `addr_keyhash = hash28` (28 bytes). Dugite stores as `Hash32` (padded) and encodes 32 bytes. Must emit only the first 28 bytes.
 
 - [ ] **Step 1: Write failing test**
 
@@ -291,12 +291,12 @@ for hash in &body.required_signers {
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p torsten-serialization -v`
+Run: `cargo test -p dugite-serialization -v`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-serialization/src/encode/transaction.rs
+git add crates/dugite-serialization/src/encode/transaction.rs
 git commit -m "fix(serialization): encode required_signers as 28-byte addr_keyhash per CDDL"
 ```
 
@@ -305,8 +305,8 @@ git commit -m "fix(serialization): encode required_signers as 28-byte addr_keyha
 ### Task 1.4: Fix ChainDB flush_to_immutable — Use Chain Fragment Order
 
 **Files:**
-- Modify: `crates/torsten-storage/src/chain_db.rs:548-605`
-- Test: `crates/torsten-storage/src/chain_db.rs` (test module)
+- Modify: `crates/dugite-storage/src/chain_db.rs:548-605`
+- Test: `crates/dugite-storage/src/chain_db.rs` (test module)
 
 **Context:** `flush_to_immutable` iterates by `block_no` over the VolatileDB, which can flush non-canonical fork blocks when competing blocks exist at the same block number. Must walk the chain fragment from oldest to newest instead.
 
@@ -381,12 +381,12 @@ pub fn flush_to_immutable(&mut self, security_param: u64) -> Result<u64, Storage
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p torsten-storage -v`
+Run: `cargo test -p dugite-storage -v`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-storage/src/chain_db.rs
+git add crates/dugite-storage/src/chain_db.rs
 git commit -m "fix(storage): flush_to_immutable walks canonical chain fragment, not block_no scan"
 ```
 
@@ -401,10 +401,10 @@ Issues that affect chain selection, block validation, and leader election correc
 ### Task 2.1: Fix Opcert Counter Initialization for First-Seen Pools
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/praos.rs:574-648`
-- Test: `crates/torsten-consensus/src/praos.rs` (test module)
+- Modify: `crates/dugite-consensus/src/praos.rs:574-648`
+- Test: `crates/dugite-consensus/src/praos.rs` (test module)
 
-**Context:** Haskell initializes `currentIssueNo = Just 0` when a pool is in the stake distribution but has no counter entry. Torsten accepts any counter value for a pool's first block, defeating replay protection.
+**Context:** Haskell initializes `currentIssueNo = Just 0` when a pool is in the stake distribution but has no counter entry. Dugite accepts any counter value for a pool's first block, defeating replay protection.
 
 - [ ] **Step 1: Write failing test**
 
@@ -461,12 +461,12 @@ if let Some(&m) = self.opcert_counters.get(&pool_id) {
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p torsten-consensus -v`
+Run: `cargo test -p dugite-consensus -v`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/praos.rs
+git add crates/dugite-consensus/src/praos.rs
 git commit -m "fix(consensus): initialize opcert counter to 0 for first-seen pools per Haskell spec"
 ```
 
@@ -475,10 +475,10 @@ git commit -m "fix(consensus): initialize opcert counter to 0 for first-seen poo
 ### Task 2.2: Fix Chain Selection Tiebreaker (Same-Pool Requires Same-Slot)
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/chain_selection.rs:261-319`
-- Test: `crates/torsten-consensus/src/chain_selection.rs` (test module)
+- Modify: `crates/dugite-consensus/src/chain_selection.rs:261-319`
+- Test: `crates/dugite-consensus/src/chain_selection.rs` (test module)
 
-**Context:** Haskell's `issueNoArmed` fires only when BOTH same issuer AND same slot. Torsten fires for all same-pool pairs regardless of slot, using opcert counter instead of VRF for different-slot same-pool forks.
+**Context:** Haskell's `issueNoArmed` fires only when BOTH same issuer AND same slot. Dugite fires for all same-pool pairs regardless of slot, using opcert counter instead of VRF for different-slot same-pool forks.
 
 - [ ] **Step 1: Write failing test**
 
@@ -489,7 +489,7 @@ fn test_same_pool_different_slot_uses_vrf_not_opcert() {
     let block_a = make_chain_entry(pool: POOL_A, slot: 100, opcert_seq: 5, vrf: VRF_HIGH);
     let block_b = make_chain_entry(pool: POOL_A, slot: 101, opcert_seq: 3, vrf: VRF_LOW);
     // Haskell: different slots → VRF tiebreak → lower VRF wins → block_b wins
-    // Torsten (buggy): same pool → opcert tiebreak → higher opcert wins → block_a wins
+    // Dugite (buggy): same pool → opcert tiebreak → higher opcert wins → block_a wins
     let result = praos_tiebreak(&block_a, &block_b);
     assert_eq!(result, Ordering::Less, "Same pool, different slot: should use VRF, not opcert");
 }
@@ -514,12 +514,12 @@ When same pool but different slot, fall through to the VRF comparison.
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p torsten-consensus -v`
+Run: `cargo test -p dugite-consensus -v`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/chain_selection.rs
+git add crates/dugite-consensus/src/chain_selection.rs
 git commit -m "fix(consensus): chain selection tiebreaker requires same-slot for opcert comparison"
 ```
 
@@ -528,10 +528,10 @@ git commit -m "fix(consensus): chain selection tiebreaker requires same-slot for
 ### Task 2.3: Add Block Body Size and Header Size Limit Enforcement
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/praos.rs` (in `validate_header_full`)
+- Modify: `crates/dugite-consensus/src/praos.rs` (in `validate_header_full`)
 - Test: inline tests
 
-**Context:** Haskell's `envelopeChecks` validates both header size and body size against protocol parameter limits in the consensus layer. Torsten has a non-fatal warning in the ledger layer. Per Haskell architecture, this belongs in consensus only — the ledger layer assumes blocks already pass envelope checks.
+**Context:** Haskell's `envelopeChecks` validates both header size and body size against protocol parameter limits in the consensus layer. Dugite has a non-fatal warning in the ledger layer. Per Haskell architecture, this belongs in consensus only — the ledger layer assumes blocks already pass envelope checks.
 
 - [ ] **Step 1: Write test for body size rejection**
 
@@ -573,7 +573,7 @@ Run: `cargo test --all -v`
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/praos.rs
+git add crates/dugite-consensus/src/praos.rs
 git commit -m "fix(consensus): enforce block body size and header size limits per envelopeChecks"
 ```
 
@@ -582,10 +582,10 @@ git commit -m "fix(consensus): enforce block body size and header size limits pe
 ### Task 2.4: Fix Leader Schedule to Use Rational Arithmetic
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/slot_leader.rs:117`
-- Test: `crates/torsten-consensus/src/slot_leader.rs` (test module)
+- Modify: `crates/dugite-consensus/src/slot_leader.rs:117`
+- Test: `crates/dugite-consensus/src/slot_leader.rs` (test module)
 
-**Context:** `compute_leader_schedule` calls `is_slot_leader` (f64 path) instead of `is_slot_leader_rational`. This can cause precision boundary divergences where Torsten computes leadership differently than Haskell.
+**Context:** `compute_leader_schedule` calls `is_slot_leader` (f64 path) instead of `is_slot_leader_rational`. This can cause precision boundary divergences where Dugite computes leadership differently than Haskell.
 
 - [ ] **Step 1: Change `compute_leader_schedule` to use rational path**
 
@@ -606,12 +606,12 @@ Cache the `ln(1-f)` fixed-point result on the `OuroborosPraos` struct to avoid r
 
 - [ ] **Step 3: Run tests**
 
-Run: `cargo test -p torsten-consensus -v`
+Run: `cargo test -p dugite-consensus -v`
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/slot_leader.rs
+git add crates/dugite-consensus/src/slot_leader.rs
 git commit -m "fix(consensus): use exact rational arithmetic for leader schedule computation"
 ```
 
@@ -619,16 +619,16 @@ git commit -m "fix(consensus): use exact rational arithmetic for leader schedule
 
 ## Phase 3: Ledger Validation Completeness
 
-Missing validation rules that cause Torsten to accept transactions/blocks that Haskell rejects.
+Missing validation rules that cause Dugite to accept transactions/blocks that Haskell rejects.
 
 ---
 
 ### Task 3.1: Add Stake Deregistration Balance Check
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/certificates.rs:112-152`
-- Modify: `crates/torsten-ledger/src/validation/phase1.rs` or `validation/conway.rs`
-- Test: `crates/torsten-ledger/src/validation/` test module
+- Modify: `crates/dugite-ledger/src/state/certificates.rs:112-152`
+- Modify: `crates/dugite-ledger/src/validation/phase1.rs` or `validation/conway.rs`
+- Test: `crates/dugite-ledger/src/validation/` test module
 
 **Context:** `StakeKeyHasNonZeroAccountBalanceDELEG` — deregistration with non-zero reward balance must be rejected. Currently, both `StakeDeregistration` (line 112) and `ConwayStakeDeregistration` (line 140) unconditionally remove without checking.
 
@@ -681,12 +681,12 @@ if let Some(declared_refund) = refund {
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p torsten-ledger -v`
+Run: `cargo test -p dugite-ledger -v`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-ledger/
+git add crates/dugite-ledger/
 git commit -m "fix(ledger): reject stake deregistration with non-zero reward balance"
 ```
 
@@ -695,7 +695,7 @@ git commit -m "fix(ledger): reject stake deregistration with non-zero reward bal
 ### Task 3.2a: Add Stake Registration/Delegation Validation Checks
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/validation/phase1.rs` or `validation/conway.rs`
+- Modify: `crates/dugite-ledger/src/validation/phase1.rs` or `validation/conway.rs`
 - Test: test module
 
 **Context:** Missing checks for duplicate stake registration and delegation to unregistered pools/DReps.
@@ -746,12 +746,12 @@ Certificate::RegDRep { credential: cred, .. } => {
 
 - [ ] **Step 5: Write tests for delegation checks, run all tests**
 
-Run: `cargo test -p torsten-ledger -v`
+Run: `cargo test -p dugite-ledger -v`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-ledger/
+git add crates/dugite-ledger/
 git commit -m "fix(ledger): reject duplicate stake/DRep registration and delegation to unregistered pools"
 ```
 
@@ -760,8 +760,8 @@ git commit -m "fix(ledger): reject duplicate stake/DRep registration and delegat
 ### Task 3.2b: Add Pool Registration Validation Checks
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/validation/phase1.rs` or `validation/conway.rs`
-- Modify: `crates/torsten-ledger/src/state/mod.rs` (add `vrf_key_to_pool` field)
+- Modify: `crates/dugite-ledger/src/validation/phase1.rs` or `validation/conway.rs`
+- Modify: `crates/dugite-ledger/src/state/mod.rs` (add `vrf_key_to_pool` field)
 - Test: test module
 
 **Context:** Missing pool-specific checks: VRF key deduplication (Conway+), minimum pool cost, pool reward account network ID.
@@ -815,12 +815,12 @@ if self.protocol_params.protocol_version_major >= 5 {
 
 - [ ] **Step 5: Write tests for each check, run all tests**
 
-Run: `cargo test -p torsten-ledger -v`
+Run: `cargo test -p dugite-ledger -v`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-ledger/
+git add crates/dugite-ledger/
 git commit -m "fix(ledger): add pool VRF key dedup, min cost, and reward account network checks"
 ```
 
@@ -829,7 +829,7 @@ git commit -m "fix(ledger): add pool VRF key dedup, min cost, and reward account
 ### Task 3.2c: Add Committee Certificate Validation Checks
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/validation/phase1.rs` or `validation/conway.rs`
+- Modify: `crates/dugite-ledger/src/validation/phase1.rs` or `validation/conway.rs`
 - Test: test module
 
 **Context:** CC hot auth for unknown/resigned members is not rejected.
@@ -854,7 +854,7 @@ Certificate::CommitteeHotAuth { cold_key, .. } => {
 - [ ] **Step 3: Run tests and commit**
 
 ```bash
-git add crates/torsten-ledger/
+git add crates/dugite-ledger/
 git commit -m "fix(ledger): reject CC hot auth for unknown or resigned committee members"
 ```
 
@@ -863,7 +863,7 @@ git commit -m "fix(ledger): reject CC hot auth for unknown or resigned committee
 ### Task 3.3: Add Phase-1 Network ID and Auxiliary Data Checks
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/validation/phase1.rs:224-232,492-509`
+- Modify: `crates/dugite-ledger/src/validation/phase1.rs:224-232,492-509`
 - Test: test module
 
 - [ ] **Step 1: Fix auxiliary data hash content verification**
@@ -916,12 +916,12 @@ for (reward_addr, _) in &tx.body.withdrawals {
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo test -p torsten-ledger -v`
+Run: `cargo test -p dugite-ledger -v`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-ledger/src/validation/phase1.rs
+git add crates/dugite-ledger/src/validation/phase1.rs
 git commit -m "fix(ledger): add aux data hash content verification and unconditional network ID checks"
 ```
 
@@ -930,12 +930,12 @@ git commit -m "fix(ledger): add aux data hash content verification and unconditi
 ### Task 3.4: Fix Treasury Donation Timing
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/apply.rs:946-949`
-- Modify: `crates/torsten-ledger/src/state/mod.rs` (add `pending_donations` field)
-- Modify: `crates/torsten-ledger/src/state/epoch.rs` (apply donations at epoch boundary)
+- Modify: `crates/dugite-ledger/src/state/apply.rs:946-949`
+- Modify: `crates/dugite-ledger/src/state/mod.rs` (add `pending_donations` field)
+- Modify: `crates/dugite-ledger/src/state/epoch.rs` (apply donations at epoch boundary)
 - Test: test module
 
-**Context:** Haskell holds donations in `utxosDonation` until epoch boundary. Torsten credits immediately, making mid-epoch `currentTreasuryValue` checks diverge.
+**Context:** Haskell holds donations in `utxosDonation` until epoch boundary. Dugite credits immediately, making mid-epoch `currentTreasuryValue` checks diverge.
 
 - [ ] **Step 1: Add `pending_donations: Lovelace` field to LedgerState**
 
@@ -975,8 +975,8 @@ git commit -m "fix(ledger): buffer treasury donations until epoch boundary per H
 ### Task 3.5: Add Governance Validation Checks
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/governance.rs`
-- Modify: `crates/torsten-ledger/src/validation/conway.rs`
+- Modify: `crates/dugite-ledger/src/state/governance.rs`
+- Modify: `crates/dugite-ledger/src/validation/conway.rs`
 - Test: test module
 
 **Context:** Multiple missing governance checks: `actionWellFormed`, bootstrap phase restrictions, `pvCanFollow`, proposal deposit validation, return address registration, unelected CC votes, prev_action_id at submission.
@@ -1073,7 +1073,7 @@ git commit -m "fix(ledger): add governance validation checks (bootstrap, pvCanFo
 ### Task 3.6: Fix MIR Source Pot Validation
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/certificates.rs:464-490`
+- Modify: `crates/dugite-ledger/src/state/certificates.rs:464-490`
 - Test: test module
 
 - [ ] **Step 1: Add pot balance check before MIR transfer**
@@ -1106,8 +1106,8 @@ MIRTarget::OtherAccountingPot(coin) => {
 ### Task 4.1: Wire In `startup.rs` Recovery Sequence
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/mod.rs:382+` (replace legacy startup path)
-- Modify: `crates/torsten-node/src/startup.rs` (remove `#[allow(dead_code)]`)
+- Modify: `crates/dugite-node/src/node/mod.rs:382+` (replace legacy startup path)
+- Modify: `crates/dugite-node/src/startup.rs` (remove `#[allow(dead_code)]`)
 - Test: integration test
 
 **Context:** The correct 6-step recovery (load snapshot -> gap replay -> volatile replay) is fully implemented in `startup.rs` but dead code. The current `Node::new()` uses legacy inline replay.
@@ -1142,10 +1142,10 @@ git commit -m "feat(node): wire in startup.rs recovery sequence, replace legacy 
 ### Task 4.2: Write Primary Index Files for ImmutableDB
 
 **Files:**
-- Modify: `crates/torsten-storage/src/immutable_db.rs`
+- Modify: `crates/dugite-storage/src/immutable_db.rs`
 - Test: test module
 
-**Context:** Haskell requires `.primary` files for slot-based block lookups. Torsten only writes `.secondary`. Without `.primary`, the chunk files are incompatible with Haskell tools.
+**Context:** Haskell requires `.primary` files for slot-based block lookups. Dugite only writes `.secondary`. Without `.primary`, the chunk files are incompatible with Haskell tools.
 
 - [ ] **Step 1: Implement primary index format**
 
@@ -1201,7 +1201,7 @@ git commit -m "feat(storage): write .primary index files for ImmutableDB Haskell
 ### Task 4.3: Fix Mithril Import — Per-Epoch Chunks
 
 **Files:**
-- Modify: `crates/torsten-node/src/mithril.rs`
+- Modify: `crates/dugite-node/src/mithril.rs`
 - Test: integration test
 
 **Context:** Mithril import appends all blocks to a single chunk. Must call `finalize_chunk()` at epoch boundaries during import.
@@ -1238,7 +1238,7 @@ git commit -m "fix(mithril): create per-epoch chunk files during snapshot import
 ### Task 4.4: Add SIGTERM Handler and Shutdown Persistence
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/mod.rs:1038-1068`
+- Modify: `crates/dugite-node/src/node/mod.rs:1038-1068`
 - Test: manual verification
 
 **Context:** `node/mod.rs` already has SIGTERM handling (lines 1047-1057), but shutdown must guarantee `persist()` is called on ChainDB and a ledger snapshot is saved.
@@ -1273,8 +1273,8 @@ git commit -m "fix(node): ensure ChainDB persist and ledger snapshot on shutdown
 ### Task 4.5: Improve Mempool Revalidation
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/sync.rs:1301-1352`
-- Modify: `crates/torsten-mempool/src/lib.rs`
+- Modify: `crates/dugite-node/src/node/sync.rs:1301-1352`
+- Modify: `crates/dugite-mempool/src/lib.rs`
 - Test: test module
 
 **Context:** Post-block revalidation only checks hash/input conflicts and TTL. Haskell runs full `applyTx` for every remaining mempool transaction against the new ticked ledger state.
@@ -1327,7 +1327,7 @@ git commit -m "fix(mempool): full ledger revalidation after block application, d
 ### Task 4.6: Validate Forged Blocks Before Announcement
 
 **Files:**
-- Modify: `crates/torsten-node/src/forge.rs` or `node/mod.rs` (wherever forged block is announced)
+- Modify: `crates/dugite-node/src/forge.rs` or `node/mod.rs` (wherever forged block is announced)
 - Test: test module
 
 - [ ] **Step 1: Add ledger validation step after forging**
@@ -1355,7 +1355,7 @@ git commit -m "fix(node): validate forged blocks against ledger before announcem
 ### Task 4.7: Read Protocol Version from Ledger State for Forging
 
 **Files:**
-- Modify: `crates/torsten-node/src/forge.rs:235-245`
+- Modify: `crates/dugite-node/src/forge.rs:235-245`
 
 - [ ] **Step 1: Replace hardcoded protocol version with live value**
 
@@ -1389,7 +1389,7 @@ git commit -m "fix(node): read protocol version and block size from live ledger 
 ### Task 5.1: Fix Handshake MsgRefuse Encoding
 
 **Files:**
-- Modify: `crates/torsten-network/src/handshake/mod.rs:243-257`
+- Modify: `crates/dugite-network/src/handshake/mod.rs:243-257`
 
 - [ ] **Step 1: Fix VersionMismatch encoding**
 
@@ -1417,7 +1417,7 @@ git commit -m "fix(network): correct MsgRefuse VersionMismatch encoding per CDDL
 ### Task 5.2: Fix BlockFetch Server MAX_RANGE_SLOTS
 
 **Files:**
-- Modify: `crates/torsten-network/src/protocol/blockfetch/server.rs:19`
+- Modify: `crates/dugite-network/src/protocol/blockfetch/server.rs:19`
 
 - [ ] **Step 1: Remove or increase the artificial limit**
 
@@ -1439,7 +1439,7 @@ git commit -m "fix(network): remove artificial MAX_RANGE_SLOTS limit on BlockFet
 ### Task 5.3: Fix TxSubmission Server Ack Logic
 
 **Files:**
-- Modify: `crates/torsten-network/src/protocol/txsubmission/server.rs:69-76`
+- Modify: `crates/dugite-network/src/protocol/txsubmission/server.rs:69-76`
 
 - [ ] **Step 1: Track fetched-and-processed tx IDs separately from offered IDs**
 
@@ -1456,7 +1456,7 @@ git commit -m "fix(network): only ack tx IDs after receiving and processing tx b
 ### Task 5.4: Fix ChainSync Server Timeout
 
 **Files:**
-- Modify: `crates/torsten-network/src/protocol/chainsync/server.rs:192`
+- Modify: `crates/dugite-network/src/protocol/chainsync/server.rs:192`
 
 - [ ] **Step 1: Reduce timeout to match Haskell**
 
@@ -1480,7 +1480,7 @@ git commit -m "fix(network): set ChainSync server idle timeout to 3373ms per Has
 ### Task 5.5: Fix Mux Ingress Byte Counter
 
 **Files:**
-- Modify: `crates/torsten-network/src/mux/ingress.rs:109`
+- Modify: `crates/dugite-network/src/mux/ingress.rs:109`
 
 - [ ] **Step 1: Add decrement when receiver drains the channel**
 
@@ -1503,7 +1503,7 @@ Lower-priority items that improve spec compliance but don't block correct operat
 ### Task 6.1: Use Tag 258 for CBOR Sets
 
 **Files:**
-- Modify: `crates/torsten-serialization/src/encode/transaction.rs`
+- Modify: `crates/dugite-serialization/src/encode/transaction.rs`
 
 - [ ] **Step 1: Add `encode_tagged_set` helper**
 
@@ -1534,8 +1534,8 @@ git commit -m "fix(serialization): use CBOR tag 258 for set-typed fields per Con
 ### Task 6.2: Use Conway Map Format for Redeemers
 
 **Files:**
-- Modify: `crates/torsten-serialization/src/encode/transaction.rs:186-192`
-- Modify: `crates/torsten-serialization/src/encode/script.rs:167` (empty redeemers)
+- Modify: `crates/dugite-serialization/src/encode/transaction.rs:186-192`
+- Modify: `crates/dugite-serialization/src/encode/script.rs:167` (empty redeemers)
 
 - [ ] **Step 1: Change redeemer encoding to map format**
 
@@ -1569,7 +1569,7 @@ git commit -m "fix(serialization): use Conway map format for redeemers encoding"
 ### Task 6.3: Add VolatileDB Successor Map
 
 **Files:**
-- Modify: `crates/torsten-storage/src/volatile_db.rs`
+- Modify: `crates/dugite-storage/src/volatile_db.rs`
 
 - [ ] **Step 1: Add `successor_map: HashMap<Hash32, HashSet<Hash32>>`**
 
@@ -1600,7 +1600,7 @@ git commit -m "feat(storage): add successor map to VolatileDB for O(1) fork enum
 ### Task 6.4: Add ImmutableDB Validation on Startup
 
 **Files:**
-- Modify: `crates/torsten-storage/src/immutable_db.rs`
+- Modify: `crates/dugite-storage/src/immutable_db.rs`
 
 - [ ] **Step 1: Implement `validate_most_recent_chunk`**
 
@@ -1619,7 +1619,7 @@ git commit -m "feat(storage): validate most recent ImmutableDB chunk on startup"
 ### Task 6.5: Reward Calculation — Use Exact Rational for expectedBlocks
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/rewards.rs:262-265`
+- Modify: `crates/dugite-ledger/src/state/rewards.rs:262-265`
 
 - [ ] **Step 1: Replace f64 arithmetic with Rat type**
 
@@ -1646,10 +1646,10 @@ git commit -m "fix(ledger): use exact rational arithmetic for expectedBlocks cal
 ### Task 6.6: DRep Inactivity — Account for Dormant Epochs
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/epoch.rs:492`
-- Modify: `crates/torsten-ledger/src/state/mod.rs` (add dormant epoch tracking)
+- Modify: `crates/dugite-ledger/src/state/epoch.rs:492`
+- Modify: `crates/dugite-ledger/src/state/mod.rs` (add dormant epoch tracking)
 
-**Context:** Haskell's `computeDRepExpiryVersioned` does not count dormant epochs (epochs with no active proposals) against DRep activity. Torsten counts all epochs.
+**Context:** Haskell's `computeDRepExpiryVersioned` does not count dormant epochs (epochs with no active proposals) against DRep activity. Dugite counts all epochs.
 
 - [ ] **Step 1: Track `num_dormant_epochs` in LedgerState**
 
@@ -1675,7 +1675,7 @@ git commit -m "fix(ledger): account for dormant epochs in DRep inactivity calcul
 ### Task 6.7: WAL Compaction for VolatileDB
 
 **Files:**
-- Modify: `crates/torsten-storage/src/volatile_db.rs`
+- Modify: `crates/dugite-storage/src/volatile_db.rs`
 
 - [ ] **Step 1: Add `compact_wal()` method**
 
@@ -1708,7 +1708,7 @@ git commit -m "feat(storage): compact VolatileDB WAL after flush to immutable"
 ### Task 6.8: Mithril Certificate Chain Verification
 
 **Files:**
-- Modify: `crates/torsten-node/src/mithril.rs`
+- Modify: `crates/dugite-node/src/mithril.rs`
 
 **Context:** Currently only the digest is verified against the aggregator API. The STM multi-signature certificate chain is not verified, meaning a compromised aggregator could serve malicious snapshots.
 

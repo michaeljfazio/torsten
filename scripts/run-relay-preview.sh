@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run Torsten as a relay node on the Cardano preview testnet.
+# Run Dugite as a relay node on the Cardano preview testnet.
 #
 # Usage: ./scripts/run-relay-preview.sh [--log FILE]
 #
@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-BIN=./target/release/torsten-node
+BIN=./target/release/dugite-node
 
 if [[ ! -x "$BIN" ]]; then
     echo "Binary not found. Building..."
@@ -41,7 +41,7 @@ CMD=(
     --port 3001
 )
 
-echo "Starting Torsten relay (preview testnet)..."
+echo "Starting Dugite relay (preview testnet)..."
 echo "Database:  ./db-preview"
 echo "Socket:    ./node.sock"
 echo "Metrics:   http://localhost:12798/metrics"

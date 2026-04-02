@@ -1,6 +1,6 @@
-//! # Torsten Formal Ledger Specification Conformance Tests
+//! # Dugite Formal Ledger Specification Conformance Tests
 //!
-//! This crate validates Torsten's ledger implementation against test vectors
+//! This crate validates Dugite's ledger implementation against test vectors
 //! derived from the Cardano formal ledger specification (Agda -> Haskell).
 //!
 //! ## Architecture
@@ -10,8 +10,8 @@
 //! Haskell via MAlonzo. A Haskell test vector generator calls these step functions
 //! and serializes inputs/outputs as JSON test vectors.
 //!
-//! This crate consumes those test vectors and validates them against Torsten's
-//! Rust implementation. The mapping between Agda abstract types and Torsten's
+//! This crate consumes those test vectors and validates them against Dugite's
+//! Rust implementation. The mapping between Agda abstract types and Dugite's
 //! concrete types is handled by the [`adapters`] module.
 //!
 //! ## Supported Rules

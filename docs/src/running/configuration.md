@@ -1,6 +1,6 @@
 # Configuration
 
-Torsten reads a JSON configuration file that controls network settings, genesis file paths, P2P parameters, and tracing options. The format is compatible with the cardano-node configuration format.
+Dugite reads a JSON configuration file that controls network settings, genesis file paths, P2P parameters, and tracing options. The format is compatible with the cardano-node configuration format.
 
 ## Configuration File Format
 
@@ -60,7 +60,7 @@ The configuration file uses PascalCase keys (matching the cardano-node conventio
 
 ### Genesis Files
 
-Genesis file paths are resolved relative to the directory containing the configuration file. For example, if your config is at `/opt/cardano/config.json` and specifies `"ShelleyGenesisFile": "shelley-genesis.json"`, Torsten will look for `/opt/cardano/shelley-genesis.json`.
+Genesis file paths are resolved relative to the directory containing the configuration file. For example, if your config is at `/opt/cardano/config.json` and specifies `"ShelleyGenesisFile": "shelley-genesis.json"`, Dugite will look for `/opt/cardano/shelley-genesis.json`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -104,16 +104,16 @@ The log level can be set via CLI flag or environment variable:
 
 ```bash
 # Via CLI flag
-torsten-node run --log-level debug ...
+dugite-node run --log-level debug ...
 
 # Via environment variable (takes priority over --log-level)
-RUST_LOG=info torsten-node run ...
+RUST_LOG=info dugite-node run ...
 
 # Debug only for specific crates
-RUST_LOG=torsten_network=debug,torsten_consensus=debug torsten-node run ...
+RUST_LOG=dugite_network=debug,dugite_consensus=debug dugite-node run ...
 ```
 
-Torsten supports multiple log output targets (stdout, file, journald) and file rotation. See [Logging](./logging.md) for full details on output configuration.
+Dugite supports multiple log output targets (stdout, file, journald) and file rotation. See [Logging](./logging.md) for full details on output configuration.
 
 ## Minimal Configuration
 
@@ -130,37 +130,37 @@ All other fields use sensible defaults. When no genesis files are specified, the
 
 ## Format Support
 
-Torsten supports both JSON (`.json`) and TOML (`.toml`) configuration files. The format is determined by the file extension. JSON files use the cardano-node compatible PascalCase format shown above.
+Dugite supports both JSON (`.json`) and TOML (`.toml`) configuration files. The format is determined by the file extension. JSON files use the cardano-node compatible PascalCase format shown above.
 
-## Interactive Configuration Editor (torsten-config)
+## Interactive Configuration Editor (dugite-config)
 
-`torsten-config` is a standalone TUI tool for creating and editing Torsten configuration files interactively, without needing to remember field names or valid value ranges.
+`dugite-config` is a standalone TUI tool for creating and editing Dugite configuration files interactively, without needing to remember field names or valid value ranges.
 
 ### Installation
 
 Built as part of the standard workspace:
 
 ```bash
-cargo build --release -p torsten-config
+cargo build --release -p dugite-config
 ```
 
 ### Commands
 
 ```bash
 # Interactively create a new configuration file
-torsten-config init --out-file config.json
+dugite-config init --out-file config.json
 
 # Launch the interactive editor for an existing config file
-torsten-config edit config.json
+dugite-config edit config.json
 
 # Validate a configuration file and report errors
-torsten-config validate config.json
+dugite-config validate config.json
 
 # Get the value of a specific field
-torsten-config get config.json TargetNumberOfActivePeers
+dugite-config get config.json TargetNumberOfActivePeers
 
 # Set the value of a specific field
-torsten-config set config.json TargetNumberOfActivePeers 30
+dugite-config set config.json TargetNumberOfActivePeers 30
 ```
 
 ### Interactive Editor Features

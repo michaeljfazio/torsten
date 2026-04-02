@@ -6,7 +6,7 @@
 
 **Architecture:** Each peer gets a single `PeerConnection` that owns a `Mux` with channels for all protocols. The Governor manages peer temperature transitions. At Warm, KeepAlive runs. At Hot, ChainSync + BlockFetch + TxSubmission2 are started as independent tasks on the same mux. A dedicated `BlockFetchDecisionTask` reads candidate chain state from ChainSync and issues fetch requests to per-peer BlockFetch tasks. The sync loop is replaced by independent per-peer ChainSync client tasks.
 
-**Tech Stack:** Rust, tokio, torsten-network (Bearer, Mux, protocol clients/servers), tokio::sync (watch, mpsc, broadcast)
+**Tech Stack:** Rust, tokio, dugite-network (Bearer, Mux, protocol clients/servers), tokio::sync (watch, mpsc, broadcast)
 
 **Reference:** Haskell source analysis (ouroboros-network/network-mux, ouroboros-network/PeerStateActions, ouroboros-network/BlockFetch)
 
@@ -31,7 +31,7 @@ These are NOT negotiable — our implementation MUST match:
 ## File Structure
 
 ```
-crates/torsten-node/src/node/
+crates/dugite-node/src/node/
 ├── mod.rs                    # MODIFY: Remove dual-connection paths, use PeerConnection
 ├── peer_connection.rs        # CREATE: PeerConnection — owns one mux, all protocol channels
 ├── connection_lifecycle.rs   # CREATE: Cold→Warm→Hot transitions, protocol start/stop
@@ -39,7 +39,7 @@ crates/torsten-node/src/node/
 ├── sync.rs                   # MODIFY: ChainSync becomes a per-peer task, not the main loop
 ├── networking.rs             # MODIFY: Remove types that duplicate network crate, add PeerConnection types
 
-crates/torsten-network/src/
+crates/dugite-network/src/
 ├── mux/mod.rs                # MODIFY: Verify SDU direction byte matches Haskell (byte 6, not bit 15)
 ├── mux/egress.rs             # MODIFY: Implement fair round-robin Wanton scheduling
 ```
@@ -49,7 +49,7 @@ crates/torsten-network/src/
 ## Task 1: Create PeerConnection — One Mux Per Peer
 
 **Files:**
-- Create: `crates/torsten-node/src/node/peer_connection.rs`
+- Create: `crates/dugite-node/src/node/peer_connection.rs`
 
 A `PeerConnection` encapsulates a single multiplexed TCP connection to one peer. It owns the mux and provides protocol channels. ALL protocols share the same underlying TCP stream.
 
@@ -178,7 +178,7 @@ Graceful shutdown with 5s timeout matching Haskell `spsDeactivateTimeout`.
 ## Task 2: Create Connection Lifecycle Manager
 
 **Files:**
-- Create: `crates/torsten-node/src/node/connection_lifecycle.rs`
+- Create: `crates/dugite-node/src/node/connection_lifecycle.rs`
 
 Manages the Cold→Warm→Hot temperature transitions for all peer connections. Replaces the current Governor connect tasks + sync loop dual-connection pattern.
 
@@ -227,7 +227,7 @@ Handles inbound connections from the N2N listener. Creates PeerConnection, start
 ## Task 3: Create Independent BlockFetch Decision Task
 
 **Files:**
-- Create: `crates/torsten-node/src/node/block_fetch_logic.rs`
+- Create: `crates/dugite-node/src/node/block_fetch_logic.rs`
 
 A dedicated tokio task that continuously reads candidate chain state from all ChainSync clients and decides which blocks to fetch from which peers. Matches Haskell's `blockFetchLogic` thread.
 
@@ -274,7 +274,7 @@ Fetched blocks are sent to the main processing pipeline via an mpsc channel. The
 ## Task 4: Refactor ChainSync as Per-Peer Independent Task
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/sync.rs`
+- Modify: `crates/dugite-node/src/node/sync.rs`
 
 ChainSync becomes an independent per-peer tokio task that:
 1. Finds intersection
@@ -325,7 +325,7 @@ Move fork recovery (origin intersection detection, deep rollback) into the Chain
 ## Task 5: Refactor mod.rs Run Loop
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/mod.rs`
+- Modify: `crates/dugite-node/src/node/mod.rs`
 
 Remove the current dual-connection Governor+Sync pattern. Replace with:
 
@@ -403,7 +403,7 @@ Delete the section in mod.rs that creates a SEPARATE connection for sync. ChainS
 ## Task 6: Verify SDU Wire Format
 
 **Files:**
-- Modify: `crates/torsten-network/src/mux/segment.rs` (if needed)
+- Modify: `crates/dugite-network/src/mux/segment.rs` (if needed)
 
 - [ ] **Step 1: Verify SDU header format matches Haskell**
 
@@ -440,7 +440,7 @@ Compare our SDU bytes with the Haskell capture from the tcpdump session. Confirm
   - Verify ChainSync receives headers
   - Verify BlockFetch downloads blocks
   - Verify blocks are applied to ledger
-  - Verify N2C queries work via torsten-cli
+  - Verify N2C queries work via dugite-cli
   - Verify Prometheus metrics on port 12798
 - [ ] **Step 6: Commit and push**
 

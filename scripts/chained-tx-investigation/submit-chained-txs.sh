@@ -2,7 +2,7 @@
 # Build and submit a chain of N dependent transactions to a node.
 #
 # Usage:
-#   ./submit-chained-txs.sh --target torsten --chain-length 10
+#   ./submit-chained-txs.sh --target dugite --chain-length 10
 #   ./submit-chained-txs.sh --target haskell --chain-length 10
 #
 # Prerequisites: cardano-cli (for offline tx building/signing)
@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 CCLI="cardano-cli"
-TARGET="torsten"
+TARGET="dugite"
 CHAIN_LEN=10
 MAGIC=2
 ADDR=$(cat ./keys/preview-test/payment.addr)
@@ -27,18 +27,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$TARGET" == "torsten" ]]; then
+if [[ "$TARGET" == "dugite" ]]; then
     SOCKET="./node.sock"
-    QUERY_CLI="./target/release/torsten-cli"
-    SUBMIT_CLI="./target/release/torsten-cli"
-    echo "=== Submitting $CHAIN_LEN chained txs to TORSTEN ==="
+    QUERY_CLI="./target/release/dugite-cli"
+    SUBMIT_CLI="./target/release/dugite-cli"
+    echo "=== Submitting $CHAIN_LEN chained txs to DUGITE ==="
 elif [[ "$TARGET" == "haskell" ]]; then
     SOCKET="./haskell-node.sock"
     QUERY_CLI="$CCLI conway"
     SUBMIT_CLI="$CCLI conway"
     echo "=== Submitting $CHAIN_LEN chained txs to HASKELL ==="
 else
-    echo "ERROR: --target must be 'torsten' or 'haskell'"
+    echo "ERROR: --target must be 'dugite' or 'haskell'"
     exit 1
 fi
 
@@ -142,7 +142,7 @@ echo "Failed:    $failed"
 sleep 2
 echo ""
 echo "=== Mempool State ==="
-if [[ "$TARGET" == "torsten" ]]; then
+if [[ "$TARGET" == "dugite" ]]; then
     curl -s http://localhost:12798/metrics 2>/dev/null | grep "mempool" | grep -v "^#" || echo "(metrics unavailable)"
 else
     curl -s http://localhost:12799/metrics 2>/dev/null | grep -i "mempool" | grep -v "^#" || echo "(metrics unavailable)"

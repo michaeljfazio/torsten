@@ -1,6 +1,6 @@
 # Ledger
 
-Torsten's ledger layer (`torsten-ledger`) implements full Cardano transaction validation, UTxO management, stake distribution, reward calculation, and Conway-era governance. It closely follows the Haskell cardano-ledger STS (State Transition System) rules.
+Dugite's ledger layer (`dugite-ledger`) implements full Cardano transaction validation, UTxO management, stake distribution, reward calculation, and Conway-era governance. It closely follows the Haskell cardano-ledger STS (State Transition System) rules.
 
 ## Ledger State
 
@@ -21,7 +21,7 @@ flowchart TD
 Key design decisions:
 
 - **Arc-wrapped collections** — Large mutable fields (`delegations`, `pool_params`, `reward_accounts`, `governance`) are wrapped in `Arc` for copy-on-write semantics. Cloning `LedgerState` bumps reference counts; mutations via `Arc::make_mut()` only copy when shared.
-- **On-disk UTxO** — The UTxO set lives in an LSM tree (`torsten-lsm`) rather than in memory, matching Haskell's UTxO-HD architecture. At mainnet scale (~20M UTxOs), this avoids multi-gigabyte memory pressure.
+- **On-disk UTxO** — The UTxO set lives in an LSM tree (`dugite-lsm`) rather than in memory, matching Haskell's UTxO-HD architecture. At mainnet scale (~20M UTxOs), this avoids multi-gigabyte memory pressure.
 - **Exact rational arithmetic** — Reward calculations use `Rat` (backed by `num_bigint::BigInt`) for lossless intermediate computation, with a single floor operation at the end matching Haskell's `rationalToCoinViaFloor`.
 
 ## Block Application Pipeline
@@ -89,7 +89,7 @@ The `ValidationError` enum covers 50+ error variants across all categories: stru
 
 ## Certificate Processing
 
-Torsten processes all Shelley through Conway certificate types:
+Dugite processes all Shelley through Conway certificate types:
 
 | Certificate | Description |
 |------------|-------------|
@@ -180,7 +180,7 @@ The mark/set/go model ensures different subsystems use consistent, non-overlappi
 
 ### UtxoStore
 
-The persistent UTxO set wraps a `torsten-lsm` LSM tree:
+The persistent UTxO set wraps a `dugite-lsm` LSM tree:
 
 - **36-byte keys** — 32-byte transaction hash + 4-byte output index (big-endian)
 - **Bincode values** — `TransactionOutput` serialized via bincode

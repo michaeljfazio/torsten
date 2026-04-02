@@ -1,12 +1,12 @@
 ---
 name: Large-test feature gate design
-description: How the large-tests feature flag and entry counts were chosen for torsten-lsm
+description: How the large-tests feature flag and entry counts were chosen for dugite-lsm
 type: project
 ---
 
-Feature flag: `large-tests = []` in `crates/torsten-lsm/Cargo.toml`.
+Feature flag: `large-tests = []` in `crates/dugite-lsm/Cargo.toml`.
 Guard: `#[cfg(all(test, feature = "large-tests"))]` on the module.
-Run command: `cargo test -p torsten-lsm --features large-tests -- mainnet_scale`
+Run command: `cargo test -p dugite-lsm --features large-tests -- mainnet_scale`
 
 Entry counts (chosen to keep total runtime <60s on debug builds):
 - test_mainnet_scale_insert_read: 1M entries, 1000-key random sample

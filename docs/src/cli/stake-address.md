@@ -1,13 +1,13 @@
 # Stake Address Commands
 
-The `torsten-cli stake-address` subcommands manage stake key generation, reward address construction, and certificate creation for staking operations.
+The `dugite-cli stake-address` subcommands manage stake key generation, reward address construction, and certificate creation for staking operations.
 
 ## key-gen
 
 Generate a stake key pair:
 
 ```bash
-torsten-cli stake-address key-gen \
+dugite-cli stake-address key-gen \
   --verification-key-file stake.vkey \
   --signing-key-file stake.skey
 ```
@@ -22,7 +22,7 @@ torsten-cli stake-address key-gen \
 Build a stake (reward) address from a stake verification key:
 
 ```bash
-torsten-cli stake-address build \
+dugite-cli stake-address build \
   --stake-verification-key-file stake.vkey \
   --network testnet
 ```
@@ -39,13 +39,13 @@ Create a stake address registration certificate:
 
 ```bash
 # Conway era (with deposit)
-torsten-cli stake-address registration-certificate \
+dugite-cli stake-address registration-certificate \
   --stake-verification-key-file stake.vkey \
   --key-reg-deposit-amt 2000000 \
   --out-file stake-reg.cert
 
 # Legacy Shelley era (no deposit parameter)
-torsten-cli stake-address registration-certificate \
+dugite-cli stake-address registration-certificate \
   --stake-verification-key-file stake.vkey \
   --out-file stake-reg.cert
 ```
@@ -63,7 +63,7 @@ The deposit amount should match the current `stakeAddressDeposit` protocol param
 Create a stake address deregistration certificate to reclaim the deposit:
 
 ```bash
-torsten-cli stake-address deregistration-certificate \
+dugite-cli stake-address deregistration-certificate \
   --stake-verification-key-file stake.vkey \
   --key-reg-deposit-amt 2000000 \
   --out-file stake-dereg.cert
@@ -80,7 +80,7 @@ torsten-cli stake-address deregistration-certificate \
 Create a stake delegation certificate to delegate to a stake pool:
 
 ```bash
-torsten-cli stake-address delegation-certificate \
+dugite-cli stake-address delegation-certificate \
   --stake-verification-key-file stake.vkey \
   --stake-pool-id pool1abc... \
   --out-file delegation.cert
@@ -98,19 +98,19 @@ Create a vote delegation certificate (Conway era) to delegate voting power to a 
 
 ```bash
 # Delegate to a specific DRep
-torsten-cli stake-address vote-delegation-certificate \
+dugite-cli stake-address vote-delegation-certificate \
   --stake-verification-key-file stake.vkey \
   --drep-verification-key-file drep.vkey \
   --out-file vote-deleg.cert
 
 # Delegate to always-abstain
-torsten-cli stake-address vote-delegation-certificate \
+dugite-cli stake-address vote-delegation-certificate \
   --stake-verification-key-file stake.vkey \
   --always-abstain \
   --out-file vote-deleg.cert
 
 # Delegate to always-no-confidence
-torsten-cli stake-address vote-delegation-certificate \
+dugite-cli stake-address vote-delegation-certificate \
   --stake-verification-key-file stake.vkey \
   --always-no-confidence \
   --out-file vote-deleg.cert
@@ -128,24 +128,24 @@ torsten-cli stake-address vote-delegation-certificate \
 
 ```bash
 # 1. Generate stake keys
-torsten-cli stake-address key-gen \
+dugite-cli stake-address key-gen \
   --verification-key-file stake.vkey \
   --signing-key-file stake.skey
 
 # 2. Create registration certificate
-torsten-cli stake-address registration-certificate \
+dugite-cli stake-address registration-certificate \
   --stake-verification-key-file stake.vkey \
   --key-reg-deposit-amt 2000000 \
   --out-file stake-reg.cert
 
 # 3. Create delegation certificate
-torsten-cli stake-address delegation-certificate \
+dugite-cli stake-address delegation-certificate \
   --stake-verification-key-file stake.vkey \
   --stake-pool-id pool1abc... \
   --out-file delegation.cert
 
 # 4. Submit both in a single transaction
-torsten-cli transaction build \
+dugite-cli transaction build \
   --tx-in "abc123...#0" \
   --tx-out "addr_test1qz...+5000000" \
   --change-address "addr_test1qp..." \
@@ -154,13 +154,13 @@ torsten-cli transaction build \
   --certificate-file delegation.cert \
   --out-file tx.body
 
-torsten-cli transaction sign \
+dugite-cli transaction sign \
   --tx-body-file tx.body \
   --signing-key-file payment.skey \
   --signing-key-file stake.skey \
   --out-file tx.signed
 
-torsten-cli transaction submit \
+dugite-cli transaction submit \
   --tx-file tx.signed \
   --socket-path ./node.sock
 ```

@@ -12,21 +12,21 @@ causing valid live blocks to be rejected and the node to become stuck.
 ### Failure 1: pool1407hpuvtp9ww8s5mt53ear7062j463mvwhnypurlcask7djg3ae
 
 ```
-WARN torsten_consensus::praos: Praos: VRF output does not satisfy leader eligibility threshold
+WARN dugite_consensus::praos: Praos: VRF output does not satisfy leader eligibility threshold
   slot=106472524 relative_stake=8.797988584952467e-5
-ERROR torsten_node::node: Consensus validation failed (strict): Not a slot leader — rejecting batch
+ERROR dugite_node::node: Consensus validation failed (strict): Not a slot leader — rejecting batch
   slot=106472524 block_no=4095271
 ```
 
 - Block 4095271 confirmed accepted on-chain by Koios
-- Torsten relative_stake: 8.8e-5 (0.0088%)
+- Dugite relative_stake: 8.8e-5 (0.0088%)
 - Koios Set snapshot for this pool (epoch 1232): pool_stake=13,868,509,236,339 / active_stake=1,177,946,537,741,239 = **1.177%**
 - Discrepancy: 133x too small
 
 **Root cause of 133x discrepancy:**
-`set_snapshot.pool_stake.values().sum()` in Torsten = ~157 quadrillion lovelace
+`set_snapshot.pool_stake.values().sum()` in Dugite = ~157 quadrillion lovelace
 Koios set snapshot active_stake = 1,177,946,537,741,239 (1.18 quadrillion)
-Torsten's denominator is 133x too large → all fractions appear 133x too small.
+Dugite's denominator is 133x too large → all fractions appear 133x too small.
 
 This is likely caused by the double-replay issue: when the node restarts with a
 ledger snapshot at slot 106449950 but a ChainDB tip at 106401541, it replays
@@ -37,23 +37,23 @@ inputs from those blocks fail to subtract (UTxO set already consumed).
 ### Failure 2: pool1q65ag8panwayzaqfs6je7jz2ywt8x2032yaunq5hf25t7t8c26e
 
 ```
-WARN torsten_consensus::praos: Praos: VRF output does not satisfy leader eligibility threshold
+WARN dugite_consensus::praos: Praos: VRF output does not satisfy leader eligibility threshold
   slot=106473067 relative_stake=0.008867399057171464
-ERROR torsten_node::node: Consensus validation failed (strict): Not a slot leader — rejecting batch
+ERROR dugite_node::node: Consensus validation failed (strict): Not a slot leader — rejecting batch
   slot=106473067 block_no=4095284
 ```
 
 - Block 4095284 confirmed accepted on-chain by Koios
-- Torsten relative_stake: 0.8867%
+- Dugite relative_stake: 0.8867%
 - Koios Set snapshot for this pool (epoch 1232): pool_stake=11,555,347,415,472 / active_stake=1,177,946,537,741,239 = **0.9810%**
-- Discrepancy: Torsten underreports by ~10%
+- Discrepancy: Dugite underreports by ~10%
 
 **Root cause of 10% discrepancy:**
-Torsten's threshold = 1 - 0.95^0.008867 = 0.000454734
+Dugite's threshold = 1 - 0.95^0.008867 = 0.000454734
 Koios actual threshold = 1 - 0.95^0.009810 = 0.000503047
 
 The block's VRF leader_value landed in the gap [0.000455, 0.000503] — valid by Koios
-threshold but just above Torsten's computed threshold. This is a stake accounting
+threshold but just above Dugite's computed threshold. This is a stake accounting
 error of ~10% in the set_snapshot.pool_stake for this pool.
 
 ## Chain Liveness Impact
@@ -80,7 +80,7 @@ fed into the check is wrong.
 
 ### Immediate Fix (Liveness): Disable strict VRF during sync
 
-In `crates/torsten-node/src/node.rs` around line 1680:
+In `crates/dugite-node/src/node.rs` around line 1680:
 ```rust
 // Current: strict=true causes rejection that sticks the node
 if let Err(e) = self.consensus.validate_header_full(...) {
@@ -104,7 +104,7 @@ When ledger snapshot tip > ChainDB tip, the node should either:
 1. NOT replay blocks already applied in the snapshot (trim the sync start point)
 2. Save ChainDB tip alongside the snapshot and replay from there instead
 
-File: `crates/torsten-node/src/node.rs`
+File: `crates/dugite-node/src/node.rs`
 The intersection logic at line 1827 uses ChainDB tip when Ledger tip > ChainDB tip.
 Blocks in range [ChainDB_tip, Ledger_tip] should NOT be re-applied to the ledger.
 
@@ -122,16 +122,16 @@ this could explain a 10% undercount for pools with many delegators.
 
 ## Relevant Code Locations
 
-- VRF check: `/Users/michaelfazio/Source/torsten/crates/torsten-consensus/src/praos.rs` lines 317-341
-- Pool stake lookup: `/Users/michaelfazio/Source/torsten/crates/torsten-node/src/node.rs` lines 1626-1668
-- Snapshot creation: `/Users/michaelfazio/Source/torsten/crates/torsten-ledger/src/state.rs` lines 1099-1136
-- Exact VRF check: `/Users/michaelfazio/Source/torsten/crates/torsten-crypto/src/vrf.rs` lines 85-305
+- VRF check: `/Users/michaelfazio/Source/dugite/crates/dugite-consensus/src/praos.rs` lines 317-341
+- Pool stake lookup: `/Users/michaelfazio/Source/dugite/crates/dugite-node/src/node.rs` lines 1626-1668
+- Snapshot creation: `/Users/michaelfazio/Source/dugite/crates/dugite-ledger/src/state.rs` lines 1099-1136
+- Exact VRF check: `/Users/michaelfazio/Source/dugite/crates/dugite-crypto/src/vrf.rs` lines 85-305
 - Stake tracking (subtract): `state.rs` lines 680-688
 - Stake tracking (add): `state.rs` lines 700-711
 
 ## Key Numbers (epoch 1232, preview testnet)
 
 - Koios set snapshot total active_stake: 1,177,946,537,741,239 lovelace
-- Torsten implied set snapshot total: ~157,632,725,962,600,544 lovelace (133x too large)
+- Dugite implied set snapshot total: ~157,632,725,962,600,544 lovelace (133x too large)
 - update_query_state stake sum (current): reasonable (~0.95 of total)
-- Torsten pool count: 653, delegation_count: 11,515
+- Dugite pool count: 653, delegation_count: 11,515

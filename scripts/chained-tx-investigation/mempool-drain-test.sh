@@ -14,7 +14,7 @@ cd "$(dirname "$0")/../.."
 
 CCLI="cardano-cli"
 SOCKET="./node.sock"
-CLI="./target/release/torsten-cli"
+CLI="./target/release/dugite-cli"
 MAGIC=2
 ADDR=$(cat ./keys/preview-test/payment.addr)
 SKEY="./keys/preview-test/payment.skey"
@@ -175,7 +175,7 @@ echo ""
 echo "=== Phase 2: Submitting $BUILT_COUNT transactions ==="
 
 # Record pre-submission mempool state
-PRE_MEMPOOL=$(curl -s http://localhost:12798/metrics | grep "^torsten_mempool_tx_count " | awk '{print $2}')
+PRE_MEMPOOL=$(curl -s http://localhost:12798/metrics | grep "^dugite_mempool_tx_count " | awk '{print $2}')
 echo "  Pre-submission mempool: $PRE_MEMPOOL txs"
 
 SUBMIT_START=$(date +%s%N)
@@ -237,8 +237,8 @@ drain_complete=0
 for i in $(seq 1 600); do
     sleep 1
     metrics=$(curl -s http://localhost:12798/metrics 2>/dev/null)
-    count=$(echo "$metrics" | grep "^torsten_mempool_tx_count " | awk '{print $2}')
-    bytes=$(echo "$metrics" | grep "^torsten_mempool_bytes " | awk '{print $2}')
+    count=$(echo "$metrics" | grep "^dugite_mempool_tx_count " | awk '{print $2}')
+    bytes=$(echo "$metrics" | grep "^dugite_mempool_bytes " | awk '{print $2}')
     count=${count:-0}
     bytes=${bytes:-0}
 

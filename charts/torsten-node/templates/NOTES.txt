@@ -1,4 +1,4 @@
-Torsten Node deployed as {{ .Values.role }} on {{ .Values.network.name }}!
+Dugite Node deployed as {{ .Values.role }} on {{ .Values.network.name }}!
 
 {{- if eq .Values.role "relay" }}
 
@@ -19,7 +19,7 @@ Torsten Node deployed as {{ .Values.role }} on {{ .Values.network.name }}!
   IMPORTANT: Ensure your relay is configured with this producer as a local root:
     topology.localRoots:
       - accessPoints:
-          - address: {{ include "torsten-node.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+          - address: {{ include "dugite-node.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
             port: {{ .Values.network.port }}
         advertise: false
         trustable: true
@@ -28,14 +28,14 @@ Torsten Node deployed as {{ .Values.role }} on {{ .Values.network.name }}!
 {{- end }}
 
   Get the node status:
-    kubectl exec -it deploy/{{ include "torsten-node.fullname" . }} -- torsten-cli query tip --testnet-magic {{ include "torsten-node.networkMagic" . }}
+    kubectl exec -it deploy/{{ include "dugite-node.fullname" . }} -- dugite-cli query tip --testnet-magic {{ include "dugite-node.networkMagic" . }}
 
   View logs:
-    kubectl logs -f deploy/{{ include "torsten-node.fullname" . }}
+    kubectl logs -f deploy/{{ include "dugite-node.fullname" . }}
 
   {{- if .Values.metrics.enabled }}
 
   Metrics are available on port {{ .Values.metrics.port }}:
-    kubectl port-forward svc/{{ include "torsten-node.fullname" . }} {{ .Values.metrics.port }}:{{ .Values.metrics.port }}
+    kubectl port-forward svc/{{ include "dugite-node.fullname" . }} {{ .Values.metrics.port }}:{{ .Values.metrics.port }}
     curl http://localhost:{{ .Values.metrics.port }}/metrics
   {{- end }}

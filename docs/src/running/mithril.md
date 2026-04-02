@@ -1,6 +1,6 @@
 # Mithril Snapshot Import
 
-Syncing a Cardano node from genesis can take a very long time. Torsten supports importing [Mithril](https://mithril.network/)-certified snapshots of the immutable database to drastically reduce initial sync time.
+Syncing a Cardano node from genesis can take a very long time. Dugite supports importing [Mithril](https://mithril.network/)-certified snapshots of the immutable database to drastically reduce initial sync time.
 
 ## How It Works
 
@@ -12,12 +12,12 @@ The import process:
 2. Downloads the snapshot archive (compressed with zstandard)
 3. Extracts the cardano-node chunk files
 4. Parses each block using the pallas CBOR decoder
-5. Bulk-imports blocks into Torsten's ImmutableDB (append-only chunk files)
+5. Bulk-imports blocks into Dugite's ImmutableDB (append-only chunk files)
 
 ## Usage
 
 ```bash
-torsten-node mithril-import \
+dugite-node mithril-import \
   --network-magic <magic> \
   --database-path <path>
 ```
@@ -35,7 +35,7 @@ torsten-node mithril-import \
 **Mainnet:**
 
 ```bash
-torsten-node mithril-import \
+dugite-node mithril-import \
   --network-magic 764824073 \
   --database-path ./db-mainnet
 ```
@@ -43,7 +43,7 @@ torsten-node mithril-import \
 **Preview testnet:**
 
 ```bash
-torsten-node mithril-import \
+dugite-node mithril-import \
   --network-magic 2 \
   --database-path ./db-preview
 ```
@@ -51,14 +51,14 @@ torsten-node mithril-import \
 **Preprod testnet:**
 
 ```bash
-torsten-node mithril-import \
+dugite-node mithril-import \
   --network-magic 1 \
   --database-path ./db-preprod
 ```
 
 ## Mithril Aggregator Endpoints
 
-Torsten automatically selects the correct aggregator for each network:
+Dugite automatically selects the correct aggregator for each network:
 
 | Network | Aggregator URL |
 |---------|---------------|
@@ -81,7 +81,7 @@ This means you can safely interrupt the import and restart it later.
 Once the import completes, start the node normally. It will detect the imported blocks and resume syncing from where the snapshot left off:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --config config.json \
   --topology topology.json \
   --database-path ./db-mainnet \

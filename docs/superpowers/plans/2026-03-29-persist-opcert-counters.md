@@ -13,12 +13,12 @@
 ### Task 1: Add `opcert_counters` field to `LedgerState`
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/mod.rs:84-314` (LedgerState struct)
-- Modify: `crates/torsten-ledger/src/state/mod.rs:675-730` (LedgerState::new)
+- Modify: `crates/dugite-ledger/src/state/mod.rs:84-314` (LedgerState struct)
+- Modify: `crates/dugite-ledger/src/state/mod.rs:675-730` (LedgerState::new)
 
 - [ ] **Step 1: Add the field to `LedgerState` struct**
 
-In `crates/torsten-ledger/src/state/mod.rs`, add a new field after `node_network` (the last field before the closing brace of `LedgerState`):
+In `crates/dugite-ledger/src/state/mod.rs`, add a new field after `node_network` (the last field before the closing brace of `LedgerState`):
 
 ```rust
     /// Operational certificate counters per pool (cold key hash → highest seen counter).
@@ -41,13 +41,13 @@ In the `LedgerState::new()` constructor, add `opcert_counters: HashMap::new(),` 
 
 - [ ] **Step 3: Verify it compiles**
 
-Run: `cargo build -p torsten-ledger`
+Run: `cargo build -p dugite-ledger`
 Expected: success (bincode derives Serialize/Deserialize; HashMap<Hash28, u64> already implements both)
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-ledger/src/state/mod.rs
+git add crates/dugite-ledger/src/state/mod.rs
 git commit -m "feat(ledger): add opcert_counters field to LedgerState (#310)"
 ```
 
@@ -56,12 +56,12 @@ git commit -m "feat(ledger): add opcert_counters field to LedgerState (#310)"
 ### Task 2: Bump `SNAPSHOT_VERSION` and update stability test
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/snapshot.rs:49` (SNAPSHOT_VERSION constant)
-- Modify: `crates/torsten-ledger/tests/snapshot_stability.rs:53` (EXPECTED_HASH constant)
+- Modify: `crates/dugite-ledger/src/state/snapshot.rs:49` (SNAPSHOT_VERSION constant)
+- Modify: `crates/dugite-ledger/tests/snapshot_stability.rs:53` (EXPECTED_HASH constant)
 
 - [ ] **Step 1: Bump SNAPSHOT_VERSION from 10 to 11**
 
-In `crates/torsten-ledger/src/state/snapshot.rs`, line 49, change:
+In `crates/dugite-ledger/src/state/snapshot.rs`, line 49, change:
 
 ```rust
     pub(crate) const SNAPSHOT_VERSION: u8 = 11;
@@ -69,22 +69,22 @@ In `crates/torsten-ledger/src/state/snapshot.rs`, line 49, change:
 
 - [ ] **Step 2: Compute the new expected hash**
 
-Run: `cargo nextest run -p torsten-ledger -E 'test(snapshot_format_hash_stability)'`
+Run: `cargo nextest run -p dugite-ledger -E 'test(snapshot_format_hash_stability)'`
 Expected: FAIL with message containing the new hash. Copy the hash from the output.
 
 - [ ] **Step 3: Update EXPECTED_HASH in snapshot_stability.rs**
 
-In `crates/torsten-ledger/tests/snapshot_stability.rs`, line 53, replace the old hash with the new one from step 2.
+In `crates/dugite-ledger/tests/snapshot_stability.rs`, line 53, replace the old hash with the new one from step 2.
 
 - [ ] **Step 4: Run both snapshot tests to confirm**
 
-Run: `cargo nextest run -p torsten-ledger -E 'test(snapshot_format_hash_stability) | test(snapshot_round_trip_deterministic)'`
+Run: `cargo nextest run -p dugite-ledger -E 'test(snapshot_format_hash_stability) | test(snapshot_round_trip_deterministic)'`
 Expected: both PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-ledger/src/state/snapshot.rs crates/torsten-ledger/tests/snapshot_stability.rs
+git add crates/dugite-ledger/src/state/snapshot.rs crates/dugite-ledger/tests/snapshot_stability.rs
 git commit -m "feat(ledger): bump SNAPSHOT_VERSION to 11 for opcert counters (#310)"
 ```
 
@@ -93,11 +93,11 @@ git commit -m "feat(ledger): bump SNAPSHOT_VERSION to 11 for opcert counters (#3
 ### Task 3: Add getter/setter on `OuroborosPraos` for counter access
 
 **Files:**
-- Modify: `crates/torsten-consensus/src/praos.rs` (add two methods near `prune_opcert_counters`)
+- Modify: `crates/dugite-consensus/src/praos.rs` (add two methods near `prune_opcert_counters`)
 
 - [ ] **Step 1: Add `opcert_counters()` getter and `set_opcert_counters()` setter**
 
-In `crates/torsten-consensus/src/praos.rs`, after the `prune_opcert_counters` method (around line 1106), add:
+In `crates/dugite-consensus/src/praos.rs`, after the `prune_opcert_counters` method (around line 1106), add:
 
 ```rust
     /// Return a reference to the opcert counters map.
@@ -119,13 +119,13 @@ In `crates/torsten-consensus/src/praos.rs`, after the `prune_opcert_counters` me
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cargo build -p torsten-consensus`
+Run: `cargo build -p dugite-consensus`
 Expected: success
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/torsten-consensus/src/praos.rs
+git add crates/dugite-consensus/src/praos.rs
 git commit -m "feat(consensus): add opcert_counters getter/setter for snapshot persistence (#310)"
 ```
 
@@ -134,11 +134,11 @@ git commit -m "feat(consensus): add opcert_counters getter/setter for snapshot p
 ### Task 4: Wire up snapshot save — copy counters from consensus to ledger
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/epoch.rs:115-143` (`save_ledger_snapshot` method)
+- Modify: `crates/dugite-node/src/node/epoch.rs:115-143` (`save_ledger_snapshot` method)
 
 - [ ] **Step 1: Copy opcert counters into ledger state before saving**
 
-In `crates/torsten-node/src/node/epoch.rs`, the `save_ledger_snapshot` method currently starts:
+In `crates/dugite-node/src/node/epoch.rs`, the `save_ledger_snapshot` method currently starts:
 
 ```rust
     pub async fn save_ledger_snapshot(&self) {
@@ -166,13 +166,13 @@ Add a counter copy between acquiring the write lock and the UTxO flush:
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cargo build -p torsten-node`
+Run: `cargo build -p dugite-node`
 Expected: success
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/epoch.rs
+git add crates/dugite-node/src/node/epoch.rs
 git commit -m "feat(node): copy opcert counters to ledger state before snapshot save (#310)"
 ```
 
@@ -181,13 +181,13 @@ git commit -m "feat(node): copy opcert counters to ledger state before snapshot 
 ### Task 5: Wire up snapshot load — seed consensus from ledger
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/mod.rs` (after consensus is created, seed from loaded ledger state)
+- Modify: `crates/dugite-node/src/node/mod.rs` (after consensus is created, seed from loaded ledger state)
 
 The consensus object is created at line 789, and the `Node` struct is assembled at line 1124. The loaded `ledger_state` is available. We need to seed counters between consensus creation and Node construction.
 
 - [ ] **Step 1: Seed consensus opcert counters from loaded ledger state**
 
-In `crates/torsten-node/src/node/mod.rs`, find the section after consensus is created (around line 800, after the `info!` log). Add the counter seeding:
+In `crates/dugite-node/src/node/mod.rs`, find the section after consensus is created (around line 800, after the `info!` log). Add the counter seeding:
 
 ```rust
         // Seed opcert counters from the loaded ledger snapshot (issue #310).
@@ -205,13 +205,13 @@ Find the right location — it must be after `let consensus = ...` and before co
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cargo build -p torsten-node`
+Run: `cargo build -p dugite-node`
 Expected: success
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/mod.rs
+git add crates/dugite-node/src/node/mod.rs
 git commit -m "feat(node): seed opcert counters from ledger snapshot on startup (#310)"
 ```
 
@@ -220,7 +220,7 @@ git commit -m "feat(node): seed opcert counters from ledger snapshot on startup 
 ### Task 6: Handle non-`save_ledger_snapshot` snapshot saves
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/sync.rs` (the `save_snapshot` calls that don't go through `save_ledger_snapshot`)
+- Modify: `crates/dugite-node/src/node/sync.rs` (the `save_snapshot` calls that don't go through `save_ledger_snapshot`)
 
 There are several places in `sync.rs` where `ls.save_snapshot()` is called directly (not through `save_ledger_snapshot`). These also need the counter copy. The calls are at lines ~300, ~2092, ~2160, ~2240, ~2311, ~2385.
 
@@ -244,13 +244,13 @@ For each call site that has access to `self.consensus`, add the copy line before
 
 - [ ] **Step 3: Verify it compiles**
 
-Run: `cargo build -p torsten-node`
+Run: `cargo build -p dugite-node`
 Expected: success
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/sync.rs
+git add crates/dugite-node/src/node/sync.rs
 git commit -m "feat(node): persist opcert counters in all snapshot save paths (#310)"
 ```
 
@@ -259,17 +259,17 @@ git commit -m "feat(node): persist opcert counters in all snapshot save paths (#
 ### Task 7: Write tests for opcert counter persistence
 
 **Files:**
-- Modify: `crates/torsten-ledger/src/state/tests.rs` (add new test)
-- Modify: `crates/torsten-consensus/src/praos.rs` (add new tests in existing test module)
+- Modify: `crates/dugite-ledger/src/state/tests.rs` (add new test)
+- Modify: `crates/dugite-consensus/src/praos.rs` (add new tests in existing test module)
 
 - [ ] **Step 1: Test opcert counters survive snapshot round-trip (ledger layer)**
 
-In `crates/torsten-ledger/src/state/tests.rs`, add:
+In `crates/dugite-ledger/src/state/tests.rs`, add:
 
 ```rust
 #[test]
 fn test_opcert_counters_persist_in_snapshot() {
-    use torsten_primitives::hash::Hash28;
+    use dugite_primitives::hash::Hash28;
 
     let dir = tempfile::tempdir().unwrap();
     let snapshot_path = dir.path().join("ledger-snapshot.bin");
@@ -307,7 +307,7 @@ fn test_opcert_counters_empty_by_default_in_snapshot() {
 
 - [ ] **Step 2: Test that restored counters reject replay (consensus layer)**
 
-In `crates/torsten-consensus/src/praos.rs`, add to the existing `#[cfg(test)]` module:
+In `crates/dugite-consensus/src/praos.rs`, add to the existing `#[cfg(test)]` module:
 
 ```rust
 #[test]
@@ -351,13 +351,13 @@ fn test_set_opcert_counters_replaces_all() {
 
 - [ ] **Step 3: Run all new tests**
 
-Run: `cargo nextest run -p torsten-ledger -E 'test(opcert_counters_persist) | test(opcert_counters_empty_by_default)' && cargo nextest run -p torsten-consensus -E 'test(opcert_counters_restored) | test(set_opcert_counters_replaces)'`
+Run: `cargo nextest run -p dugite-ledger -E 'test(opcert_counters_persist) | test(opcert_counters_empty_by_default)' && cargo nextest run -p dugite-consensus -E 'test(opcert_counters_restored) | test(set_opcert_counters_replaces)'`
 Expected: all PASS
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-ledger/src/state/tests.rs crates/torsten-consensus/src/praos.rs
+git add crates/dugite-ledger/src/state/tests.rs crates/dugite-consensus/src/praos.rs
 git commit -m "test: add opcert counter persistence tests (#310)"
 ```
 

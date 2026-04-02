@@ -21,7 +21,7 @@ Open a fresh UTxO store from the "ledger" LSM snapshot, which reflects the exact
 ```rust
 let utxo_store_path = self.database_path.join("utxo-store");
 let restored_utxo_store = if utxo_store_path.exists() {
-    match torsten_ledger::utxo_store::UtxoStore::open_from_snapshot(&utxo_store_path, "ledger") {
+    match dugite_ledger::utxo_store::UtxoStore::open_from_snapshot(&utxo_store_path, "ledger") {
         Ok(mut store) => {
             store.count_entries();
             store.set_indexing_enabled(true);

@@ -49,18 +49,18 @@ jobs:
       - name: Run storage benchmarks
         run: |
           # Run in default mode first (generates HTML reports with comparison)
-          cargo bench -p torsten-storage --bench storage_bench 2>&1 | tee storage_bench.txt || true
+          cargo bench -p dugite-storage --bench storage_bench 2>&1 | tee storage_bench.txt || true
           # Save baselines for next run
-          cargo bench -p torsten-storage --bench storage_bench -- --save-baseline nightly 2>/dev/null || true
+          cargo bench -p dugite-storage --bench storage_bench -- --save-baseline nightly 2>/dev/null || true
 
       - name: Run UTxO benchmarks
         run: |
-          cargo bench -p torsten-ledger --bench utxo_bench 2>&1 | tee utxo_bench.txt || true
-          cargo bench -p torsten-ledger --bench utxo_bench -- --save-baseline nightly 2>/dev/null || true
+          cargo bench -p dugite-ledger --bench utxo_bench 2>&1 | tee utxo_bench.txt || true
+          cargo bench -p dugite-ledger --bench utxo_bench -- --save-baseline nightly 2>/dev/null || true
 
       - name: Run LSM large-scale stress tests
         run: |
-          cargo test -p torsten-lsm --features large-tests --release -- mainnet_scale 2>&1 | tee lsm_stress.txt || true
+          cargo test -p dugite-lsm --features large-tests --release -- mainnet_scale 2>&1 | tee lsm_stress.txt || true
 
       - name: Generate benchmark report
         run: |
@@ -127,9 +127,9 @@ jobs:
             # Add a redirect page
             cat > docs/book/benchmarks/index.html <<BENCHHTML
           <!DOCTYPE html>
-          <html><head><title>Torsten Benchmarks</title></head>
+          <html><head><title>Dugite Benchmarks</title></head>
           <body>
-          <h1>Torsten Criterion Benchmark Reports</h1>
+          <h1>Dugite Criterion Benchmark Reports</h1>
           <p>Interactive benchmark reports from the nightly CI run.</p>
           <ul>
           BENCHHTML

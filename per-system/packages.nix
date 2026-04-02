@@ -7,7 +7,7 @@
     pkgs,
     ...
   }: let
-    # Use stable toolchain for Torsten
+    # Use stable toolchain for Dugite
     toolchain = with inputs'.fenix.packages;
       combine [
         stable.rustc
@@ -47,7 +47,7 @@
       ];
 
       meta = {
-        description = "Torsten - A Rust implementation of the Cardano node";
+        description = "Dugite - A Rust implementation of the Cardano node";
         license = lib.licenses.asl20;
       };
     };
@@ -56,55 +56,55 @@
     cargoArtifacts = craneLib.buildDepsOnly commonArgs;
   in {
     packages = {
-      default = config.packages.torsten-node;
+      default = config.packages.dugite-node;
 
-      # Torsten node
-      torsten-node = craneLib.buildPackage (commonArgs
+      # Dugite node
+      dugite-node = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          pname = "torsten-node";
+          pname = "dugite-node";
           inherit version;
-          cargoExtraArgs = "-p torsten-node";
+          cargoExtraArgs = "-p dugite-node";
           doCheck = true;
 
           meta = commonArgs.meta // {
-            mainProgram = "torsten-node";
+            mainProgram = "dugite-node";
           };
         });
 
-      # Torsten CLI
-      torsten-cli = craneLib.buildPackage (commonArgs
+      # Dugite CLI
+      dugite-cli = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          pname = "torsten-cli";
+          pname = "dugite-cli";
           inherit version;
-          cargoExtraArgs = "-p torsten-cli";
+          cargoExtraArgs = "-p dugite-cli";
           doCheck = true;
 
           meta = commonArgs.meta // {
-            mainProgram = "torsten-cli";
+            mainProgram = "dugite-cli";
           };
         });
 
-      # Torsten TUI
-      torsten-tui = craneLib.buildPackage (commonArgs
+      # Dugite TUI
+      dugite-tui = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          pname = "torsten-tui";
+          pname = "dugite-tui";
           inherit version;
-          cargoExtraArgs = "-p torsten-tui";
+          cargoExtraArgs = "-p dugite-tui";
           doCheck = true;
 
           meta = commonArgs.meta // {
-            mainProgram = "torsten-tui";
+            mainProgram = "dugite-tui";
           };
         });
 
       # All binaries in one package
-      torsten-all = craneLib.buildPackage (commonArgs
+      dugite-all = craneLib.buildPackage (commonArgs
         // {
           inherit cargoArtifacts;
-          pname = "torsten";
+          pname = "dugite";
           inherit version;
           doCheck = true;
         });

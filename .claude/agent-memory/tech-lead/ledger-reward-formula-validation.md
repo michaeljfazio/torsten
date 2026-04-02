@@ -1,6 +1,6 @@
 ---
 name: reward-formula-validation
-description: Cross-validation of Torsten reward calculation against Koios on-chain data (preview epoch 1235), confirming formula correctness and documenting RUPD timing difference.
+description: Cross-validation of Dugite reward calculation against Koios on-chain data (preview epoch 1235), confirming formula correctness and documenting RUPD timing difference.
 type: project
 ---
 
@@ -50,7 +50,7 @@ f2 = sigma + p * a0 * f3
 f1 = R / (1 + a0)
 maxPool = floor(f1 * f2)
 ```
-Torsten's BigInt `Rat` produces identical results to Python `fractions.Fraction`.
+Dugite's BigInt `Rat` produces identical results to Python `fractions.Fraction`.
 
 **4. Apparent performance (eta for individual pool):**
 ```
@@ -99,10 +99,10 @@ to treasury as undistributed. This is correct behavior.
 2. The RUPD is pulsed during epoch E+1.
 3. At boundary E+1→E+2: rewards are applied (stakers paid, reserves decremented).
 
-**Torsten** applies rewards immediately at E→E+1 using same formula inputs.
+**Dugite** applies rewards immediately at E→E+1 using same formula inputs.
 - Inputs are correct: current `epoch_block_count` (same as Haskell's `nesBprev`), current `reserves`.
 - But rewards appear **1 epoch earlier** than in Haskell.
-- This explains why on-chain reserves decrease by a different amount than Torsten would compute for epoch 1235: the on-chain RUPD that fires at 1235 was started at 1234 using epoch 1233 blocks (~587 on preview) while Torsten uses epoch 1234 blocks (2655) for epoch 1235 rewards.
+- This explains why on-chain reserves decrease by a different amount than Dugite would compute for epoch 1235: the on-chain RUPD that fires at 1235 was started at 1234 using epoch 1233 blocks (~587 on preview) while Dugite uses epoch 1234 blocks (2655) for epoch 1235 rewards.
 
 **Consequence:** On mainnet or long-running testnets, the cumulative treasury and staking balances will diverge from Haskell by 1 epoch of rewards. This is a known simplification.
 
@@ -118,4 +118,4 @@ Residual ~10% error is due to snapshot timing: go snapshot pool stakes differ fr
 the Koios `active_stake` (which is the mark snapshot, 2 epochs newer).
 
 ### No Bugs Found
-All formula components are correct. The implementation in `/crates/torsten-ledger/src/state/rewards.rs` matches the Haskell specification in `cardano-ledger/eras/shelley/impl/src/Cardano/Ledger/Shelley/LedgerState/PulsingReward.hs`.
+All formula components are correct. The implementation in `/crates/dugite-ledger/src/state/rewards.rs` matches the Haskell specification in `cardano-ledger/eras/shelley/impl/src/Cardano/Ledger/Shelley/LedgerState/PulsingReward.hs`.

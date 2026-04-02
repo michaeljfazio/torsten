@@ -1,11 +1,11 @@
-# Contributing to Torsten
+# Contributing to Dugite
 
-Thank you for your interest in contributing to Torsten! This document provides guidelines for contributing.
+Thank you for your interest in contributing to Dugite! This document provides guidelines for contributing.
 
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone git@github.com:YOUR_USERNAME/torsten.git`
+2. Clone your fork: `git clone git@github.com:YOUR_USERNAME/dugite.git`
 3. Create a branch: `git checkout -b feature/your-feature`
 4. Make your changes
 5. Run the checks: `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo nextest run --workspace`
@@ -31,7 +31,7 @@ Thank you for your interest in contributing to Torsten! This document provides g
 
 ## Architecture
 
-Torsten is a 14-crate Cargo workspace. See [Architecture Overview](https://michaeljfazio.github.io/torsten/architecture/overview.html) for details.
+Dugite is a 14-crate Cargo workspace. See [Architecture Overview](https://michaeljfazio.github.io/dugite/architecture/overview.html) for details.
 
 Key constraints:
 - **Dependency DAG**: No circular dependencies between crates
@@ -49,10 +49,10 @@ Key constraints:
 
 ## Reporting Bugs
 
-Use [GitHub Issues](https://github.com/michaeljfazio/torsten/issues) for bug reports. Include:
+Use [GitHub Issues](https://github.com/michaeljfazio/dugite/issues) for bug reports. Include:
 - Steps to reproduce
 - Expected vs actual behavior
-- Torsten version / commit hash
+- Dugite version / commit hash
 - Network (mainnet/preview/preprod)
 - Relevant log output
 
@@ -62,7 +62,7 @@ Use [GitHub Issues](https://github.com/michaeljfazio/torsten/issues) for bug rep
 
 ## Discussions
 
-For questions, ideas, and general discussion, use [GitHub Discussions](https://github.com/michaeljfazio/torsten/discussions).
+For questions, ideas, and general discussion, use [GitHub Discussions](https://github.com/michaeljfazio/dugite/discussions).
 
 ## License
 

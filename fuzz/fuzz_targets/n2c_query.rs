@@ -9,7 +9,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use torsten_network::QueryHandler;
+use dugite_network::QueryHandler;
 
 fuzz_target!(|data: &[u8]| {
     // Create a minimal QueryHandler with default (empty) state.

@@ -1,13 +1,13 @@
 //! Integration tests that run all conformance test vectors.
 //!
 //! These tests load JSON test vectors from the `vectors/` directory and
-//! validate them against Torsten's ledger implementation.
+//! validate them against Dugite's ledger implementation.
 //!
-//! Run with: `cargo test -p torsten-conformance`
+//! Run with: `cargo test -p dugite-conformance`
 
+use dugite_conformance::runner;
+use dugite_conformance::schema::ConformanceTestResult;
 use std::path::PathBuf;
-use torsten_conformance::runner;
-use torsten_conformance::schema::ConformanceTestResult;
 
 fn vectors_dir() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

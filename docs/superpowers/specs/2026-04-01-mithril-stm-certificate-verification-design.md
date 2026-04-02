@@ -6,7 +6,7 @@
 
 ## Problem
 
-The Mithril snapshot import (`crates/torsten-node/src/mithril.rs`) trusts the aggregator API's digest without cryptographic verification of the STM multi-signature certificate chain. An attacker controlling the aggregator URL (or performing MITM) can serve a malicious snapshot that passes the current SHA256 digest check because the digest itself comes from the untrusted aggregator.
+The Mithril snapshot import (`crates/dugite-node/src/mithril.rs`) trusts the aggregator API's digest without cryptographic verification of the STM multi-signature certificate chain. An attacker controlling the aggregator URL (or performing MITM) can serve a malicious snapshot that passes the current SHA256 digest check because the digest itself comes from the untrusted aggregator.
 
 ## Approach
 
@@ -22,7 +22,7 @@ This avoids reimplementing security-critical STM cryptography and stays in sync 
 
 ### Dependency Configuration
 
-Add `mithril-client` to `torsten-node` with pure-Rust backends to match the workspace's existing `rustls-tls` / no-system-deps approach:
+Add `mithril-client` to `dugite-node` with pure-Rust backends to match the workspace's existing `rustls-tls` / no-system-deps approach:
 
 ```toml
 mithril-client = { version = "0.13", default-features = false, features = [
@@ -179,9 +179,9 @@ Remove the 20-line `SECURITY NOTE` comment block (lines 211-239) and the `warn!(
 | File | Change |
 |------|--------|
 | `Cargo.toml` (workspace) | Add `mithril-client` to `[workspace.dependencies]` |
-| `crates/torsten-node/Cargo.toml` | Add `mithril-client` dependency |
-| `crates/torsten-node/src/mithril.rs` | Add certificate verification logic, update API types, add genesis keys |
-| `crates/torsten-node/src/main.rs` | Add CLI args, pass to `import_snapshot()` |
+| `crates/dugite-node/Cargo.toml` | Add `mithril-client` dependency |
+| `crates/dugite-node/src/mithril.rs` | Add certificate verification logic, update API types, add genesis keys |
+| `crates/dugite-node/src/main.rs` | Add CLI args, pass to `import_snapshot()` |
 
 ## Risks & Mitigations
 

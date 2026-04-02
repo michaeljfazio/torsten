@@ -1,13 +1,13 @@
 # P2P Governor
 
-This document describes Torsten's peer management architecture, implementing the
+This document describes Dugite's peer management architecture, implementing the
 Ouroboros P2P peer selection governor.
 
 ---
 
 ## Architecture
 
-Two modules implement peer management in `torsten-network`:
+Two modules implement peer management in `dugite-network`:
 
 ### PeerManager (`peer_manager.rs`)
 
@@ -31,7 +31,7 @@ together with three `HashSet`s for the cold/warm/hot buckets.
 
 ### Governor (`governor.rs`)
 
-The policy layer. Runs on a 30-second `tokio::interval` in `torsten-node`.
+The policy layer. Runs on a 30-second `tokio::interval` in `dugite-node`.
 
 | Feature | Description |
 |---|---|
@@ -136,7 +136,7 @@ application, keeping the write-lock window minimal.
 
 | File | Purpose |
 |---|---|
-| `crates/torsten-network/src/governor.rs` | Policy decisions and target enforcement |
-| `crates/torsten-network/src/peer_manager.rs` | Peer state tracking and reputation |
-| `crates/torsten-node/src/node/mod.rs` | Governor task wiring |
-| `crates/torsten-node/src/config.rs` | Topology parsing |
+| `crates/dugite-network/src/governor.rs` | Policy decisions and target enforcement |
+| `crates/dugite-network/src/peer_manager.rs` | Peer state tracking and reputation |
+| `crates/dugite-node/src/node/mod.rs` | Governor task wiring |
+| `crates/dugite-node/src/config.rs` | Topology parsing |

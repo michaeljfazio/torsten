@@ -1,11 +1,11 @@
 # CLI Overview
 
-Torsten provides `torsten-cli`, a cardano-cli compatible command-line interface for interacting with a running Torsten node and managing keys, transactions, and governance.
+Dugite provides `dugite-cli`, a cardano-cli compatible command-line interface for interacting with a running Dugite node and managing keys, transactions, and governance.
 
 ## Binary
 
 ```bash
-torsten-cli [COMMAND] [OPTIONS]
+dugite-cli [COMMAND] [OPTIONS]
 ```
 
 ## Command Groups
@@ -28,7 +28,7 @@ torsten-cli [COMMAND] [OPTIONS]
 Most commands that interact with a running node require `--socket-path` to specify the Unix domain socket:
 
 ```bash
-torsten-cli query tip --socket-path ./node.sock
+dugite-cli query tip --socket-path ./node.sock
 ```
 
 The default socket path is `node.sock` in the current directory.
@@ -38,7 +38,7 @@ The default socket path is `node.sock` in the current directory.
 When querying a node on a testnet, pass the `--testnet-magic` flag:
 
 ```bash
-torsten-cli query tip --socket-path ./node.sock --testnet-magic 2
+dugite-cli query tip --socket-path ./node.sock --testnet-magic 2
 ```
 
 For mainnet, `--testnet-magic` is not needed (defaults to mainnet magic 764824073).
@@ -62,8 +62,8 @@ This format is interchangeable with files produced by `cardano-cli`.
 Commands that produce artifacts use `--out-file`:
 
 ```bash
-torsten-cli transaction build ... --out-file tx.body
-torsten-cli transaction sign ... --out-file tx.signed
+dugite-cli transaction build ... --out-file tx.body
+dugite-cli transaction sign ... --out-file tx.signed
 ```
 
 ## Help
@@ -71,7 +71,7 @@ torsten-cli transaction sign ... --out-file tx.signed
 Every command supports `--help`:
 
 ```bash
-torsten-cli --help
-torsten-cli transaction --help
-torsten-cli transaction build --help
+dugite-cli --help
+dugite-cli transaction --help
+dugite-cli transaction build --help
 ```

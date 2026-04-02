@@ -70,7 +70,7 @@ ssStakeGo = old ssStakeSet
 - No pools → _R all goes to deltaR2, rs=empty
 - Epoch 0 fees (87,558) NOT included in first RUPD (ssFee=0)
 
-## Torsten Divergence
+## Dugite Divergence
 
 - Uses `snapshots.set` instead of Haskell's `ssStakeGo` — 1 epoch ahead
 - Block count from snapshot instead of `nesBprev`

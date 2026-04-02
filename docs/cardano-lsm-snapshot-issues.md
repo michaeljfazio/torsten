@@ -1,6 +1,6 @@
 # cardano-lsm: Snapshot Lifecycle Issues
 
-> **RESOLVED (March 2026):** These issues are no longer relevant. Torsten's storage architecture was redesigned to match cardano-node: block storage now uses append-only chunk files (ImmutableDB) and an in-memory HashMap (VolatileDB), eliminating the cardano-lsm snapshot-from-snapshot lifecycle entirely. cardano-lsm is now used only for the on-disk UTxO set (UTxO-HD), where the snapshot lifecycle is simpler and does not exhibit these problems. This document is retained for historical reference.
+> **RESOLVED (March 2026):** These issues are no longer relevant. Dugite's storage architecture was redesigned to match cardano-node: block storage now uses append-only chunk files (ImmutableDB) and an in-memory HashMap (VolatileDB), eliminating the cardano-lsm snapshot-from-snapshot lifecycle entirely. cardano-lsm is now used only for the on-disk UTxO set (UTxO-HD), where the snapshot lifecycle is simpler and does not exhibit these problems. This document is retained for historical reference.
 
 ## Important Caveat
 
@@ -10,7 +10,7 @@ The suggested fixes in this document are our best guesses at what might resolve 
 
 ## Context
 
-We're using `cardano-lsm` as the storage backend for [Torsten](https://github.com/michaeljfazio/torsten), a Rust implementation of the Cardano node. Our LSM tree stores all blockchain data — blocks, slot/hash indexes, and tip metadata — in a single `LsmTree`. The tree accumulates millions of entries over hours of sync (the Cardano preview testnet alone has ~4M blocks).
+We're using `cardano-lsm` as the storage backend for [Dugite](https://github.com/michaeljfazio/dugite), a Rust implementation of the Cardano node. Our LSM tree stores all blockchain data — blocks, slot/hash indexes, and tip metadata — in a single `LsmTree`. The tree accumulates millions of entries over hours of sync (the Cardano preview testnet alone has ~4M blocks).
 
 ### How cardano-node Handles Persistence (For Reference)
 
@@ -24,7 +24,7 @@ On restart, cardano-node loads the most recent valid ledger snapshot and replays
 
 The Haskell `lsm-tree` library is being developed as a future on-disk backend for the **UTxO set** (via UTxO-HD), not for block storage. Block storage remains in the ImmutableDB. The `lsm-tree` documentation explicitly states that tables are ephemeral and `saveSnapshot` / `openTableFromSnapshot` is the intended persistence mechanism.
 
-### How Torsten Uses cardano-lsm
+### How Dugite Uses cardano-lsm
 
 Our architecture differs from cardano-node: we use a single `LsmTree` for **block storage** (fulfilling the ImmutableDB + VolatileDB role), with separate bincode serialization for ledger state. This means our LSM tree contains millions of block entries that take hours to sync, and losing the tree means re-syncing from genesis.
 

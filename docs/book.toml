@@ -1,5 +1,5 @@
 [book]
-title = "Torsten Documentation"
+title = "Dugite Documentation"
 authors = ["Sandstone Pool"]
 language = "en"
 multilingual = false
@@ -9,9 +9,9 @@ src = "src"
 build-dir = "book"
 
 [output.html]
-site-url = "/torsten/"
-git-repository-url = "https://github.com/michaeljfazio/torsten"
-edit-url-template = "https://github.com/michaeljfazio/torsten/edit/main/docs/{path}"
+site-url = "/dugite/"
+git-repository-url = "https://github.com/michaeljfazio/dugite"
+edit-url-template = "https://github.com/michaeljfazio/dugite/edit/main/docs/{path}"
 no-section-label = false
 
 [output.html.search]

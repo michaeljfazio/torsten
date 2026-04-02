@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Wire up peer handshake RTT and block fetch latency measurements so the torsten-monitor dashboard displays real-time peer performance data.
+**Goal:** Wire up peer handshake RTT and block fetch latency measurements so the dugite-monitor dashboard displays real-time peer performance data.
 
 **Architecture:** The metrics infrastructure (histogram fields, recording methods, Prometheus output, monitor parsing) is already fully implemented but never called. We need to: (1) thread `Arc<NodeMetrics>` into `ConnectionLifecycleManager`, (2) add `Instant::now()` timing around handshakes and block fetches, (3) call the existing `record_handshake_rtt()` and `record_block_fetch_latency()` methods. No new metrics types or monitor changes needed.
 
@@ -13,12 +13,12 @@
 ### Task 1: Thread metrics into ConnectionLifecycleManager
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/connection_lifecycle.rs:121-240`
-- Modify: `crates/torsten-node/src/node/mod.rs:1767-1781`
+- Modify: `crates/dugite-node/src/node/connection_lifecycle.rs:121-240`
+- Modify: `crates/dugite-node/src/node/mod.rs:1767-1781`
 
 - [ ] **Step 1: Add metrics field to ConnectionLifecycleManager struct**
 
-In `crates/torsten-node/src/node/connection_lifecycle.rs`, add the `metrics` field to the struct (around line 140, after `byron_epoch_length`):
+In `crates/dugite-node/src/node/connection_lifecycle.rs`, add the `metrics` field to the struct (around line 140, after `byron_epoch_length`):
 
 ```rust
 /// Prometheus metrics for recording peer latencies.
@@ -56,7 +56,7 @@ pub fn new(
 
 - [ ] **Step 3: Pass metrics at the instantiation site in mod.rs**
 
-In `crates/torsten-node/src/node/mod.rs`, at the `ConnectionLifecycleManager::new()` call (around line 1767-1780), add `self.metrics.clone()` as the last argument:
+In `crates/dugite-node/src/node/mod.rs`, at the `ConnectionLifecycleManager::new()` call (around line 1767-1780), add `self.metrics.clone()` as the last argument:
 
 ```rust
 let mut lifecycle = ConnectionLifecycleManager::new(
@@ -81,7 +81,7 @@ Expected: `Finished` with no errors. There may be an `unused field` warning for 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/connection_lifecycle.rs crates/torsten-node/src/node/mod.rs
+git add crates/dugite-node/src/node/connection_lifecycle.rs crates/dugite-node/src/node/mod.rs
 git commit -m "feat(metrics): thread NodeMetrics into ConnectionLifecycleManager"
 ```
 
@@ -90,12 +90,12 @@ git commit -m "feat(metrics): thread NodeMetrics into ConnectionLifecycleManager
 ### Task 2: Instrument handshake RTT
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/connection_lifecycle.rs:254-284` (promote_to_warm)
-- Modify: `crates/torsten-node/src/metrics.rs:536-539` (remove dead_code allow)
+- Modify: `crates/dugite-node/src/node/connection_lifecycle.rs:254-284` (promote_to_warm)
+- Modify: `crates/dugite-node/src/metrics.rs:536-539` (remove dead_code allow)
 
 - [ ] **Step 1: Write a test that verifies histogram observation**
 
-In `crates/torsten-node/src/metrics.rs`, find the existing test section (around line 1488) and add:
+In `crates/dugite-node/src/metrics.rs`, find the existing test section (around line 1488) and add:
 
 ```rust
 #[test]
@@ -104,7 +104,7 @@ fn test_handshake_rtt_records_to_histogram() {
     metrics.record_handshake_rtt(42.0);
     metrics.record_handshake_rtt(150.0);
     let output = metrics.to_prometheus();
-    assert!(output.contains("torsten_peer_handshake_rtt_ms_count 2"));
+    assert!(output.contains("dugite_peer_handshake_rtt_ms_count 2"));
     // 42ms lands in le=50 bucket, 150ms lands in le=250 bucket
     assert!(output.contains("peer_handshake_rtt_ms_bucket{le=\"50\"} 1"));
     assert!(output.contains("peer_handshake_rtt_ms_bucket{le=\"250\"} 2"));
@@ -113,12 +113,12 @@ fn test_handshake_rtt_records_to_histogram() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo nextest run -p torsten-node -E 'test(test_handshake_rtt_records_to_histogram)'`
+Run: `cargo nextest run -p dugite-node -E 'test(test_handshake_rtt_records_to_histogram)'`
 Expected: PASS (the `record_handshake_rtt` method already works)
 
 - [ ] **Step 3: Add timing around handshake in promote_to_warm()**
 
-In `crates/torsten-node/src/node/connection_lifecycle.rs`, in the `promote_to_warm()` method (around lines 263-272), wrap the `PeerConnection::connect()` call with timing and record the RTT:
+In `crates/dugite-node/src/node/connection_lifecycle.rs`, in the `promote_to_warm()` method (around lines 263-272), wrap the `PeerConnection::connect()` call with timing and record the RTT:
 
 ```rust
 info!(%addr, "promoting cold -> warm: connecting");
@@ -153,7 +153,7 @@ self.metrics.record_handshake_rtt(rtt_ms);
 
 - [ ] **Step 4: Remove `#[allow(dead_code)]` from record_handshake_rtt**
 
-In `crates/torsten-node/src/metrics.rs`:
+In `crates/dugite-node/src/metrics.rs`:
 - Remove the `#[allow(dead_code)]` annotation from `record_handshake_rtt` (around line 536)
 - Remove the `#[allow(dead_code)]` annotation from `Histogram::observe()` (around line 225), since it's no longer dead code
 
@@ -165,7 +165,7 @@ Expected: Clean build, no warnings about dead_code for `record_handshake_rtt`.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/connection_lifecycle.rs crates/torsten-node/src/metrics.rs
+git add crates/dugite-node/src/node/connection_lifecycle.rs crates/dugite-node/src/metrics.rs
 git commit -m "feat(metrics): instrument peer handshake RTT measurement"
 ```
 
@@ -174,12 +174,12 @@ git commit -m "feat(metrics): instrument peer handshake RTT measurement"
 ### Task 3: Instrument block fetch latency
 
 **Files:**
-- Modify: `crates/torsten-node/src/node/connection_lifecycle.rs:638-800` (make_blockfetch_task)
-- Modify: `crates/torsten-node/src/metrics.rs:541-544` (remove dead_code allow)
+- Modify: `crates/dugite-node/src/node/connection_lifecycle.rs:638-800` (make_blockfetch_task)
+- Modify: `crates/dugite-node/src/metrics.rs:541-544` (remove dead_code allow)
 
 - [ ] **Step 1: Write a test for block fetch latency recording**
 
-In `crates/torsten-node/src/metrics.rs`, add alongside the existing tests:
+In `crates/dugite-node/src/metrics.rs`, add alongside the existing tests:
 
 ```rust
 #[test]
@@ -188,7 +188,7 @@ fn test_block_fetch_latency_records_to_histogram() {
     metrics.record_block_fetch_latency(25.0);
     metrics.record_block_fetch_latency(300.0);
     let output = metrics.to_prometheus();
-    assert!(output.contains("torsten_peer_block_fetch_ms_count 2"));
+    assert!(output.contains("dugite_peer_block_fetch_ms_count 2"));
     // 25ms lands in le=25 bucket, 300ms lands in le=500 bucket
     assert!(output.contains("peer_block_fetch_ms_bucket{le=\"25\"} 1"));
     assert!(output.contains("peer_block_fetch_ms_bucket{le=\"500\"} 2"));
@@ -197,12 +197,12 @@ fn test_block_fetch_latency_records_to_histogram() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo nextest run -p torsten-node -E 'test(test_block_fetch_latency_records_to_histogram)'`
+Run: `cargo nextest run -p dugite-node -E 'test(test_block_fetch_latency_records_to_histogram)'`
 Expected: PASS
 
 - [ ] **Step 3: Add timing around block fetch in make_blockfetch_task()**
 
-In `crates/torsten-node/src/node/connection_lifecycle.rs`, inside the `make_blockfetch_task()` closure, the block fetch loop (around lines 742-780) fetches blocks one at a time. Add timing around the `fetch_range()` call:
+In `crates/dugite-node/src/node/connection_lifecycle.rs`, inside the `make_blockfetch_task()` closure, the block fetch loop (around lines 742-780) fetches blocks one at a time. Add timing around the `fetch_range()` call:
 
 ```rust
 // Before the block fetch call (around line 751):
@@ -225,7 +225,7 @@ Then move it into the async block / closure that the task spawns.
 
 - [ ] **Step 4: Remove `#[allow(dead_code)]` from record_block_fetch_latency**
 
-In `crates/torsten-node/src/metrics.rs`, remove the `#[allow(dead_code)]` annotation from `record_block_fetch_latency` (around line 542).
+In `crates/dugite-node/src/metrics.rs`, remove the `#[allow(dead_code)]` annotation from `record_block_fetch_latency` (around line 542).
 
 - [ ] **Step 5: Build and verify**
 
@@ -235,7 +235,7 @@ Expected: Clean build
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/torsten-node/src/node/connection_lifecycle.rs crates/torsten-node/src/metrics.rs
+git add crates/dugite-node/src/node/connection_lifecycle.rs crates/dugite-node/src/metrics.rs
 git commit -m "feat(metrics): instrument block fetch latency measurement"
 ```
 
@@ -258,23 +258,23 @@ Expected: Clean
 - [ ] **Step 3: Start the node and verify metrics populate**
 
 ```bash
-pkill -f torsten-node; sleep 3
+pkill -f dugite-node; sleep 3
 rm -f db-preview/utxo-store/lock node.sock
-./scripts/run-bp-preview.sh --log torsten-bp.log &
+./scripts/run-bp-preview.sh --log dugite-bp.log &
 sleep 45
 curl -s http://localhost:12798/metrics | grep -E 'handshake_rtt|block_fetch_ms'
 ```
 
 Expected: Histogram buckets should show non-zero counts after the node connects to peers:
 ```
-torsten_peer_handshake_rtt_ms_bucket{le="250"} 3
-torsten_peer_handshake_rtt_ms_bucket{le="500"} 7
-torsten_peer_handshake_rtt_ms_count 8
+dugite_peer_handshake_rtt_ms_bucket{le="250"} 3
+dugite_peer_handshake_rtt_ms_bucket{le="500"} 7
+dugite_peer_handshake_rtt_ms_count 8
 ```
 
-- [ ] **Step 4: Verify torsten-monitor shows RTT data**
+- [ ] **Step 4: Verify dugite-monitor shows RTT data**
 
-Run: `./target/release/torsten-monitor --socket-path ./node.sock`
+Run: `./target/release/dugite-monitor --socket-path ./node.sock`
 
 The peer panel should now display RTT bands and percentiles (p50, p95) instead of showing zeros or "N/A".
 

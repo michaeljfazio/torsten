@@ -7,7 +7,7 @@
 
 ## Overview
 
-Wire the existing but dormant Genesis State Machine (GSM), Genesis Density Disconnector (GDD), and Limit on Eagerness (LoE) code into the live sync pipeline using an event-based actor architecture. This gives Torsten eclipse resistance during initial sync, matching the Haskell cardano-node's Ouroboros Genesis implementation.
+Wire the existing but dormant Genesis State Machine (GSM), Genesis Density Disconnector (GDD), and Limit on Eagerness (LoE) code into the live sync pipeline using an event-based actor architecture. This gives Dugite eclipse resistance during initial sync, matching the Haskell cardano-node's Ouroboros Genesis implementation.
 
 ## Architecture: Event-Based GSM Actor
 
@@ -349,7 +349,7 @@ if guard1 && guard2 && guard3 && guard4 {
 
 ### DensityWindow Additions
 
-The existing `DensityWindow` in `torsten-consensus` needs these additional methods:
+The existing `DensityWindow` in `dugite-consensus` needs these additional methods:
 
 - `blocks_before(slot) -> u64`: count of blocks with slot < `slot`
 - `has_block_at_or_after(slot) -> bool`: any block with slot >= `slot`
@@ -542,11 +542,11 @@ pub struct GsmConfig {
 
 | File | Changes |
 |------|---------|
-| `crates/torsten-node/src/gsm.rs` | Rewrite `gdd_evaluate()` with 4-guard integer algorithm. Add `GsmEvent`, `GsmSnapshot`, `GddAction`, `PeerIdling`/`PeerActive` events. Add `run_gsm_actor()`. Add `idling` and `latest_slot` to `PeerChainInfo`. Add `caught_up_since`, `anti_thundering_herd_jitter_secs`. Update `GsmConfig` with new fields. Remove `#[allow(dead_code)]`. |
-| `crates/torsten-consensus/src/chain_selection.rs` | Add `blocks_before()`, `has_block_at_or_after()`, `head_slot()`, `total_block_count()` to `DensityWindow`. |
-| `crates/torsten-node/src/node/mod.rs` | Replace `gsm: Arc<RwLock<>>` with channel handles. Spawn GSM actor task + GDD action consumer task. Update background tick to emit `SyncStatus` event. |
-| `crates/torsten-node/src/node/sync.rs` | Replace `gsm.read().await.loe_limit()` with `gsm_snapshot_rx.borrow().loe_slot`. Emit `PeerRegistered`, `BlockReceived`, `PeerTipUpdated`, `PeerIdling`, `PeerActive` events at appropriate call sites. |
-| `crates/torsten-node/src/node/networking.rs` | Emit `PeerDisconnected` events. Add GDD action consumer task for peer disconnection. |
+| `crates/dugite-node/src/gsm.rs` | Rewrite `gdd_evaluate()` with 4-guard integer algorithm. Add `GsmEvent`, `GsmSnapshot`, `GddAction`, `PeerIdling`/`PeerActive` events. Add `run_gsm_actor()`. Add `idling` and `latest_slot` to `PeerChainInfo`. Add `caught_up_since`, `anti_thundering_herd_jitter_secs`. Update `GsmConfig` with new fields. Remove `#[allow(dead_code)]`. |
+| `crates/dugite-consensus/src/chain_selection.rs` | Add `blocks_before()`, `has_block_at_or_after()`, `head_slot()`, `total_block_count()` to `DensityWindow`. |
+| `crates/dugite-node/src/node/mod.rs` | Replace `gsm: Arc<RwLock<>>` with channel handles. Spawn GSM actor task + GDD action consumer task. Update background tick to emit `SyncStatus` event. |
+| `crates/dugite-node/src/node/sync.rs` | Replace `gsm.read().await.loe_limit()` with `gsm_snapshot_rx.borrow().loe_slot`. Emit `PeerRegistered`, `BlockReceived`, `PeerTipUpdated`, `PeerIdling`, `PeerActive` events at appropriate call sites. |
+| `crates/dugite-node/src/node/networking.rs` | Emit `PeerDisconnected` events. Add GDD action consumer task for peer disconnection. |
 
 ## Tests
 
@@ -584,7 +584,7 @@ pub struct GsmConfig {
 
 These are documented deviations that are safe (conservative) and can be refined later:
 
-| Aspect | Haskell | Torsten | Safety |
+| Aspect | Haskell | Dugite | Safety |
 |--------|---------|---------|--------|
 | LoE computation | Common prefix of all candidate fragments (chain fragment) | Minimum intersection slot (u64) | Conservative — may hold LoE back further than necessary |
 | CaughtUp condition | No candidate chain better than selection | All peers idle + tip fresh + peers within genesis window | Conservative — equivalent when GDD has run |

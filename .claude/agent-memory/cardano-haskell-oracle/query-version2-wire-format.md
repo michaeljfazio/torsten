@@ -82,7 +82,7 @@ Full MsgQuery adds `[3, <full_query>]` protocol message tag.
 - GetChainPoint (known): `82 04 82 <slot> 58 20 <hash>` = `[4, [slot, hash]]`
 - GetChainPoint (genesis): `82 04 80` = `[4, []]`
 
-### Torsten bug history:
+### Dugite bug history:
 - BUG: sent `[4, [6, result]]` (NS era wrapping) — wrong, should be `[4, [result]]` (EitherMismatch Right)
 - BUG: sent `[4, block_no]` for GetChainBlockNo — wrong, should be `[4, [block_no]]` (WithOrigin wrapping)
 - BUG: ChainTip used `[[slot,hash], block_no]` for GetChainPoint — wrong, should be `[slot, hash]` (Point, not Tip)

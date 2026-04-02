@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Start a local Prometheus + Grafana monitoring stack for Torsten development.
+# Start a local Prometheus + Grafana monitoring stack for Dugite development.
 #
 # Usage:
 #   ./scripts/start-monitoring.sh          # Start monitoring
@@ -12,7 +12,7 @@
 # Grafana:    http://localhost:3000  (admin/admin)
 # Prometheus: http://localhost:9090
 #
-# The Torsten node must be running with metrics on port 12798 (default).
+# The Dugite node must be running with metrics on port 12798 (default).
 
 set -euo pipefail
 
@@ -23,10 +23,10 @@ DATA_DIR="$PROJECT_DIR/.monitoring-data"
 
 PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
-TORSTEN_METRICS_PORT="${TORSTEN_METRICS_PORT:-12798}"
+DUGITE_METRICS_PORT="${DUGITE_METRICS_PORT:-12798}"
 
-PROMETHEUS_CONTAINER="torsten-prometheus"
-GRAFANA_CONTAINER="torsten-grafana"
+PROMETHEUS_CONTAINER="dugite-prometheus"
+GRAFANA_CONTAINER="dugite-grafana"
 
 stop_monitoring() {
     echo "Stopping monitoring containers..."
@@ -69,7 +69,7 @@ start_monitoring() {
         -v "$DATA_DIR/grafana:/var/lib/grafana" \
         -e GF_SECURITY_ADMIN_USER=admin \
         -e GF_SECURITY_ADMIN_PASSWORD=admin \
-        -e GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/torsten.json \
+        -e GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/dugite.json \
         grafana/grafana:latest
 
     # Wait for Grafana to be ready
@@ -100,7 +100,7 @@ start_monitoring() {
 
     if [ -n "$DS_UID" ]; then
         # Import dashboard with the correct datasource UID substituted
-        echo "Importing Torsten dashboard..."
+        echo "Importing Dugite dashboard..."
         python3 -c "
 import json, sys
 with open('$CONFIG_DIR/grafana-dashboard.json') as f:
@@ -129,9 +129,9 @@ print(json.dumps(payload))
     echo "=== Monitoring Stack Ready ==="
     echo "  Grafana:    http://localhost:${GRAFANA_PORT}  (admin/admin)"
     echo "  Prometheus: http://localhost:${PROMETHEUS_PORT}"
-    echo "  Dashboard:  http://localhost:${GRAFANA_PORT}/d/torsten-node/torsten-node"
+    echo "  Dashboard:  http://localhost:${GRAFANA_PORT}/d/dugite-node/dugite-node"
     echo ""
-    echo "Make sure torsten-node is running with --metrics-port ${TORSTEN_METRICS_PORT}"
+    echo "Make sure dugite-node is running with --metrics-port ${DUGITE_METRICS_PORT}"
     echo "To stop: $0 stop"
 }
 

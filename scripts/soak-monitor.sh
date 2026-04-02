@@ -1,17 +1,17 @@
 #!/bin/bash
-# Soak test monitor for Torsten node
+# Soak test monitor for Dugite node
 # Checks node health every 5 minutes for 4 hours
-# Logs to /tmp/torsten-soak.log
+# Logs to /tmp/dugite-soak.log
 
 METRICS_URL="http://localhost:12798/metrics"
-LOG="/tmp/torsten-soak.log"
+LOG="/tmp/dugite-soak.log"
 INTERVAL=300  # 5 minutes
 DURATION=14400  # 4 hours
 START=$(date +%s)
 END=$((START + DURATION))
 CHECK=0
 
-echo "=== Torsten Soak Test Started ===" | tee "$LOG"
+echo "=== Dugite Soak Test Started ===" | tee "$LOG"
 echo "Start: $(date)" | tee -a "$LOG"
 echo "Duration: ${DURATION}s (4 hours)" | tee -a "$LOG"
 echo "Interval: ${INTERVAL}s" | tee -a "$LOG"
@@ -35,24 +35,24 @@ while [ $(date +%s) -lt $END ]; do
     fi
 
     # Parse key metrics
-    blocks=$(echo "$METRICS" | grep '^torsten_blocks_applied_total ' | awk '{print $2}')
-    slot=$(echo "$METRICS" | grep '^torsten_slot_number ' | awk '{print $2}')
-    tip_age=$(echo "$METRICS" | grep '^torsten_tip_age_seconds ' | awk '{print $2}')
-    epoch=$(echo "$METRICS" | grep '^torsten_epoch_number ' | awk '{print $2}')
-    peers=$(echo "$METRICS" | grep '^torsten_peers_connected ' | awk '{print $2}')
-    hot=$(echo "$METRICS" | grep '^torsten_peers_hot ' | awk '{print $2}')
-    forged=$(echo "$METRICS" | grep '^torsten_blocks_forged_total ' | awk '{print $2}')
-    leader_checks=$(echo "$METRICS" | grep '^torsten_leader_checks_total ' | awk '{print $2}')
-    rollbacks=$(echo "$METRICS" | grep '^torsten_rollback_count_total ' | awk '{print $2}')
-    mempool_tx=$(echo "$METRICS" | grep '^torsten_mempool_tx_count ' | awk '{print $2}')
-    utxo=$(echo "$METRICS" | grep '^torsten_utxo_count ' | awk '{print $2}')
-    announced=$(echo "$METRICS" | grep '^torsten_blocks_announced_total ' | awk '{print $2}')
-    cpu=$(echo "$METRICS" | grep '^torsten_cpu_percent ' | awk '{print $2}')
-    mem_gb=$(echo "$METRICS" | grep '^torsten_mem_resident_bytes ' | awk '{printf "%.1f", $2/1073741824}')
-    sync=$(echo "$METRICS" | grep '^torsten_sync_progress_percent ' | awk '{printf "%.1f", $2/100}')
-    n2n_in=$(echo "$METRICS" | grep '^torsten_peers_inbound ' | awk '{print $2}')
-    tx_recv=$(echo "$METRICS" | grep '^torsten_transactions_received_total ' | awk '{print $2}')
-    tx_valid=$(echo "$METRICS" | grep '^torsten_transactions_validated_total ' | awk '{print $2}')
+    blocks=$(echo "$METRICS" | grep '^dugite_blocks_applied_total ' | awk '{print $2}')
+    slot=$(echo "$METRICS" | grep '^dugite_slot_number ' | awk '{print $2}')
+    tip_age=$(echo "$METRICS" | grep '^dugite_tip_age_seconds ' | awk '{print $2}')
+    epoch=$(echo "$METRICS" | grep '^dugite_epoch_number ' | awk '{print $2}')
+    peers=$(echo "$METRICS" | grep '^dugite_peers_connected ' | awk '{print $2}')
+    hot=$(echo "$METRICS" | grep '^dugite_peers_hot ' | awk '{print $2}')
+    forged=$(echo "$METRICS" | grep '^dugite_blocks_forged_total ' | awk '{print $2}')
+    leader_checks=$(echo "$METRICS" | grep '^dugite_leader_checks_total ' | awk '{print $2}')
+    rollbacks=$(echo "$METRICS" | grep '^dugite_rollback_count_total ' | awk '{print $2}')
+    mempool_tx=$(echo "$METRICS" | grep '^dugite_mempool_tx_count ' | awk '{print $2}')
+    utxo=$(echo "$METRICS" | grep '^dugite_utxo_count ' | awk '{print $2}')
+    announced=$(echo "$METRICS" | grep '^dugite_blocks_announced_total ' | awk '{print $2}')
+    cpu=$(echo "$METRICS" | grep '^dugite_cpu_percent ' | awk '{print $2}')
+    mem_gb=$(echo "$METRICS" | grep '^dugite_mem_resident_bytes ' | awk '{printf "%.1f", $2/1073741824}')
+    sync=$(echo "$METRICS" | grep '^dugite_sync_progress_percent ' | awk '{printf "%.1f", $2/100}')
+    n2n_in=$(echo "$METRICS" | grep '^dugite_peers_inbound ' | awk '{print $2}')
+    tx_recv=$(echo "$METRICS" | grep '^dugite_transactions_received_total ' | awk '{print $2}')
+    tx_valid=$(echo "$METRICS" | grep '^dugite_transactions_validated_total ' | awk '{print $2}')
 
     # Compute deltas
     new_blocks=$((${blocks:-0} - ${prev_blocks:-0}))
@@ -78,7 +78,7 @@ while [ $(date +%s) -lt $END ]; do
     sleep "$INTERVAL"
 done
 
-echo "=== Torsten Soak Test Complete ===" | tee -a "$LOG"
+echo "=== Dugite Soak Test Complete ===" | tee -a "$LOG"
 echo "End: $(date)" | tee -a "$LOG"
 echo "Total checks: $CHECK" | tee -a "$LOG"
 echo "Final blocks_applied: $blocks" | tee -a "$LOG"

@@ -309,8 +309,8 @@ Source: `ouroboros-consensus/ouroboros-consensus-cardano/src/shelley/Ouroboros/C
 Source: `ouroboros-network/ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/ChainSync/PipelineDecision.hs`
 
 ChainSync uses the `pipelineDecisionLowHighMark` strategy with default marks
-`lowMark=200, highMark=300` (Torsten uses configurable depth via
-`TORSTEN_PIPELINE_DEPTH`, default 300).
+`lowMark=200, highMark=300` (Dugite uses configurable depth via
+`DUGITE_PIPELINE_DEPTH`, default 300).
 
 ```
 pipelineDecisionLowHighMark :: Word16 -> Word16 -> MkPipelineDecision

@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common issues and their solutions when running Torsten.
+Common issues and their solutions when running Dugite.
 
 ## Build Issues
 
@@ -42,7 +42,7 @@ Only use `--release` when running against a live network.
 
 **Error:** `Handshake failed: version mismatch`
 
-This usually means the peer does not support the protocol version Torsten is requesting (V14+). Ensure you are connecting to an up-to-date cardano-node (version 10.x+).
+This usually means the peer does not support the protocol version Dugite is requesting (V14+). Ensure you are connecting to an up-to-date cardano-node (version 10.x+).
 
 ## Socket Issues
 
@@ -56,7 +56,7 @@ This usually means the peer does not support the protocol version Torsten is req
 
 2. **Wrong socket path.** Verify the socket path matches what the node was started with:
    ```bash
-   torsten-cli query tip --socket-path /path/to/actual/node.sock
+   dugite-cli query tip --socket-path /path/to/actual/node.sock
    ```
 
 3. **Permission denied.** Ensure the user running the CLI has read/write access to the socket file.
@@ -64,7 +64,7 @@ This usually means the peer does not support the protocol version Torsten is req
 4. **Stale socket file.** If the node crashed, the socket file may remain. Delete it and restart:
    ```bash
    rm ./node.sock
-   torsten-node run ...
+   dugite-node run ...
    ```
 
 ### Socket permission denied
@@ -83,15 +83,15 @@ The Unix socket file inherits the permissions of the process that created it. En
 
 ```bash
 rm -rf ./db-path
-torsten-node run ...
+dugite-node run ...
 ```
 
 For faster recovery, use [Mithril snapshot import](../running/mithril.md):
 
 ```bash
 rm -rf ./db-path
-torsten-node mithril-import --network-magic 2 --database-path ./db-path
-torsten-node run ...
+dugite-node mithril-import --network-magic 2 --database-path ./db-path
+dugite-node run ...
 ```
 
 ### Disk space
@@ -112,7 +112,7 @@ Monitor disk usage and ensure adequate free space.
 
 **Possible causes:**
 
-1. **Single peer.** Torsten benefits from multiple peers for block fetching. Ensure your topology includes multiple bootstrap peers or enable ledger-based peer discovery.
+1. **Single peer.** Dugite benefits from multiple peers for block fetching. Ensure your topology includes multiple bootstrap peers or enable ledger-based peer discovery.
 
 2. **Network latency.** The ChainSync protocol has an inherent per-header RTT (~300ms). High-latency connections will reduce throughput.
 
@@ -138,7 +138,7 @@ Monitor disk usage and ensure adequate free space.
 
 ### Out of memory
 
-Torsten's memory usage depends on:
+Dugite's memory usage depends on:
 - UTxO set size (the largest memory consumer)
 - Number of connected peers
 - VolatileDB (last k=2160 blocks in memory)
@@ -155,13 +155,13 @@ Use the `RUST_LOG` environment variable:
 
 ```bash
 # Debug all crates
-RUST_LOG=debug torsten-node run ...
+RUST_LOG=debug dugite-node run ...
 
 # Debug specific crate
-RUST_LOG=torsten_network=debug torsten-node run ...
+RUST_LOG=dugite_network=debug dugite-node run ...
 
 # Trace level (very verbose)
-RUST_LOG=trace torsten-node run ...
+RUST_LOG=trace dugite-node run ...
 ```
 
 ### Log to file
@@ -169,7 +169,7 @@ RUST_LOG=trace torsten-node run ...
 Use the built-in file logging:
 
 ```bash
-torsten-node run --log-output file --log-dir /var/log/torsten ...
+dugite-node run --log-output file --log-dir /var/log/dugite ...
 ```
 
 Log files are rotated daily by default. See [Logging](../running/logging.md) for rotation options and multi-target output.
@@ -180,7 +180,7 @@ To update topology without restarting:
 
 ```bash
 # Edit topology.json
-kill -HUP $(pidof torsten-node)
+kill -HUP $(pidof dugite-node)
 ```
 
 The node will log that the topology was reloaded and update the peer manager with the new configuration.
@@ -204,7 +204,7 @@ The node will log that the topology was reloaded and update the peer manager wit
 **Fix:** The fork recovery mechanism now handles this automatically. If the issue persists, re-import from Mithril:
 
 ```bash
-torsten-node mithril-import --network-magic <magic> --database-path <path>
+dugite-node mithril-import --network-magic <magic> --database-path <path>
 ```
 
 See [Fork Recovery & ImmutableDB Contamination](../architecture/storage.md#fork-recovery--immutabledb-contamination) for details on how the recovery mechanism works.
@@ -229,9 +229,9 @@ See [Fork Recovery & ImmutableDB Contamination](../architecture/storage.md#fork-
 
 If you encounter an issue not covered here:
 
-1. Check the [GitHub issues](https://github.com/michaeljfazio/torsten/issues)
+1. Check the [GitHub issues](https://github.com/michaeljfazio/dugite/issues)
 2. Open a new issue with:
-   - Torsten version (`torsten-node --version`)
+   - Dugite version (`dugite-node --version`)
    - Operating system
    - Configuration files (redact any sensitive info)
    - Relevant log output

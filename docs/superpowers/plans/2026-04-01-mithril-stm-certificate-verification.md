@@ -16,7 +16,7 @@
 
 **Files:**
 - Modify: `Cargo.toml` (workspace root, line ~127 in `[workspace.dependencies]`)
-- Modify: `crates/torsten-node/Cargo.toml` (line ~58, dependencies section)
+- Modify: `crates/dugite-node/Cargo.toml` (line ~58, dependencies section)
 
 - [ ] **Step 1: Add mithril-client to workspace dependencies**
 
@@ -26,9 +26,9 @@ In `Cargo.toml` (workspace root), add after the `rayon = "1"` line in `[workspac
 mithril-client = { version = "0.13", default-features = false, features = ["num-integer-backend", "rustls-tls-webpki-roots", "fs"] }
 ```
 
-- [ ] **Step 2: Add mithril-client to torsten-node dependencies**
+- [ ] **Step 2: Add mithril-client to dugite-node dependencies**
 
-In `crates/torsten-node/Cargo.toml`, add after the `tokio-util` line:
+In `crates/dugite-node/Cargo.toml`, add after the `tokio-util` line:
 
 ```toml
 mithril-client = { workspace = true }
@@ -36,13 +36,13 @@ mithril-client = { workspace = true }
 
 - [ ] **Step 3: Verify it compiles**
 
-Run: `cargo check -p torsten-node 2>&1 | tail -5`
+Run: `cargo check -p dugite-node 2>&1 | tail -5`
 Expected: compilation succeeds (warnings OK at this stage)
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add Cargo.toml crates/torsten-node/Cargo.toml Cargo.lock
+git add Cargo.toml crates/dugite-node/Cargo.toml Cargo.lock
 git commit -m "deps: add mithril-client for STM certificate verification (#313)"
 ```
 
@@ -51,7 +51,7 @@ git commit -m "deps: add mithril-client for STM certificate verification (#313)"
 ### Task 2: Add genesis verification keys and certificate_hash to API types
 
 **Files:**
-- Modify: `crates/torsten-node/src/mithril.rs`
+- Modify: `crates/dugite-node/src/mithril.rs`
 
 - [ ] **Step 1: Add genesis verification key constants**
 
@@ -107,13 +107,13 @@ struct SnapshotListItem {
 
 - [ ] **Step 3: Verify it compiles**
 
-Run: `cargo check -p torsten-node 2>&1 | tail -5`
+Run: `cargo check -p dugite-node 2>&1 | tail -5`
 Expected: compiles (genesis_verification_key unused warning is fine)
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-node/src/mithril.rs
+git add crates/dugite-node/src/mithril.rs
 git commit -m "feat(mithril): add genesis verification keys and certificate_hash field (#313)"
 ```
 
@@ -122,7 +122,7 @@ git commit -m "feat(mithril): add genesis verification keys and certificate_hash
 ### Task 3: Add CLI arguments for certificate verification control
 
 **Files:**
-- Modify: `crates/torsten-node/src/main.rs`
+- Modify: `crates/dugite-node/src/main.rs`
 
 - [ ] **Step 1: Add CLI args to MithrilImportArgs**
 
@@ -164,13 +164,13 @@ async fn run_mithril_import(args: MithrilImportArgs) -> Result<()> {
 
 - [ ] **Step 3: Verify it compiles (expect error — signature mismatch)**
 
-Run: `cargo check -p torsten-node 2>&1 | tail -10`
+Run: `cargo check -p dugite-node 2>&1 | tail -10`
 Expected: compile error because `import_snapshot` signature doesn't match yet. This is expected — Task 4 will fix it.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/torsten-node/src/main.rs
+git add crates/dugite-node/src/main.rs
 git commit -m "feat(mithril): add CLI args for certificate verification control (#313)"
 ```
 
@@ -179,7 +179,7 @@ git commit -m "feat(mithril): add CLI args for certificate verification control 
 ### Task 4: Implement certificate chain verification in import_snapshot
 
 **Files:**
-- Modify: `crates/torsten-node/src/mithril.rs`
+- Modify: `crates/dugite-node/src/mithril.rs`
 
 - [ ] **Step 1: Update import_snapshot signature**
 
@@ -262,18 +262,18 @@ Replace the entire block from `// SECURITY NOTE: STM certificate chain verificat
 
 - [ ] **Step 3: Verify it compiles**
 
-Run: `cargo check -p torsten-node 2>&1 | tail -10`
+Run: `cargo check -p dugite-node 2>&1 | tail -10`
 Expected: compiles successfully
 
-- [ ] **Step 4: Run all torsten-node tests**
+- [ ] **Step 4: Run all dugite-node tests**
 
-Run: `cargo nextest run -p torsten-node 2>&1 | tail -20`
+Run: `cargo nextest run -p dugite-node 2>&1 | tail -20`
 Expected: all existing tests pass
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-node/src/mithril.rs
+git add crates/dugite-node/src/mithril.rs
 git commit -m "feat(mithril): implement STM certificate chain verification (#313)
 
 Adds full Mithril STM certificate chain verification during snapshot import.
@@ -292,7 +292,7 @@ Supports --skip-certificate-verification for testing and
 ### Task 5: Add unit tests
 
 **Files:**
-- Modify: `crates/torsten-node/src/mithril.rs`
+- Modify: `crates/dugite-node/src/mithril.rs`
 
 - [ ] **Step 1: Add genesis key lookup tests**
 
@@ -343,7 +343,7 @@ Add to the existing `#[cfg(test)] mod tests` block in mithril.rs:
 
 - [ ] **Step 2: Run tests**
 
-Run: `cargo nextest run -p torsten-node -E 'test(genesis_verification_key)' 2>&1 | tail -10`
+Run: `cargo nextest run -p dugite-node -E 'test(genesis_verification_key)' 2>&1 | tail -10`
 Expected: all 3 tests pass
 
 - [ ] **Step 3: Add integration test for real certificate chain verification (ignored by default)**
@@ -356,7 +356,7 @@ Add to the test module:
     /// This test hits the real Mithril aggregator API and verifies that we can
     /// successfully build a client, fetch a snapshot, and verify its certificate
     /// chain back to genesis. Run manually with:
-    ///   cargo nextest run -p torsten-node -E 'test(verify_preview_certificate_chain)' -- --ignored
+    ///   cargo nextest run -p dugite-node -E 'test(verify_preview_certificate_chain)' -- --ignored
     #[tokio::test]
     #[ignore]
     async fn test_verify_preview_certificate_chain() {
@@ -370,7 +370,7 @@ Add to the test module:
 
         // Fetch latest snapshot to get its certificate_hash
         let http = reqwest::Client::builder()
-            .user_agent("torsten-test/0.1")
+            .user_agent("dugite-test/0.1")
             .build()
             .unwrap();
 
@@ -404,13 +404,13 @@ Add to the test module:
 
 - [ ] **Step 4: Run the unit tests (not the ignored integration test)**
 
-Run: `cargo nextest run -p torsten-node -E 'test(genesis)' 2>&1 | tail -10`
+Run: `cargo nextest run -p dugite-node -E 'test(genesis)' 2>&1 | tail -10`
 Expected: all genesis key tests pass
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/torsten-node/src/mithril.rs
+git add crates/dugite-node/src/mithril.rs
 git commit -m "test(mithril): add genesis key and certificate chain verification tests (#313)"
 ```
 

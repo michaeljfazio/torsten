@@ -20,6 +20,6 @@ This is the **mark** snapshot from the PREVIOUS epoch (pre-rotation), which equa
 - cardano-ledger: `Shelley/Rules/NewEpoch.hs` lines 172-198 (same, with detailed comment)
 - cardano-ledger: `State/SnapShots.hs` lines 341-347 (SnapShots data type)
 
-## Torsten Bug
+## Dugite Bug
 Uses `snapshots.set` computed on-the-fly per batch. Should memoize `pool_distr` on LedgerState at epoch boundary.
 Also uses f64 for relative stake; Haskell uses exact Rational.

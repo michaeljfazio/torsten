@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-24
 **Status:** Approved
-**Scope:** Complete replacement of `crates/torsten-network/` internals, removing all `pallas-network` dependencies
+**Scope:** Complete replacement of `crates/dugite-network/` internals, removing all `pallas-network` dependencies
 
 ## Motivation
 
@@ -20,7 +20,7 @@ A ground-up rewrite aligned to the Haskell reference implementation gives us ful
 | Decision | Choice | Rationale |
 |---|---|---|
 | Scope | Full rewrite, one shot | Clean break, no legacy shims or migration complexity |
-| Pallas deps | Zero pallas imports in torsten-network | Eliminates version coupling; our primitives crate wraps what we need |
+| Pallas deps | Zero pallas imports in dugite-network | Eliminates version coupling; our primitives crate wraps what we need |
 | Multiplexer | Exact wire format, idiomatic Rust internals | Match Haskell on the wire (12,288 SDU, direction bits), use tokio channels internally |
 | State machines | Runtime enum with debug assertions | ChainSync pipelining makes type-states impractical; runtime checks are sufficient |
 | Connection lifecycle | Full Haskell parity including simultaneous open | Production mainnet requires correct duplex and connection merging |
@@ -43,7 +43,7 @@ Each layer only depends on the one below it. Mini-protocols are independent of e
 ## Module Structure
 
 ```
-crates/torsten-network/src/
+crates/dugite-network/src/
 ├── lib.rs                          # Public API: traits, re-exports
 ├── bearer/
 │   ├── mod.rs                      # Bearer trait definition
@@ -623,13 +623,13 @@ pub enum NetworkError {
 
 Prometheus on port 12798.
 
-**Connection:** `torsten_peers_{cold,warm,hot}`, `torsten_connections_{inbound,outbound}`, `torsten_handshakes_{completed,failed}_total`, `torsten_simultaneous_opens_total`
+**Connection:** `dugite_peers_{cold,warm,hot}`, `dugite_connections_{inbound,outbound}`, `dugite_handshakes_{completed,failed}_total`, `dugite_simultaneous_opens_total`
 
-**Protocol:** `torsten_chainsync_headers_received_total`, `torsten_chainsync_pipeline_depth`, `torsten_blockfetch_blocks_received_total`, `torsten_blockfetch_bytes_received_total`, `torsten_txsubmission_txs_{announced,received}_total`, `torsten_peersharing_peers_received_total`
+**Protocol:** `dugite_chainsync_headers_received_total`, `dugite_chainsync_pipeline_depth`, `dugite_blockfetch_blocks_received_total`, `dugite_blockfetch_bytes_received_total`, `dugite_txsubmission_txs_{announced,received}_total`, `dugite_peersharing_peers_received_total`
 
-**Mux:** `torsten_mux_egress_batches_total`, `torsten_mux_ingress_queue_bytes` (per protocol)
+**Mux:** `dugite_mux_egress_batches_total`, `dugite_mux_ingress_queue_bytes` (per protocol)
 
-**Latency:** `torsten_keepalive_rtt_seconds` (histogram)
+**Latency:** `dugite_keepalive_rtt_seconds` (histogram)
 
 ## Testing Strategy
 
@@ -706,16 +706,16 @@ bytes = "1"
 
 **Keep:**
 ```toml
-torsten-primitives = { workspace = true }
-torsten-serialization = { workspace = true }
-torsten-crypto = { workspace = true }
+dugite-primitives = { workspace = true }
+dugite-serialization = { workspace = true }
+dugite-crypto = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 ```
 
-### torsten-node Integration
+### dugite-node Integration
 
-The public trait interface (`BlockProvider`, `TxValidator`, `MempoolProvider`, `UtxoQueryProvider`, `ConnectionMetrics`) is preserved. Changes in `torsten-node`:
+The public trait interface (`BlockProvider`, `TxValidator`, `MempoolProvider`, `UtxoQueryProvider`, `ConnectionMetrics`) is preserved. Changes in `dugite-node`:
 
 - `node/mod.rs` — update construction to use `ConnectionManager` API
 - `node/serve.rs` — trait implementations unchanged; passed via `ConnectionManager::new(config, providers)`
@@ -726,7 +726,7 @@ The public trait interface (`BlockProvider`, `TxValidator`, `MempoolProvider`, `
 1. Delete all existing `src/` contents
 2. Write new implementation
 3. Update `Cargo.toml`
-4. Update `torsten-node` integration
+4. Update `dugite-node` integration
 5. Remove `pallas-network` from workspace `Cargo.toml`
 6. Build, test, verify on preview testnet
 

@@ -27,7 +27,7 @@ Five-phase plan to upgrade `governor.rs` / `peer_manager.rs` to proper Ouroboros
 
 ## Architecture Constraints
 
-- All changes stay within `torsten-network`; `torsten-node` interacts only via `GovernorEvent` and `PeerManager` public API.
+- All changes stay within `dugite-network`; `dugite-node` interacts only via `GovernorEvent` and `PeerManager` public API.
 - `PeerManager` is `Arc<RwLock<..>>` — governor must hold write lock only for event application, never during I/O.
 - Phase 4 peer-sharing work must be fire-and-forget spawned tasks, not inline awaits.
 

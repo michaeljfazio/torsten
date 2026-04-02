@@ -1,0 +1,30 @@
+[package]
+name = "dugite-network"
+version.workspace = true
+edition.workspace = true
+description = "Ouroboros network mini-protocols for Dugite"
+
+[dependencies]
+dugite-primitives = { workspace = true }
+dugite-crypto = { workspace = true }
+dugite-serialization = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+minicbor = { workspace = true }
+hickory-resolver = { workspace = true }
+socket2 = { workspace = true }
+num-bigint = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+parking_lot = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+proptest = { workspace = true }

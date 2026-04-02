@@ -30,23 +30,23 @@ for arg in "$@"; do
     esac
 done
 
-echo "=== Torsten E2E Tests (mode: $MODE) ==="
+echo "=== Dugite E2E Tests (mode: $MODE) ==="
 
 # Step 1: Build release binaries
 echo "--- Building release binaries..."
 cd "$PROJECT_ROOT"
-cargo build --release -p torsten-cli -p torsten-node 2>&1
+cargo build --release -p dugite-cli -p dugite-node 2>&1
 
-export TORSTEN_CLI_PATH="$PROJECT_ROOT/target/release/torsten-cli"
-export TORSTEN_NODE_PATH="$PROJECT_ROOT/target/release/torsten-node"
+export DUGITE_CLI_PATH="$PROJECT_ROOT/target/release/dugite-cli"
+export DUGITE_NODE_PATH="$PROJECT_ROOT/target/release/dugite-node"
 
-echo "CLI:  $TORSTEN_CLI_PATH"
-echo "Node: $TORSTEN_NODE_PATH"
+echo "CLI:  $DUGITE_CLI_PATH"
+echo "Node: $DUGITE_NODE_PATH"
 
 # Step 2: Run Tier 0 (always)
 echo ""
 echo "--- Running Tier 0: Offline tests..."
-cargo test -p torsten-integration-tests -- tier0 --test-threads=4 2>&1
+cargo test -p dugite-integration-tests -- tier0 --test-threads=4 2>&1
 TIER0_EXIT=$?
 
 if [ "$MODE" = "offline" ]; then
@@ -60,26 +60,26 @@ if [ "$MODE" = "offline" ]; then
 fi
 
 # Step 3: Check/configure node socket
-SOCKET="${TORSTEN_INTEGRATION_SOCKET:-$PROJECT_ROOT/node.sock}"
-export TORSTEN_INTEGRATION_SOCKET="$SOCKET"
+SOCKET="${DUGITE_INTEGRATION_SOCKET:-$PROJECT_ROOT/node.sock}"
+export DUGITE_INTEGRATION_SOCKET="$SOCKET"
 
 NODE_PID=""
-if ! "$TORSTEN_CLI_PATH" query tip --socket-path "$SOCKET" &>/dev/null; then
+if ! "$DUGITE_CLI_PATH" query tip --socket-path "$SOCKET" &>/dev/null; then
     echo ""
     echo "--- Node not running. Checking for config..."
 
-    CONFIG="${TORSTEN_CONFIG:-$PROJECT_ROOT/config/preview-config.json}"
-    TOPOLOGY="${TORSTEN_TOPOLOGY:-$PROJECT_ROOT/config/preview-topology.json}"
-    DB_PATH="${TORSTEN_DB_PATH:-$PROJECT_ROOT/db-preview}"
+    CONFIG="${DUGITE_CONFIG:-$PROJECT_ROOT/config/preview-config.json}"
+    TOPOLOGY="${DUGITE_TOPOLOGY:-$PROJECT_ROOT/config/preview-topology.json}"
+    DB_PATH="${DUGITE_DB_PATH:-$PROJECT_ROOT/db-preview}"
 
     if [ ! -f "$CONFIG" ]; then
         echo "ERROR: No node running and config file not found: $CONFIG"
-        echo "Set TORSTEN_INTEGRATION_SOCKET to a running node, or provide config files."
+        echo "Set DUGITE_INTEGRATION_SOCKET to a running node, or provide config files."
         exit 1
     fi
 
     echo "--- Starting node..."
-    "$TORSTEN_NODE_PATH" run \
+    "$DUGITE_NODE_PATH" run \
         --config "$CONFIG" \
         --topology "$TOPOLOGY" \
         --database-path "$DB_PATH" \
@@ -91,7 +91,7 @@ if ! "$TORSTEN_CLI_PATH" query tip --socket-path "$SOCKET" &>/dev/null; then
     # Wait for readiness
     echo "--- Waiting for node to be ready..."
     for i in $(seq 1 60); do
-        if "$TORSTEN_CLI_PATH" query tip --socket-path "$SOCKET" &>/dev/null; then
+        if "$DUGITE_CLI_PATH" query tip --socket-path "$SOCKET" &>/dev/null; then
             echo "Node ready after ${i}s"
             break
         fi
@@ -116,7 +116,7 @@ trap cleanup EXIT
 # Step 4: Run Tier 1
 echo ""
 echo "--- Running Tier 1: Query tests..."
-cargo test -p torsten-integration-tests -- tier1 --test-threads=2 2>&1
+cargo test -p dugite-integration-tests -- tier1 --test-threads=2 2>&1
 TIER1_EXIT=$?
 
 if [ "$MODE" = "smoke" ]; then
@@ -132,15 +132,15 @@ fi
 
 # Step 5: Run Tier 2 (full mode only)
 if [ "$MODE" = "full" ]; then
-    if [ -n "${TORSTEN_TEST_KEYS:-}" ]; then
-        export TORSTEN_TEST_KEYS
+    if [ -n "${DUGITE_TEST_KEYS:-}" ]; then
+        export DUGITE_TEST_KEYS
         echo ""
         echo "--- Running Tier 2: Transaction tests..."
-        cargo test -p torsten-integration-tests -- tier2 --test-threads=1 2>&1
+        cargo test -p dugite-integration-tests -- tier2 --test-threads=1 2>&1
         TIER2_EXIT=$?
     else
         echo ""
-        echo "--- SKIP Tier 2: TORSTEN_TEST_KEYS not set"
+        echo "--- SKIP Tier 2: DUGITE_TEST_KEYS not set"
         TIER2_EXIT=0
     fi
 

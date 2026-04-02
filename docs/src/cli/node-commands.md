@@ -1,13 +1,13 @@
 # Node Commands
 
-The `torsten-cli node` subcommands manage cold keys, KES keys, VRF keys, and operational certificates for block producer setup.
+The `dugite-cli node` subcommands manage cold keys, KES keys, VRF keys, and operational certificates for block producer setup.
 
 ## key-gen
 
 Generate a cold key pair and an operational certificate issue counter:
 
 ```bash
-torsten-cli node key-gen \
+dugite-cli node key-gen \
   --cold-verification-key-file cold.vkey \
   --cold-signing-key-file cold.skey \
   --operational-certificate-counter-file opcert.counter
@@ -26,7 +26,7 @@ The cold key identifies your stake pool. Keep the signing key offline (air-gappe
 Generate a KES (Key Evolving Signature) key pair:
 
 ```bash
-torsten-cli node key-gen-kes \
+dugite-cli node key-gen-kes \
   --verification-key-file kes.vkey \
   --signing-key-file kes.skey
 ```
@@ -43,7 +43,7 @@ KES keys are rotated periodically. Each key is valid for a limited number of KES
 Generate a VRF (Verifiable Random Function) key pair:
 
 ```bash
-torsten-cli node key-gen-vrf \
+dugite-cli node key-gen-vrf \
   --verification-key-file vrf.vkey \
   --signing-key-file vrf.skey
 ```
@@ -60,7 +60,7 @@ VRF keys are used for slot leader election and do not need rotation.
 Issue an operational certificate binding the cold key to the current KES key:
 
 ```bash
-torsten-cli node issue-op-cert \
+dugite-cli node issue-op-cert \
   --kes-verification-key-file kes.vkey \
   --cold-signing-key-file cold.skey \
   --operational-certificate-counter-file opcert.counter \
@@ -83,7 +83,7 @@ The opcert must be regenerated each time you rotate KES keys. The counter file i
 Create a new operational certificate issue counter (useful if the original counter is lost):
 
 ```bash
-torsten-cli node new-counter \
+dugite-cli node new-counter \
   --cold-verification-key-file cold.vkey \
   --counter-value 5 \
   --operational-certificate-counter-file opcert.counter

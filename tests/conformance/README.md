@@ -1,6 +1,6 @@
 # Formal Ledger Specification Conformance Tests
 
-This directory contains infrastructure for validating Torsten's ledger
+This directory contains infrastructure for validating Dugite's ledger
 implementation against the Cardano formal ledger specification.
 
 ## Architecture
@@ -21,8 +21,8 @@ Agda formal spec ──► Haskell (MAlonzo) ──► JSON test vectors ──�
 functions with various inputs and serializes the results as JSON. The current
 vectors in `vectors/` are hand-crafted examples that demonstrate the schema.
 
-**Validation**: The Rust crate `torsten-conformance` loads the JSON vectors,
-converts them to Torsten types via adapter functions, runs the corresponding
+**Validation**: The Rust crate `dugite-conformance` loads the JSON vectors,
+converts them to Dugite types via adapter functions, runs the corresponding
 ledger function, and compares the result against the expected output.
 
 ## Directory Structure
@@ -34,7 +34,7 @@ tests/conformance/
 ├── src/
 │   ├── lib.rs              # Crate root
 │   ├── schema.rs           # Test vector JSON schema types
-│   ├── adapters.rs         # Agda type ↔ Torsten type converters
+│   ├── adapters.rs         # Agda type ↔ Dugite type converters
 │   └── runner.rs           # Test execution and comparison engine
 ├── tests/
 │   └── conformance_tests.rs  # Integration test entry point
@@ -52,22 +52,22 @@ tests/conformance/
 
 ```bash
 # Run all conformance tests
-cargo test -p torsten-conformance
+cargo test -p dugite-conformance
 
 # Run with output
-cargo test -p torsten-conformance -- --nocapture
+cargo test -p dugite-conformance -- --nocapture
 
 # Run only UTXO tests
-cargo test -p torsten-conformance conformance_utxo
+cargo test -p dugite-conformance conformance_utxo
 
 # Run only CERT tests
-cargo test -p torsten-conformance conformance_cert
+cargo test -p dugite-conformance conformance_cert
 
 # Run only GOV tests
-cargo test -p torsten-conformance conformance_gov
+cargo test -p dugite-conformance conformance_gov
 
 # Run only EPOCH tests
-cargo test -p torsten-conformance conformance_epoch
+cargo test -p dugite-conformance conformance_epoch
 ```
 
 ## Supported Rules
@@ -111,9 +111,9 @@ For failure cases:
 ### Type Mapping
 
 The Agda formal spec uses abstract types. The test vectors use simplified
-representations that map to Torsten's concrete types:
+representations that map to Dugite's concrete types:
 
-| Agda Type     | JSON Representation          | Torsten Type              |
+| Agda Type     | JSON Representation          | Dugite Type              |
 |---------------|------------------------------|---------------------------|
 | TxId          | 64-char hex string           | `Hash32` (TransactionHash)|
 | Addr          | Tagged enum (base/enterprise/reward/byron) | `Address` enum |
@@ -161,7 +161,7 @@ The formal-ledger-specifications repo includes a conformance example at
    state, and signal types.
 
 2. **Adapters**: Add conversion functions in `src/adapters.rs` to map between
-   the test vector types and Torsten's types.
+   the test vector types and Dugite's types.
 
 3. **Runner**: Add a `run_<rule>_test()` function in `src/runner.rs` and
    register it in the `run_test()` dispatch.
@@ -181,4 +181,4 @@ The formal-ledger-specifications repo includes a conformance example at
   through `LedgerState::process_certificate` (which is not public API at the
   UTxO level).
 - Error matching uses category names rather than exact error types, since the
-  formal spec's error types are more abstract than Torsten's.
+  formal spec's error types are more abstract than Dugite's.

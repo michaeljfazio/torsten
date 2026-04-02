@@ -5,7 +5,7 @@ Cardano protocol parameters control the behavior of the network, including fees,
 ## Querying Parameters
 
 ```bash
-torsten-cli query protocol-parameters \
+dugite-cli query protocol-parameters \
   --socket-path ./node.sock \
   --out-file protocol-params.json
 ```

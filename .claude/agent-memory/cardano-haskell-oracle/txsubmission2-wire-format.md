@@ -105,7 +105,7 @@ the full tx as it would appear in `MsgReplyTxs`. This includes the HFC envelope 
 Haskell's `txWireSize` function returns `encodeNodeToNode` byte count. Mismatches larger than
 `const_MAX_TX_SIZE_DISCREPANCY` (10 bytes in V2) will terminate the connection per V2 inbound code.
 
-Torsten must include the HFC envelope in `SizeInBytes` when announcing txids.
+Dugite must include the HFC envelope in `SizeInBytes` when announcing txids.
 
 ## N2N Protocol vs N2C Protocol
 

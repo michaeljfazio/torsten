@@ -1,6 +1,6 @@
 ---
 name: crate-pallas-hardano
-description: pallas-hardano ImmutableDB storage format reading; overlap with torsten's Mithril import
+description: pallas-hardano ImmutableDB storage format reading; overlap with dugite's Mithril import
 type: reference
 ---
 
@@ -57,14 +57,14 @@ pub fn get_tip(dir: &Path) -> Result<Point>
 
 Chunks are numbered sequentially. The binary search locates the correct chunk by reading the first block of each chunk and comparing slot numbers.
 
-## What pallas-hardano Provides vs torsten Mithril Import
+## What pallas-hardano Provides vs dugite Mithril Import
 
 ### pallas-hardano provides:
 - Reading cardano-node's chunk/primary/secondary file format
 - Iterating blocks from arbitrary points
 - Getting the current tip
 
-### torsten Mithril import ALSO does (from torsten-node/src/mithril.rs):
+### dugite Mithril import ALSO does (from dugite-node/src/mithril.rs):
 - Downloads Mithril snapshots (tar.zst archives)
 - Digest verification: SHA256(beacon_hash || file_digests) over sorted chunk/primary/secondary files
 - Beacon hash: SHA256(network_name || epoch_BE || immutable_file_number_BE)
@@ -75,21 +75,21 @@ Chunks are numbered sequentially. The binary search locates the correct chunk by
 
 ### Key difference in parsing approach:
 - **pallas-hardano** uses `MultiEraBlock::decode()` — parses block content
-- **torsten Mithril** uses secondary index (56-byte entries) to locate blocks by position, then verifies CRC32 checksums before importing raw bytes
+- **dugite Mithril** uses secondary index (56-byte entries) to locate blocks by position, then verifies CRC32 checksums before importing raw bytes
 
-Torsten's Mithril import is more complete — it handles the full snapshot workflow including download, digest verification, CRC32 checking, and bulk import. pallas-hardano only handles the file reading/iteration portion.
+Dugite's Mithril import is more complete — it handles the full snapshot workflow including download, digest verification, CRC32 checking, and bulk import. pallas-hardano only handles the file reading/iteration portion.
 
 ## Overlap Assessment
 
-**Partial overlap** with torsten's Mithril import path for the chunk file parsing step. However, torsten's implementation is optimized differently (memory-mapped I/O, bulk import, deferred compaction) and handles the full snapshot lifecycle.
+**Partial overlap** with dugite's Mithril import path for the chunk file parsing step. However, dugite's implementation is optimized differently (memory-mapped I/O, bulk import, deferred compaction) and handles the full snapshot lifecycle.
 
 ## Adoption Recommendation
 
-**IMPLEMENT FROM SCRATCH** (already done). Torsten's Mithril import is more sophisticated than what pallas-hardano provides. The chunk file parsing could theoretically use pallas-hardano, but:
+**IMPLEMENT FROM SCRATCH** (already done). Dugite's Mithril import is more sophisticated than what pallas-hardano provides. The chunk file parsing could theoretically use pallas-hardano, but:
 
-1. Torsten uses secondary index for CRC32 verification (pallas-hardano doesn't)
-2. Torsten uses memmap2 for performance (pallas-hardano uses standard file I/O)
-3. Torsten's bulk import path is optimized for the 4M+ block case
+1. Dugite uses secondary index for CRC32 verification (pallas-hardano doesn't)
+2. Dugite uses memmap2 for performance (pallas-hardano uses standard file I/O)
+3. Dugite's bulk import path is optimized for the 4M+ block case
 4. Adding pallas-hardano dependency would save only a small portion of code
 
-**Future consideration**: If pallas-hardano adds secondary index parsing with CRC32 verification, re-evaluate. For now, torsten's implementation is superior for the Mithril use case.
+**Future consideration**: If pallas-hardano adds secondary index parsing with CRC32 verification, re-evaluate. For now, dugite's implementation is superior for the Mithril use case.

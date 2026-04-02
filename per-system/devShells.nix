@@ -43,7 +43,7 @@
           ];
 
         shellHook = ''
-          echo "🦀 Torsten - Cardano Node in Rust"
+          echo "🦀 Dugite - Cardano Node in Rust"
           echo ""
           echo "Rust: $(rustc --version)"
           echo "Cargo: $(cargo --version)"
@@ -55,9 +55,9 @@
           echo "  cargo fmt --all -- --check         # Check formatting"
           echo ""
           echo "  cargo build --release              # Build release binary"
-          echo "  cargo run -p torsten-node -- --help"
-          echo "  cargo run -p torsten-cli -- --help"
-          echo "  cargo run -p torsten-tui"
+          echo "  cargo run -p dugite-node -- --help"
+          echo "  cargo run -p dugite-cli -- --help"
+          echo "  cargo run -p dugite-tui"
         '';
       };
   };

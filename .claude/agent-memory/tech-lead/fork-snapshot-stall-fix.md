@@ -8,7 +8,7 @@ A restart after unclean shutdown can leave the node permanently stalled if
 the last saved snapshot has a tip on a fork chain.  Six bugs compose into
 the failure:
 
-**RC1 (primary): Fork snapshot** — Torsten snapshots at volatile ledger tip
+**RC1 (primary): Fork snapshot** — Dugite snapshots at volatile ledger tip
 (can be a fork block).  Haskell only snapshots at the ImmutableDB-confirmed
 anchor.
 

@@ -8,7 +8,7 @@ type: project
 
 **Why:** Outbound N2N connections via `PipelinedPeerClient`/`PeerClient` advertise `initiator_only_diffusion_mode = true`.  The remote peer therefore never sends us TxSubmission2 requests, so our mempool txs are never propagated to peers we connect to outbound.
 
-**What was built:** `crates/torsten-network/src/duplex.rs` — `DuplexPeerConnection` (Phase 1) and `serve_tx_submission` (Phase 2).
+**What was built:** `crates/dugite-network/src/duplex.rs` — `DuplexPeerConnection` (Phase 1) and `serve_tx_submission` (Phase 2).
 
 **How to apply:** Phase 3 (not yet done) wires `DuplexPeerConnection` into the sync loop in place of `PipelinedPeerClient` for active/hot peers.
 
@@ -40,8 +40,8 @@ MAX_TX_INFLIGHT = 1000 (matches inbound server in n2n_server.rs).
 When at cap, send empty reply to let peer ack before we push more IDs.
 
 ### Files changed
-- `crates/torsten-network/src/duplex.rs` (new, 900 lines)
-- `crates/torsten-network/src/lib.rs` (added `pub mod duplex`, re-exports)
+- `crates/dugite-network/src/duplex.rs` (new, 900 lines)
+- `crates/dugite-network/src/lib.rs` (added `pub mod duplex`, re-exports)
 
 ### Phase 3 (TODO)
 Wire `DuplexPeerConnection` into the governor connect loop in `governor.rs` or the node's peer connection management so hot peers use duplex connections instead of pipelined-only connections.

@@ -9,7 +9,7 @@ LoE is enforced by gating the volatile-to-immutable flush in `process_forward_bl
 ## Architecture
 
 - `GenesisStateMachine::loe_limit(&[Point]) -> Option<u64>` — already existed in gsm.rs; returns None when CaughtUp (no constraint), Some(min_peer_tip_slot) when Syncing, Some(0) when PreSyncing.
-- `ChainDB::flush_to_immutable_loe(loe_slot: u64)` — new method in torsten-storage; behaves like `flush_to_immutable()` but skips blocks with slot > loe_slot, leaving them in VolatileDB.
+- `ChainDB::flush_to_immutable_loe(loe_slot: u64)` — new method in dugite-storage; behaves like `flush_to_immutable()` but skips blocks with slot > loe_slot, leaving them in VolatileDB.
 - `Node.gsm: Arc<RwLock<GenesisStateMachine>>` — added as a struct field; initialized in `Node::new()` so the background evaluation task (spawned in `run()`) and `process_forward_blocks()` share one instance.
 
 ## Integration Point

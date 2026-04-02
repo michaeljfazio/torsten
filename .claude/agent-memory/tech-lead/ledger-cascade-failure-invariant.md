@@ -6,7 +6,7 @@ type: project
 
 ## Incident Summary
 
-Block 4119211 (slot 107229218, preview testnet) caused Torsten to fork from the network.
+Block 4119211 (slot 107229218, preview testnet) caused Dugite to fork from the network.
 
 **tx 26b1e945** had 15 Phase-1 errors:
 - 12x InputNotFound for `f82ae6af#0–#11`
@@ -53,7 +53,7 @@ The treasury check is gated by `mode == BlockValidationMode::ValidateAll` — it
 
 ## Regression Tests (committed 519ad41)
 
-Four tests in `crates/torsten-ledger/src/state/tests.rs`:
+Four tests in `crates/dugite-ledger/src/state/tests.rs`:
 - `test_treasury_mismatch_does_not_abort_apply_block`
 - `test_treasury_mismatch_no_cascade_in_downstream_block`
 - `test_unelected_committee_member_does_not_abort_apply_block`

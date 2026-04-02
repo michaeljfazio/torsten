@@ -24,10 +24,10 @@ cargo build --all-targets
 cargo nextest run --workspace
 
 # Run tests for a single crate
-cargo nextest run -p torsten-ledger
+cargo nextest run -p dugite-ledger
 
 # Run a single test by name
-cargo nextest run -p torsten-ledger -E 'test(test_name)'
+cargo nextest run -p dugite-ledger -E 'test(test_name)'
 
 # Run doc tests (nextest doesn't support these yet)
 cargo test --doc
@@ -57,20 +57,20 @@ The storage layer is pure Rust with no system dependencies. cardano-lsm (used fo
 14-crate Cargo workspace under `crates/`. Dependency flow:
 
 ```
-torsten-node (binary: main node, config, pipelined sync, Mithril import, block forging)
-├── torsten-network (Ouroboros mini-protocols, N2N/N2C multiplexer, pipelined client)
-├── torsten-consensus (Ouroboros Praos, chain selection, epoch transitions, VRF leader check)
-├── torsten-ledger (UTxO set via UTxO-HD, tx validation, ledger state, certificates, rewards, governance)
-├── torsten-storage (ChainDB = ImmutableDB append-only chunk files + VolatileDB in-memory)
-└── torsten-mempool (thread-safe tx mempool with input-conflict checking and TTL sweep)
+dugite-node (binary: main node, config, pipelined sync, Mithril import, block forging)
+├── dugite-network (Ouroboros mini-protocols, N2N/N2C multiplexer, pipelined client)
+├── dugite-consensus (Ouroboros Praos, chain selection, epoch transitions, VRF leader check)
+├── dugite-ledger (UTxO set via UTxO-HD, tx validation, ledger state, certificates, rewards, governance)
+├── dugite-storage (ChainDB = ImmutableDB append-only chunk files + VolatileDB in-memory)
+└── dugite-mempool (thread-safe tx mempool with input-conflict checking and TTL sweep)
 
-torsten-cli (binary: cardano-cli compatible, 38+ subcommands)
-torsten-monitor (binary: terminal monitoring dashboard, ratatui-based, real-time metrics)
-torsten-config (binary: interactive TUI configuration editor with tree navigation, inline editing, diff view)
+dugite-cli (binary: cardano-cli compatible, 38+ subcommands)
+dugite-monitor (binary: terminal monitoring dashboard, ratatui-based, real-time metrics)
+dugite-config (binary: interactive TUI configuration editor with tree navigation, inline editing, diff view)
 
-torsten-serialization (CBOR encode/decode via pallas)
-torsten-crypto (Ed25519, VRF, KES, text envelope)
-torsten-primitives (core types: hashes, blocks, txs, addresses, values, protocol params, all eras)
+dugite-serialization (CBOR encode/decode via pallas)
+dugite-crypto (Ed25519, VRF, KES, text envelope)
+dugite-primitives (core types: hashes, blocks, txs, addresses, values, protocol params, all eras)
 ```
 
 ### Key Traits & Abstractions
@@ -90,7 +90,7 @@ torsten-primitives (core types: hashes, blocks, txs, addresses, values, protocol
 - ChainDB write happens BEFORE ledger apply to prevent divergence on failure
 - Epoch transitions use mark/set/go snapshot model with reward distribution from "go" snapshot
 - Governance ratification: DRep/SPO/CC voting thresholds vary by action type (CIP-1694)
-- Pipelined ChainSync bypasses pallas serial state machine; default pipeline depth 300 (configurable via `TORSTEN_PIPELINE_DEPTH`)
+- Pipelined ChainSync bypasses pallas serial state machine; default pipeline depth 300 (configurable via `DUGITE_PIPELINE_DEPTH`)
 - Ledger-based peer discovery: extracts SPO relay addresses from `pool_params` when past `useLedgerAfterSlot`
 - Pallas 1.0: `DatumOption` (was `PseudoDatumOption`), `Option<T>` (was `Nullable<T>`)
 - Pallas 28-byte hash types (DRep keys, pool voter keys, required signers) must be padded to 32 bytes — do not use `Hash<32>::from()` directly on 28-byte hashes
@@ -102,11 +102,11 @@ Soak testing on preview testnet (Sandstone Pool [SAND], pool ID 6954ec11cf7097a6
 
 ```bash
 # Fast sync with Mithril snapshot (preview testnet, magic=2)
-./target/release/torsten-node mithril-import \
+./target/release/dugite-node mithril-import \
   --network-magic 2 --database-path ./db-preview
 
 # Run the node
-./target/release/torsten-node run \
+./target/release/dugite-node run \
   --config config/preview-config.json \
   --topology config/preview-topology.json \
   --database-path ./db-preview \

@@ -61,7 +61,7 @@ but ppuTag numbers in PParamsUpdate map stayed the same.
 - **PoolVotingThresholds**: array(5) Tag30 rationals: [motionNoConfidence, committeeNormal, committeeNoConfidence, hardForkInitiation, ppSecurityGroup]
 - **DRepVotingThresholds**: array(10) Tag30 rationals: [motionNoConfidence, committeeNormal, committeeNoConfidence, updateConstitution, hardForkInitiation, ppNetworkGroup, ppEconomicGroup, ppTechnicalGroup, ppGovGroup, treasuryWithdrawal]
 
-## Known Torsten Bugs (as of 2026-03-09)
+## Known Dugite Bugs (as of 2026-03-09)
 1. encode_protocol_params_cbor uses map encoding, should be array(31)
 2. DRep voting thresholds reuse dvt_p_param_change for all 4 PP group thresholds
 3. ProtocolParamsSnapshot missing separate dvt_pp_network/economic/technical/governance fields

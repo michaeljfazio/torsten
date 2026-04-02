@@ -1,0 +1,23 @@
+[package]
+name = "dugite-mempool"
+version.workspace = true
+edition.workspace = true
+description = "Transaction mempool for Dugite"
+
+[dependencies]
+dugite-primitives = { workspace = true }
+dugite-ledger = { workspace = true }
+dugite-crypto = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "mempool_bench"
+harness = false

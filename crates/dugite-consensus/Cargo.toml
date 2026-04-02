@@ -1,0 +1,28 @@
+[package]
+name = "dugite-consensus"
+version.workspace = true
+edition.workspace = true
+description = "Ouroboros Praos consensus for Dugite"
+
+[dependencies]
+dugite-primitives = { workspace = true }
+dugite-crypto = { workspace = true }
+dugite-serialization = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+num-bigint = { workspace = true }
+num-rational = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }
+minicbor = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+proptest = { workspace = true }
+serde_json = { workspace = true }

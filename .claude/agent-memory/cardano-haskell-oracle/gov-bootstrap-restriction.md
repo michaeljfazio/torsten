@@ -27,7 +27,7 @@ isBootstrapAction =
 
 ## Common Mistake
 
-An earlier Torsten implementation had the sets inverted: it allowed `NoConfidence/UpdateCommittee/NewConstitution`
+An earlier Dugite implementation had the sets inverted: it allowed `NoConfidence/UpdateCommittee/NewConstitution`
 and rejected `ParameterChange/HardForkInitiation/TreasuryWithdrawals` — exactly backwards.
 
 The correct check pattern:

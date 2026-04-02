@@ -1,6 +1,6 @@
 # Networking
 
-Torsten implements the full Ouroboros network protocol stack, supporting both Node-to-Node (N2N) and Node-to-Client (N2C) communication.
+Dugite implements the full Ouroboros network protocol stack, supporting both Node-to-Node (N2N) and Node-to-Client (N2C) communication.
 
 ## Protocol Stack
 
@@ -221,7 +221,7 @@ Monitors the transaction mempool:
 
 ## P2P Networking
 
-Torsten implements the full Ouroboros P2P peer selection governor, enabled by default (`EnableP2P: true`). The governor manages peer connections through a target-driven state machine that continuously maintains optimal connectivity.
+Dugite implements the full Ouroboros P2P peer selection governor, enabled by default (`EnableP2P: true`). The governor manages peer connections through a target-driven state machine that continuously maintains optimal connectivity.
 
 ### Diffusion Mode
 
@@ -341,12 +341,12 @@ The P2P subsystem exports the following metrics:
 
 | Metric | Description |
 |--------|-------------|
-| `torsten_p2p_enabled` | Whether P2P governance is active (gauge: 0 or 1) |
-| `torsten_diffusion_mode` | Current diffusion mode (0=InitiatorOnly, 1=InitiatorAndResponder) |
-| `torsten_peer_sharing_enabled` | Whether peer sharing is active (gauge: 0 or 1) |
-| `torsten_peers_cold` | Number of cold (known, unconnected) peers |
-| `torsten_peers_warm` | Number of warm (established) peers |
-| `torsten_peers_hot` | Number of hot (active) peers |
+| `dugite_p2p_enabled` | Whether P2P governance is active (gauge: 0 or 1) |
+| `dugite_diffusion_mode` | Current diffusion mode (0=InitiatorOnly, 1=InitiatorAndResponder) |
+| `dugite_peer_sharing_enabled` | Whether peer sharing is active (gauge: 0 or 1) |
+| `dugite_peers_cold` | Number of cold (known, unconnected) peers |
+| `dugite_peers_warm` | Number of warm (established) peers |
+| `dugite_peers_hot` | Number of hot (active) peers |
 
 ### Peer Discovery
 
@@ -374,7 +374,7 @@ As pool registrations change over time (new pools register, existing pools updat
 
 ## Block Relay
 
-Torsten implements full relay node behavior, propagating blocks received from upstream peers to all downstream N2N connections. This ensures that blocks flow through the network without requiring every node to sync directly from the block producer.
+Dugite implements full relay node behavior, propagating blocks received from upstream peers to all downstream N2N connections. This ensures that blocks flow through the network without requiring every node to sync directly from the block producer.
 
 ### Broadcast Architecture
 

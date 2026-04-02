@@ -1,14 +1,14 @@
-# Configuration Editor (torsten-config)
+# Configuration Editor (dugite-config)
 
-`torsten-config` is a standalone TUI tool for creating and editing Torsten configuration files interactively. It provides a full-screen terminal interface with tree navigation, inline editing, type validation, and a diff view — no need to remember field names or look up valid ranges.
+`dugite-config` is a standalone TUI tool for creating and editing Dugite configuration files interactively. It provides a full-screen terminal interface with tree navigation, inline editing, type validation, and a diff view — no need to remember field names or look up valid ranges.
 
 ## Installation
 
-`torsten-config` is built as part of the standard workspace:
+`dugite-config` is built as part of the standard workspace:
 
 ```bash
-cargo build --release -p torsten-config
-cp target/release/torsten-config /usr/local/bin/
+cargo build --release -p dugite-config
+cp target/release/dugite-config /usr/local/bin/
 ```
 
 ## Commands
@@ -26,7 +26,7 @@ cp target/release/torsten-config /usr/local/bin/
 Create a new configuration file, guided step by step:
 
 ```bash
-torsten-config init --out-file config.json
+dugite-config init --out-file config.json
 ```
 
 The init wizard prompts for the network (mainnet/preview/preprod), genesis file paths, P2P targets, and tracing options, then writes a validated JSON file.
@@ -36,7 +36,7 @@ The init wizard prompts for the network (mainnet/preview/preprod), genesis file 
 Launch the full-screen interactive editor:
 
 ```bash
-torsten-config edit config.json
+dugite-config edit config.json
 ```
 
 ### validate
@@ -44,7 +44,7 @@ torsten-config edit config.json
 Check a configuration file for errors without modifying it:
 
 ```bash
-torsten-config validate config.json
+dugite-config validate config.json
 ```
 
 Output on success:
@@ -67,19 +67,19 @@ Non-interactive field access for scripting:
 
 ```bash
 # Get a field
-torsten-config get config.json TargetNumberOfActivePeers
+dugite-config get config.json TargetNumberOfActivePeers
 # Output: 20
 
 # Set a field
-torsten-config set config.json TargetNumberOfActivePeers 30
+dugite-config set config.json TargetNumberOfActivePeers 30
 
 # Set a nested field
-torsten-config set config.json TraceOptions.TraceForge true
+dugite-config set config.json TraceOptions.TraceForge true
 ```
 
 ## Interactive Editor
 
-The interactive editor (`torsten-config edit`) renders a full-screen TUI with three panes:
+The interactive editor (`dugite-config edit`) renders a full-screen TUI with three panes:
 
 ```
 ┌─ Fields ──────────────────────┬─ Value ───────────┬─ Hints ───────────────────────────┐
@@ -138,7 +138,7 @@ Press `d` to toggle the diff view, which shows a side-by-side comparison of the 
 
 ## Scripted Workflows
 
-`torsten-config` can be used in deployment scripts for automated configuration management:
+`dugite-config` can be used in deployment scripts for automated configuration management:
 
 ```bash
 #!/usr/bin/env bash
@@ -146,7 +146,7 @@ Press `d` to toggle the diff view, which shows a side-by-side comparison of the 
 
 CONFIG="config/preview-config.json"
 
-torsten-config init --out-file "$CONFIG" \
+dugite-config init --out-file "$CONFIG" \
   --network Testnet \
   --network-magic 2 \
   --shelley-genesis shelley-genesis.json \
@@ -154,10 +154,10 @@ torsten-config init --out-file "$CONFIG" \
   --alonzo-genesis alonzo-genesis.json \
   --conway-genesis conway-genesis.json
 
-torsten-config set "$CONFIG" EnableP2P true
-torsten-config set "$CONFIG" DiffusionMode InitiatorAndResponder
-torsten-config set "$CONFIG" TargetNumberOfActivePeers 15
-torsten-config set "$CONFIG" TargetNumberOfEstablishedPeers 40
-torsten-config set "$CONFIG" TargetNumberOfKnownPeers 85
-torsten-config validate "$CONFIG"
+dugite-config set "$CONFIG" EnableP2P true
+dugite-config set "$CONFIG" DiffusionMode InitiatorAndResponder
+dugite-config set "$CONFIG" TargetNumberOfActivePeers 15
+dugite-config set "$CONFIG" TargetNumberOfEstablishedPeers 40
+dugite-config set "$CONFIG" TargetNumberOfKnownPeers 85
+dugite-config validate "$CONFIG"
 ```

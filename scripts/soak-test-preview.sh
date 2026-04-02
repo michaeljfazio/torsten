@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Torsten 12-Hour Soak Test — Preview Network Block Producer
+# Dugite 12-Hour Soak Test — Preview Network Block Producer
 # =============================================================================
 #
 # This script orchestrates a long-running soak test that:
@@ -13,7 +13,7 @@
 # Usage: ./scripts/soak-test-preview.sh [--duration HOURS] [--restart-interval MINUTES]
 #
 # Prerequisites:
-#   - cargo build --release (binary at ./target/release/torsten-node)
+#   - cargo build --release (binary at ./target/release/dugite-node)
 #   - Keys in ./keys/preview-test/pool/
 #   - Database in ./db-preview/ (will mithril-import if missing)
 # =============================================================================
@@ -33,8 +33,8 @@ SOCKET_PATH="./node.sock"
 DB_PATH="./db-preview"
 KEY_DIR="./keys/preview-test"
 POOL_KEY_DIR="$KEY_DIR/pool"
-BIN="./target/release/torsten-node"
-CLI="./target/release/torsten-cli"
+BIN="./target/release/dugite-node"
+CLI="./target/release/dugite-cli"
 LOG_DIR="./logs/soak-test"
 REPORT_FILE="$LOG_DIR/soak-report-$(date +%Y%m%d-%H%M%S).log"
 NODE_LOG="$LOG_DIR/node.log"
@@ -128,13 +128,13 @@ trap cleanup EXIT INT TERM
 # Node management
 # ---------------------------------------------------------------------------
 start_node() {
-    log INFO "Starting torsten-node as block producer..."
+    log INFO "Starting dugite-node as block producer..."
 
-    # Ensure no stale torsten-node processes are running
+    # Ensure no stale dugite-node processes are running
     local stale_pid
-    stale_pid=$(pgrep -f "torsten-node run" || true)
+    stale_pid=$(pgrep -f "dugite-node run" || true)
     if [[ -n "$stale_pid" ]]; then
-        log WARN "Killing stale torsten-node process ($stale_pid)"
+        log WARN "Killing stale dugite-node process ($stale_pid)"
         kill -KILL "$stale_pid" 2>/dev/null || true
         sleep 2
     fi
@@ -290,17 +290,17 @@ check_metrics() {
     # Helper: extract a single metric value, defaulting to "?" on failure
     _m() { echo "$metrics" | grep "^$1 " | head -1 | awk '{print $2}'; }
 
-    sync_pct=$(_m torsten_sync_progress_percent)
-    block_height=$(_m torsten_block_number)
-    slot_num=$(_m torsten_slot_number)
-    epoch_num=$(_m torsten_epoch_number)
-    peer_count=$(_m torsten_peers_connected)
-    utxo_count=$(_m torsten_utxo_count)
-    mempool_tx=$(_m torsten_mempool_tx_count)
-    mempool_bytes=$(_m torsten_mempool_bytes)
-    blocks_applied=$(_m torsten_blocks_applied_total)
-    blocks_forged=$(_m torsten_blocks_forged_total)
-    rollbacks=$(_m torsten_rollback_count_total)
+    sync_pct=$(_m dugite_sync_progress_percent)
+    block_height=$(_m dugite_block_number)
+    slot_num=$(_m dugite_slot_number)
+    epoch_num=$(_m dugite_epoch_number)
+    peer_count=$(_m dugite_peers_connected)
+    utxo_count=$(_m dugite_utxo_count)
+    mempool_tx=$(_m dugite_mempool_tx_count)
+    mempool_bytes=$(_m dugite_mempool_bytes)
+    blocks_applied=$(_m dugite_blocks_applied_total)
+    blocks_forged=$(_m dugite_blocks_forged_total)
+    rollbacks=$(_m dugite_rollback_count_total)
 
     # Default empty to "?"
     : "${sync_pct:=?}" "${block_height:=?}" "${slot_num:=?}" "${epoch_num:=?}"
@@ -309,7 +309,7 @@ check_metrics() {
 
     # Get memory usage (RSS)
     local rss_bytes
-    rss_bytes=$(_m torsten_mem_resident_bytes)
+    rss_bytes=$(_m dugite_mem_resident_bytes)
     : "${rss_bytes:=0}"
     local rss_mb="?"
     if [[ "$rss_bytes" != "0" && "$rss_bytes" != "?" ]]; then
@@ -371,7 +371,7 @@ check_logs_for_errors() {
     [[ -f "$NODE_LOG" ]] && log_files+=("$NODE_LOG")
     # Also check the most recent tracing log file in LOG_DIR
     local latest_log
-    latest_log=$(ls -t "$LOG_DIR"/torsten-*.log 2>/dev/null | head -1)
+    latest_log=$(ls -t "$LOG_DIR"/dugite-*.log 2>/dev/null | head -1)
     [[ -n "$latest_log" ]] && log_files+=("$latest_log")
 
     if [[ ${#log_files[@]} -eq 0 ]]; then
@@ -659,7 +659,7 @@ submit_valid_tx_with_metadata() {
     cat > "$metadata_file" <<METAEOF
 {
     "674": {
-        "msg": ["Torsten soak test tx $(date +%H:%M:%S)", "restart #$RESTART_COUNT"]
+        "msg": ["Dugite soak test tx $(date +%H:%M:%S)", "restart #$RESTART_COUNT"]
     }
 }
 METAEOF
@@ -1037,10 +1037,10 @@ for f in kes.skey vrf.skey opcert.cert; do
     fi
 done
 
-# Kill any existing torsten-node process
-existing_pid=$(pgrep -f "torsten-node run" || true)
+# Kill any existing dugite-node process
+existing_pid=$(pgrep -f "dugite-node run" || true)
 if [[ -n "$existing_pid" ]]; then
-    log WARN "Killing existing torsten-node process ($existing_pid)"
+    log WARN "Killing existing dugite-node process ($existing_pid)"
     kill -TERM "$existing_pid" 2>/dev/null || true
     sleep 3
     kill -KILL "$existing_pid" 2>/dev/null || true

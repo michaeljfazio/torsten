@@ -1,28 +1,28 @@
 # Quick Start
 
-This guide walks you through getting Torsten running on the Cardano preview testnet.
+This guide walks you through getting Dugite running on the Cardano preview testnet.
 
 ## 1. Install
 
 **Option A: Pre-built binary** (fastest)
 
 ```bash
-curl -LO https://github.com/michaeljfazio/torsten/releases/latest/download/torsten-x86_64-linux.tar.gz
-tar xzf torsten-x86_64-linux.tar.gz
-sudo mv torsten-node torsten-cli torsten-monitor torsten-config /usr/local/bin/
+curl -LO https://github.com/michaeljfazio/dugite/releases/latest/download/dugite-x86_64-linux.tar.gz
+tar xzf dugite-x86_64-linux.tar.gz
+sudo mv dugite-node dugite-cli dugite-monitor dugite-config /usr/local/bin/
 ```
 
 **Option B: Container image**
 
 ```bash
-docker pull ghcr.io/michaeljfazio/torsten:latest
+docker pull ghcr.io/michaeljfazio/dugite:latest
 ```
 
 **Option C: Build from source**
 
 ```bash
-git clone https://github.com/michaeljfazio/torsten.git
-cd torsten
+git clone https://github.com/michaeljfazio/dugite.git
+cd dugite
 cargo build --release
 ```
 
@@ -31,7 +31,7 @@ cargo build --release
 Import a Mithril-certified snapshot to skip syncing millions of blocks from genesis:
 
 ```bash
-torsten-node mithril-import \
+dugite-node mithril-import \
   --network-magic 2 \
   --database-path ./db-preview
 ```
@@ -40,10 +40,10 @@ This downloads the latest snapshot from the Mithril aggregator, extracts it, and
 
 ## 3. Run the Node
 
-Torsten ships with configuration files for all networks. If you built from source, they are in the `config/` directory:
+Dugite ships with configuration files for all networks. If you built from source, they are in the `config/` directory:
 
 ```bash
-torsten-node run \
+dugite-node run \
   --config config/preview-config.json \
   --topology config/preview-topology.json \
   --database-path ./db-preview \
@@ -56,11 +56,11 @@ Or with Docker:
 
 ```bash
 docker run -d \
-  --name torsten \
+  --name dugite \
   -p 3001:3001 \
   -p 12798:12798 \
-  -v torsten-data:/opt/torsten/db \
-  ghcr.io/michaeljfazio/torsten:latest
+  -v dugite-data:/opt/dugite/db \
+  ghcr.io/michaeljfazio/dugite:latest
 ```
 
 The node will:
@@ -69,7 +69,7 @@ The node will:
 3. Connect to preview testnet peers
 4. Sync remaining blocks to chain tip
 
-Progress is logged every 5 seconds, showing sync percentage, blocks-per-second throughput, UTxO count, and epoch number. Logs go to stdout by default; add `--log-output file --log-dir /var/log/torsten` for file logging. See [Logging](./running/logging.md) for all options.
+Progress is logged every 5 seconds, showing sync percentage, blocks-per-second throughput, UTxO count, and epoch number. Logs go to stdout by default; add `--log-output file --log-dir /var/log/dugite` for file logging. See [Logging](./running/logging.md) for all options.
 
 ## 4. Query the Node
 
@@ -77,7 +77,7 @@ Once the node is running, query it using the CLI via the Unix domain socket:
 
 ```bash
 # Query the current tip
-torsten-cli query tip \
+dugite-cli query tip \
   --socket-path ./node.sock \
   --testnet-magic 2
 ```
@@ -97,12 +97,12 @@ Example output:
 
 ```bash
 # Query protocol parameters
-torsten-cli query protocol-parameters \
+dugite-cli query protocol-parameters \
   --socket-path ./node.sock \
   --testnet-magic 2
 
 # Query mempool
-torsten-cli query tx-mempool info \
+dugite-cli query tx-mempool info \
   --socket-path ./node.sock \
   --testnet-magic 2
 ```

@@ -6,13 +6,13 @@
 | ------- | ------------------ |
 | main    | :white_check_mark: |
 
-Torsten is in active development. Security fixes are applied to the `main` branch.
+Dugite is in active development. Security fixes are applied to the `main` branch.
 
 ## Reporting a Vulnerability
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, use [GitHub's private vulnerability reporting](https://github.com/michaeljfazio/torsten/security/advisories/new) to report security issues confidentially.
+Instead, use [GitHub's private vulnerability reporting](https://github.com/michaeljfazio/dugite/security/advisories/new) to report security issues confidentially.
 
 You should receive a response within 48 hours. If the issue is confirmed, we will:
 1. Work on a fix in a private branch
@@ -40,7 +40,7 @@ The following are in scope for security reports:
 ## Security Practices
 
 - All code is compiled with `RUSTFLAGS="-D warnings"` (zero tolerance for compiler warnings)
-- No `unsafe` code blocks in the Torsten codebase
+- No `unsafe` code blocks in the Dugite codebase
 - Dependabot security alerts and automated fixes are enabled
 - Secret scanning with push protection is enabled
 - All cryptographic operations use established libraries (ed25519-dalek, blake2, pallas-crypto)

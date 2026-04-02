@@ -1,6 +1,6 @@
 # Topology
 
-The topology file defines the peers that the node connects to. Torsten supports the full cardano-node 10.x+ P2P topology format.
+The topology file defines the peers that the node connects to. Dugite supports the full cardano-node 10.x+ P2P topology format.
 
 ## Topology File Format
 
@@ -188,10 +188,10 @@ A relay node that maintains a connection to your block producer:
 
 ## SIGHUP Topology Reload
 
-Torsten supports live topology reloading. Send a `SIGHUP` signal to the running node process, and it will re-read the topology file and update the peer manager with the new configuration:
+Dugite supports live topology reloading. Send a `SIGHUP` signal to the running node process, and it will re-read the topology file and update the peer manager with the new configuration:
 
 ```bash
-kill -HUP $(pidof torsten-node)
+kill -HUP $(pidof dugite-node)
 ```
 
 This allows you to add or remove peers without restarting the node.

@@ -1,0 +1,20 @@
+[package]
+name = "dugite-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal UI dashboard for the Dugite Cardano node"
+
+[[bin]]
+name = "dugite-monitor"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+libc = { workspace = true }

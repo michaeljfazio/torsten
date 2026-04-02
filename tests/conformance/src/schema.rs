@@ -152,7 +152,7 @@ pub struct TxOutput {
 /// Simplified address for test vectors.
 ///
 /// The formal spec uses abstract addresses. We use a simplified representation
-/// that maps to Torsten's address types.
+/// that maps to Dugite's address types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum TestAddress {

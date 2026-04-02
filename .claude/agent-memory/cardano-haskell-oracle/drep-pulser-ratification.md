@@ -273,9 +273,9 @@ data RatifyState era = RatifyState
 
 ---
 
-## 6. Torsten Divergence — The Bug
+## 6. Dugite Divergence — The Bug
 
-Torsten evaluates ratification against **live ledger state** each epoch boundary instead of the **frozen epoch-boundary snapshot**.
+Dugite evaluates ratification against **live ledger state** each epoch boundary instead of the **frozen epoch-boundary snapshot**.
 
 ### What must be fixed:
 
@@ -291,7 +291,7 @@ Torsten evaluates ratification against **live ledger state** each epoch boundary
 
 6. **RATIFY input**: proposals passed to RATIFY must be `reorderActions(dpProposals)` — the snapshot proposals sorted by `actionPriority`, not the live proposals.
 
-### Correct epoch-boundary sequence in Torsten:
+### Correct epoch-boundary sequence in Dugite:
 
 ```
 epoch_transition(epoch_state, new_epoch_no):

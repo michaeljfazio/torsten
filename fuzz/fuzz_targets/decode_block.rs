@@ -8,5 +8,5 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // Should never panic, regardless of input
-    let _ = torsten_serialization::decode_block(data);
+    let _ = dugite_serialization::decode_block(data);
 });

@@ -1,16 +1,16 @@
 #!/bin/bash
-# Stress test: submit 5000 valid transactions to local torsten-node as fast as possible.
+# Stress test: submit 5000 valid transactions to local dugite-node as fast as possible.
 #
 # Strategy:
 #   - Use 50 UTxO chains (from existing 101 UTxOs), 100 chained txs per chain
 #   - Each tx sends (input - fee) back to our own address
 #   - Build all txs offline first (chaining outputs), then submit in rapid-fire
 #
-# Requirements: cardano-cli, torsten-cli, jq
+# Requirements: cardano-cli, dugite-cli, jq
 
 set -uo pipefail
 
-CLI="./target/release/torsten-cli"
+CLI="./target/release/dugite-cli"
 CCLI="cardano-cli"
 SOCKET="./node.sock"
 MAGIC=2
@@ -22,7 +22,7 @@ TOTAL=$((CHAINS * CHAIN_LEN))
 FEE=180000       # Conservative fee (44 * ~500 bytes + 155381 ≈ 177381, round up)
 WORK_DIR="/tmp/stress-test-5k"
 
-echo "=== Torsten 5K TX Stress Test ==="
+echo "=== Dugite 5K TX Stress Test ==="
 echo "Chains: $CHAINS x $CHAIN_LEN = $TOTAL transactions"
 echo "Address: $ADDR"
 echo ""

@@ -1,14 +1,14 @@
 [package]
-name = "torsten-conformance"
+name = "dugite-conformance"
 version.workspace = true
 edition.workspace = true
-description = "Formal ledger specification conformance tests for Torsten"
+description = "Formal ledger specification conformance tests for Dugite"
 
 [dependencies]
-torsten-primitives = { workspace = true }
-torsten-crypto = { workspace = true }
-torsten-serialization = { workspace = true }
-torsten-ledger = { workspace = true }
+dugite-primitives = { workspace = true }
+dugite-crypto = { workspace = true }
+dugite-serialization = { workspace = true }
+dugite-ledger = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

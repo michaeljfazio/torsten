@@ -1,40 +1,40 @@
 # Architecture Overview
 
-Torsten is organized as a 14-crate Cargo workspace. Each crate has a focused responsibility and well-defined dependencies.
+Dugite is organized as a 14-crate Cargo workspace. Each crate has a focused responsibility and well-defined dependencies.
 
 ## Crate Workspace
 
 | Crate | Description |
 |-------|-------------|
-| `torsten-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron through Conway) |
-| `torsten-crypto` | Ed25519 keys, VRF, KES, text envelope format |
-| `torsten-serialization` | CBOR encoding/decoding for Cardano wire format via pallas |
-| `torsten-lsm` | Pure Rust LSM-tree engine with WAL, compaction, bloom filters, and snapshots |
-| `torsten-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N client/server, N2C server, multi-peer block fetch pool |
-| `torsten-consensus` | Ouroboros Praos, chain selection, epoch transitions, slot leader checks |
-| `torsten-ledger` | UTxO set (LSM-backed via UTxO-HD), transaction validation, ledger state, certificate processing, native script evaluation, reward calculation |
-| `torsten-mempool` | Thread-safe transaction mempool with input-conflict checking and TTL sweep |
-| `torsten-storage` | ChainDB (ImmutableDB append-only chunk files + VolatileDB in-memory) |
-| `torsten-node` | Main binary, config, topology, pipelined chain sync loop, Mithril import, block forging |
-| `torsten-cli` | cardano-cli compatible CLI (38+ subcommands) |
-| `torsten-monitor` | Terminal monitoring dashboard (ratatui-based, real-time metrics via Prometheus polling) |
-| `torsten-config` | Interactive TUI configuration editor with tree navigation, inline editing, type validation, and diff view |
+| `dugite-primitives` | Core types: hashes, blocks, transactions, addresses, values, protocol parameters (Byron through Conway) |
+| `dugite-crypto` | Ed25519 keys, VRF, KES, text envelope format |
+| `dugite-serialization` | CBOR encoding/decoding for Cardano wire format via pallas |
+| `dugite-lsm` | Pure Rust LSM-tree engine with WAL, compaction, bloom filters, and snapshots |
+| `dugite-network` | Ouroboros mini-protocols (ChainSync, BlockFetch, TxSubmission, KeepAlive), N2N client/server, N2C server, multi-peer block fetch pool |
+| `dugite-consensus` | Ouroboros Praos, chain selection, epoch transitions, slot leader checks |
+| `dugite-ledger` | UTxO set (LSM-backed via UTxO-HD), transaction validation, ledger state, certificate processing, native script evaluation, reward calculation |
+| `dugite-mempool` | Thread-safe transaction mempool with input-conflict checking and TTL sweep |
+| `dugite-storage` | ChainDB (ImmutableDB append-only chunk files + VolatileDB in-memory) |
+| `dugite-node` | Main binary, config, topology, pipelined chain sync loop, Mithril import, block forging |
+| `dugite-cli` | cardano-cli compatible CLI (38+ subcommands) |
+| `dugite-monitor` | Terminal monitoring dashboard (ratatui-based, real-time metrics via Prometheus polling) |
+| `dugite-config` | Interactive TUI configuration editor with tree navigation, inline editing, type validation, and diff view |
 
 ## Crate Dependency Graph
 
 ```mermaid
 graph TD
-    NODE[torsten-node] --> NET[torsten-network]
-    NODE --> CONS[torsten-consensus]
-    NODE --> LEDGER[torsten-ledger]
-    NODE --> STORE[torsten-storage]
-    NODE --> POOL[torsten-mempool]
-    CLI[torsten-cli] --> NET
-    CLI --> PRIM[torsten-primitives]
-    CLI --> CRYPTO[torsten-crypto]
-    CLI --> SER[torsten-serialization]
-    MON[torsten-monitor] --> PRIM
-    CFG[torsten-config] --> PRIM
+    NODE[dugite-node] --> NET[dugite-network]
+    NODE --> CONS[dugite-consensus]
+    NODE --> LEDGER[dugite-ledger]
+    NODE --> STORE[dugite-storage]
+    NODE --> POOL[dugite-mempool]
+    CLI[dugite-cli] --> NET
+    CLI --> PRIM[dugite-primitives]
+    CLI --> CRYPTO[dugite-crypto]
+    CLI --> SER[dugite-serialization]
+    MON[dugite-monitor] --> PRIM
+    CFG[dugite-config] --> PRIM
     NET --> PRIM
     NET --> CRYPTO
     NET --> SER
@@ -44,7 +44,7 @@ graph TD
     LEDGER --> PRIM
     LEDGER --> CRYPTO
     LEDGER --> SER
-    LEDGER --> LSM[torsten-lsm]
+    LEDGER --> LSM[dugite-lsm]
     STORE --> PRIM
     STORE --> SER
     POOL --> PRIM
@@ -54,7 +54,7 @@ graph TD
 
 ## Key Dependencies
 
-Torsten leverages the [pallas](https://github.com/txpipe/pallas) family of crates (v1.0.0-alpha.5) for Cardano wire-format compatibility:
+Dugite leverages the [pallas](https://github.com/txpipe/pallas) family of crates (v1.0.0-alpha.5) for Cardano wire-format compatibility:
 
 - **pallas-network** — Ouroboros multiplexer and handshake
 - **pallas-codec** — CBOR encoding/decoding
@@ -66,7 +66,7 @@ Torsten leverages the [pallas](https://github.com/txpipe/pallas) family of crate
 Other key dependencies:
 
 - **tokio** — Async runtime
-- **torsten-lsm** — Pure Rust LSM tree for the on-disk UTxO set (UTxO-HD)
+- **dugite-lsm** — Pure Rust LSM tree for the on-disk UTxO set (UTxO-HD)
 - **minicbor** — CBOR encoding for custom types
 - **ed25519-dalek** — Ed25519 signatures
 - **blake2b_simd** — SIMD-accelerated Blake2b hashing
@@ -82,7 +82,7 @@ All code must compile with `RUSTFLAGS="-D warnings"` and pass `cargo clippy --al
 
 ### Pallas Interoperability
 
-Torsten uses pallas for network protocol handling and block deserialization, ensuring wire-format compatibility with cardano-node. Internal types (in `torsten-primitives`) are converted from pallas types during deserialization.
+Dugite uses pallas for network protocol handling and block deserialization, ensuring wire-format compatibility with cardano-node. Internal types (in `dugite-primitives`) are converted from pallas types during deserialization.
 
 Key conversion patterns:
 - `Transaction.hash` is set during deserialization from `pallas tx.hash()`
@@ -92,4 +92,4 @@ Key conversion patterns:
 
 ### Multi-Era Support
 
-Torsten handles all Cardano eras from Byron through Conway. The serialization layer handles era-specific block formats transparently, while the ledger layer applies era-appropriate validation rules.
+Dugite handles all Cardano eras from Byron through Conway. The serialization layer handles era-specific block formats transparently, while the ledger layer applies era-appropriate validation rules.

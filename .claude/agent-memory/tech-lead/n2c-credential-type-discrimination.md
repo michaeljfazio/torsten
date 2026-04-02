@@ -35,7 +35,7 @@ Two `HashSet<Hash32>` fields track which credential hashes are of script type:
 `credential_type` can be derived directly: `drep.credential.is_script() as u8`.
 No separate set needed for DReps.
 
-## N2C query responses fixed (in crates/torsten-node/src/node.rs)
+## N2C query responses fixed (in crates/dugite-node/src/node.rs)
 
 | Query | Field | Fix |
 |-------|-------|-----|
