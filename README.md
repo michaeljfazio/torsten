@@ -365,6 +365,14 @@ The soak test script (`scripts/soak-test.sh`) automates:
 
 Results from each soak run are logged with timestamps and compared against the previous run to detect regressions.
 
+## Acknowledgments
+
+Special thanks to the following individuals for their contributions and support:
+
+- **Andrew Westberg** (BCSH)
+- **Samuel Leathers**
+- **Homer J** (AAA)
+
 ## License
 
 Apache-2.0
