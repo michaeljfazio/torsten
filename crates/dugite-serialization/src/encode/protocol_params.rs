@@ -248,23 +248,6 @@ mod tests {
         Rational { numerator: n, denominator: d }
     }
 
-    /// Expected CBOR bytes for a Rational encoded as tag(30) + array(2) + [num, den].
-    ///
-    /// tag 30  = 0xd8 0x1e
-    /// array(2) = 0x82
-    #[allow(dead_code)]
-    fn cbor_rational(n: u64, d: u64) -> Vec<u8> {
-        // tag 30
-        let mut v = vec![0xd8, 0x1e];
-        // array(2)
-        v.push(0x82);
-        // numerator
-        v.extend(crate::cbor::encode_uint(n));
-        // denominator
-        v.extend(crate::cbor::encode_uint(d));
-        v
-    }
-
     // ── empty map ────────────────────────────────────────────────────────────
 
     /// An all-None ProtocolParamUpdate must encode as CBOR map(0) = 0xa0.
@@ -593,13 +576,18 @@ mod tests {
         assert_eq!(encoded[1], 0x00, "PlutusV1 key = 0");
         // array(3) = 0x83
         assert_eq!(encoded[2], 0x83, "V1 array should have 3 elements");
-        // values 100, 200, 300 as uints
-        assert_eq!(encoded[3], 0x18);
-        assert_eq!(encoded[4], 100);
-        assert_eq!(encoded[5], 0x18);
-        assert_eq!(encoded[6], 200);
-        assert_eq!(encoded[7], 0x18);
-        assert_eq!(encoded[8], 44); // 300 = 0x12c → wait, 300 > 255, so 2-byte uint
+        // value 100 = 0x18 0x64 (1-byte uint)
+        assert_eq!(encoded[3], 0x18, "100 uses 1-byte uint prefix");
+        assert_eq!(encoded[4], 0x64, "100 = 0x64");
+
+        // value 200 = 0x18 0xc8
+        assert_eq!(encoded[5], 0x18, "200 uses 1-byte uint prefix");
+        assert_eq!(encoded[6], 0xc8, "200 = 0xc8");
+
+        // value 300 > 255, so uses 2-byte uint: 0x19 0x01 0x2c
+        assert_eq!(encoded[7], 0x19, "300 uses 2-byte uint prefix");
+        assert_eq!(encoded[8], 0x01, "300 high byte");
+        assert_eq!(encoded[9], 0x2c, "300 low byte (0x012c = 300)");
     }
 
     /// Cost models with V1, V2, and V3 must produce map(3) with keys 0, 1, 2.
