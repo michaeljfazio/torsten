@@ -98,7 +98,7 @@ anyhow = "1"
 # Misc
 bytes = "1"
 byteorder = "1"
-derive_more = { version = "1", features = ["display", "from"] }
+derive_more = { version = "2", features = ["display", "from"] }
 dashmap = "6"
 parking_lot = "0.12"
 num-bigint = "0.4"
