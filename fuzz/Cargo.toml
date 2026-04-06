@@ -31,18 +31,8 @@ path = "fuzz_targets/decode_transaction.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_mux_segment"
-path = "fuzz_targets/mux_segment.rs"
-doc = false
-
-[[bin]]
 name = "fuzz_nonce_update"
 path = "fuzz_targets/nonce_update.rs"
-doc = false
-
-[[bin]]
-name = "fuzz_n2c_query"
-path = "fuzz_targets/n2c_query.rs"
 doc = false
 
 [[bin]]

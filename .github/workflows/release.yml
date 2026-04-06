@@ -28,7 +28,7 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: dugite-aarch64-linux
-          - os: macos-latest
+          - os: macos-13
             target: x86_64-apple-darwin
             artifact: dugite-x86_64-macos
           - os: macos-latest

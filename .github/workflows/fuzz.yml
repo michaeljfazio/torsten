@@ -15,9 +15,7 @@ jobs:
         target:
           - decode_block
           - decode_transaction
-          - mux_segment
           - nonce_update
-          - n2c_query
           - handshake
           - chainsync_msg
           - protocol_params
