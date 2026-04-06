@@ -116,21 +116,27 @@ pub enum QueryResult {
     /// ```text
     /// array(2) [
     ///   0,              -- version number
-    ///   array(8) [
+    ///   array(7) [
     ///     lastSlot,             -- WithOrigin SlotNo: [0] or [1, slot]
     ///     ocertCounters,        -- Map<pool_hash, Word64>
     ///     evolvingNonce,        -- Nonce: [0] neutral or [1, hash32]
     ///     candidateNonce,       -- Nonce
     ///     epochNonce,           -- Nonce
-    ///     previousEpochNonce,   -- Nonce
     ///     labNonce,             -- Nonce (last-applied-block nonce)
     ///     lastEpochBlockNonce,  -- Nonce (lab nonce from prior epoch)
     ///   ]
     /// ]
     /// ```
     ///
+    /// This matches the released `ouroboros-consensus-protocol-0.13.0.0` which
+    /// ships with cardano-node 10.6.x / 10.7.x.  The `previousEpochNonce` field
+    /// was added to the unreleased main branch (commit 5598d9fb, 2025-10-29) for
+    /// Peras support but is NOT present in any cardano-node release as of
+    /// 2026-04-06.  Sending array(8) causes cardano-cli 10.15 to reject the
+    /// response with a CBOR size mismatch.
+    ///
     /// Sources:
-    ///   - ouroboros-consensus-protocol/Ouroboros/Consensus/Protocol/Praos.hs
+    ///   - ouroboros-consensus-protocol 0.13.0.0 tag: Ouroboros/Consensus/Protocol/Praos.hs
     ///   - ouroboros-consensus/Ouroboros/Consensus/Util/Versioned.hs (`encodeVersion`)
     DebugChainDepState {
         /// Last applied block slot (0 = Origin)
@@ -145,8 +151,6 @@ pub enum QueryResult {
         candidate_nonce: Vec<u8>,
         /// Epoch nonce (32 bytes), empty = NeutralNonce
         epoch_nonce: Vec<u8>,
-        /// Previous epoch nonce (32 bytes), empty = NeutralNonce
-        prev_epoch_nonce: Vec<u8>,
         /// Lab nonce — derived from the VRF output of the last applied block
         lab_nonce: Vec<u8>,
         /// Last epoch block nonce — lab nonce from the last block of the prior epoch

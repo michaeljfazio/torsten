@@ -322,7 +322,6 @@ pub(crate) fn encode_query_result_value(
             evolving_nonce,
             candidate_nonce,
             epoch_nonce,
-            prev_epoch_nonce,
             lab_nonce,
             last_epoch_block_nonce,
         } => {
@@ -334,7 +333,6 @@ pub(crate) fn encode_query_result_value(
                 evolving_nonce,
                 candidate_nonce,
                 epoch_nonce,
-                prev_epoch_nonce,
                 lab_nonce,
                 last_epoch_block_nonce,
             );
@@ -1828,23 +1826,36 @@ fn encode_debug_new_epoch_state(
 ///
 /// Haskell uses `encodeVersion 0` (from `Ouroboros.Consensus.Util.Versioned`),
 /// which wraps any payload as `array(2) [version, payload]`.  The PraosState
-/// payload itself is `array(8)` of the eight fields listed below.
+/// payload is `array(7)` of the seven fields listed below.
+///
+/// Field layout (released `ouroboros-consensus-protocol-0.13.0.0`, shipped with
+/// cardano-node 10.6.x / 10.7.x):
+///   [0] praosStateLastSlot              — WithOrigin SlotNo
+///   [1] praosStateOCertCounters         — Map<KeyHash BlockIssuer, Word64>
+///   [2] praosStateEvolvingNonce         — Nonce
+///   [3] praosStateCandidateNonce        — Nonce
+///   [4] praosStateEpochNonce            — Nonce
+///   [5] praosStateLabNonce              — Nonce
+///   [6] praosStateLastEpochBlockNonce   — Nonce
+///
+/// NOTE: The unreleased main branch (commit 5598d9fb, 2025-10-29) inserts a
+/// `praosStatePreviousEpochNonce` field at position [5] (shifting lab/lastEpoch
+/// to [6]/[7]) and uses `array(8)`.  That change is NOT in any released
+/// cardano-node as of 2026-04-06; encoding array(8) causes cardano-cli 10.15 to
+/// reject the response with a CBOR enforceSize mismatch.
 ///
 /// All nonce values use the Haskell `Nonce` encoding:
 ///   - `NeutralNonce` → `array(1) [0]`
 ///   - `Nonce hash`   → `array(2) [1, bytes32]`
 ///
-/// We treat any 32-byte non-zero slice as a real nonce (`Nonce hash`), and
-/// an empty or all-zero slice as `NeutralNonce`.  This matches the Haskell
-/// semantics where the neutral element is the identity for nonce evolution.
+/// Empty or all-zero slices are treated as `NeutralNonce`.
 ///
-/// The `WithOrigin SlotNo` (praosStateLastSlot) uses the same convention as
-/// other `WithOrigin` fields in the protocol:
+/// The `WithOrigin SlotNo` encoding:
 ///   - `Origin` → `array(1) [0]`
 ///   - `At slot` → `array(2) [1, slot_u64]`
 ///
 /// References:
-///   `ouroboros-consensus-protocol / Ouroboros/Consensus/Protocol/Praos.hs`
+///   `ouroboros-consensus-protocol 0.13.0.0 / Ouroboros/Consensus/Protocol/Praos.hs`
 ///   `ouroboros-consensus / Ouroboros/Consensus/Util/Versioned.hs`
 ///   `cardano-ledger / libs/cardano-ledger-core/src/Cardano/Ledger/BaseTypes.hs`
 #[allow(clippy::too_many_arguments)]
@@ -1856,7 +1867,6 @@ fn encode_debug_chain_dep_state(
     evolving_nonce: &[u8],
     candidate_nonce: &[u8],
     epoch_nonce: &[u8],
-    prev_epoch_nonce: &[u8],
     lab_nonce: &[u8],
     last_epoch_block_nonce: &[u8],
 ) {
@@ -1864,10 +1874,9 @@ fn encode_debug_chain_dep_state(
     enc.array(2).ok();
     enc.u8(0).ok(); // version number
 
-    // PraosState: array(8) [lastSlot, ocertCounters, evolvingNonce,
-    //   candidateNonce, epochNonce, previousEpochNonce, labNonce,
-    //   lastEpochBlockNonce]
-    enc.array(8).ok();
+    // PraosState: array(7) [lastSlot, ocertCounters, evolvingNonce,
+    //   candidateNonce, epochNonce, labNonce, lastEpochBlockNonce]
+    enc.array(7).ok();
 
     // [0] praosStateLastSlot: WithOrigin SlotNo
     // WithOrigin<T> via generic Serialise: Origin=[0], At slot=[1, slot]
@@ -1909,11 +1918,9 @@ fn encode_debug_chain_dep_state(
     encode_nonce(enc, candidate_nonce);
     // [4] praosStateEpochNonce
     encode_nonce(enc, epoch_nonce);
-    // [5] praosStatePreviousEpochNonce
-    encode_nonce(enc, prev_epoch_nonce);
-    // [6] praosStateLabNonce
+    // [5] praosStateLabNonce
     encode_nonce(enc, lab_nonce);
-    // [7] praosStateLastEpochBlockNonce
+    // [6] praosStateLastEpochBlockNonce
     encode_nonce(enc, last_epoch_block_nonce);
 }
 

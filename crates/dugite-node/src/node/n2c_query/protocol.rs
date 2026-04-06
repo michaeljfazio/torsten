@@ -442,10 +442,18 @@ pub(crate) fn handle_debug_new_epoch_state(state: &NodeStateSnapshot) -> QueryRe
 
 /// Handle DebugChainDepState (tag 13).
 ///
-/// Returns the full Haskell-compatible `PraosState` CBOR structure.  Haskell
-/// uses `encodeVersion 0` (from `Ouroboros.Consensus.Util.Versioned`) which
-/// wraps the payload as `array(2)[0, payload]`.  The payload itself is
-/// `array(8)` containing all eight `PraosState` fields.
+/// Returns the Haskell-compatible `PraosState` CBOR structure.  Haskell uses
+/// `encodeVersion 0` (from `Ouroboros.Consensus.Util.Versioned`) which wraps
+/// the payload as `array(2)[0, payload]`.  The payload is `array(7)` containing
+/// the seven `PraosState` fields from `ouroboros-consensus-protocol-0.13.0.0`
+/// (the version shipped with cardano-node 10.6.x / 10.7.x).
+///
+/// Field order: lastSlot, ocertCounters, evolvingNonce, candidateNonce,
+/// epochNonce, labNonce, lastEpochBlockNonce.
+///
+/// NOTE: The `praosStatePreviousEpochNonce` field (for Peras) was added to the
+/// unreleased main branch but is absent from all released cardano-node versions.
+/// We deliberately omit it to stay compatible with cardano-cli 10.15.
 ///
 /// The `OCertCounters` map (`praosStateOCertCounters`) is not tracked in
 /// `NodeStateSnapshot` — we emit an empty map, which is safe because tools
@@ -464,12 +472,7 @@ pub(crate) fn handle_debug_chain_dep_state(state: &NodeStateSnapshot) -> QueryRe
         evolving_nonce: state.evolving_nonce.clone(),
         candidate_nonce: state.candidate_nonce.clone(),
         epoch_nonce: state.epoch_nonce.clone(),
-        // Previous epoch nonce: not separately tracked; reuse epoch_nonce as
-        // a conservative approximation.  Tools inspecting this field for
-        // cross-epoch nonce chaining should use the epoch_nonce field instead.
-        prev_epoch_nonce: state.epoch_nonce.clone(),
         lab_nonce: state.lab_nonce.clone(),
-        // Last epoch block nonce: same conservative approximation as above.
         last_epoch_block_nonce: state.lab_nonce.clone(),
     }
 }

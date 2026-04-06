@@ -430,6 +430,15 @@ impl N2CClient {
         self.send_shelley_query(8).await
     }
 
+    /// Query consensus chain-dependent state (`DebugChainDepState` -- Shelley query tag 13).
+    ///
+    /// Returns the PraosState CBOR (nonces, opcert counters, last slot).
+    /// This is much smaller than `query_protocol_state()` (tag 8) which returns the
+    /// full debug ledger state.
+    pub async fn query_chain_dep_state(&mut self) -> Result<Vec<u8>, NetworkError> {
+        self.send_shelley_query(13).await
+    }
+
     /// Query ratification state (`GetRatifyState` -- Shelley query tag 32).
     ///
     /// Returns raw MsgResult CBOR payload.

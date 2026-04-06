@@ -405,17 +405,18 @@ fn parse_cbor_nonce(d: &mut minicbor::Decoder<'_>) -> Result<[u8; 32]> {
     }
 }
 
-/// Parse the raw MsgResult CBOR from `query_protocol_state()` and extract nonces.
+/// Parse the raw MsgResult CBOR from `query_chain_dep_state()` and extract nonces.
 ///
 /// Wire format: MsgResult [tag, HFC [array(2)[version=0, array(7)[...PraosState fields...]]]]
 #[allow(dead_code)]
 fn parse_protocol_state_nonces(raw: &[u8]) -> Result<PraosNonces> {
     let mut d = minicbor::Decoder::new(raw);
 
-    // MsgResult outer array
+    // MsgResult: array(2)[tag, payload]
+    // tag 4 = MsgResult (standard), tag 6 = legacy MsgResult
     let _ = d.array();
     let tag = d.u32()?;
-    if tag != 6 {
+    if tag != 4 && tag != 6 {
         anyhow::bail!("Protocol state query failed (tag {tag})");
     }
 
@@ -494,10 +495,11 @@ struct PoolStakeInfo {
 fn parse_stake_for_pool(raw: &[u8], pool_id_hex: &str, use_mark: bool) -> Result<PoolStakeInfo> {
     let mut d = minicbor::Decoder::new(raw);
 
-    // MsgResult outer array
+    // MsgResult: array(2)[tag, payload]
+    // tag 4 = MsgResult (standard), tag 6 = legacy MsgResult
     let _ = d.array();
     let tag = d.u32()?;
-    if tag != 6 {
+    if tag != 4 && tag != 6 {
         anyhow::bail!("Stake snapshot query failed (tag {tag})");
     }
 
@@ -2312,11 +2314,12 @@ impl QueryCmd {
                     current_epoch_start
                 };
 
-                // Query the raw protocol state to extract epoch/candidate nonces.
+                // Query the chain-dependent state (tag 13 = PraosState) to extract nonces.
+                // This is much smaller than query_protocol_state (tag 8 = full ledger dump).
                 let proto_raw = client
-                    .query_protocol_state()
+                    .query_chain_dep_state()
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to query protocol state: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to query chain dep state: {e}"))?;
                 let nonces = parse_protocol_state_nonces(&proto_raw)?;
 
                 // For --current use the epoch nonce; for --next use the candidate nonce
