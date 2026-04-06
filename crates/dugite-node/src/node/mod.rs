@@ -1088,7 +1088,7 @@ impl Node {
             // misconfiguration of issuing an opcert with --kes-period 0 instead
             // of the current KES period.
             let tip_slot = {
-                let ls = ledger_state.blocking_read();
+                let ls = ledger_state.try_read().expect("ledger_state lock uncontested during init");
                 ls.tip.point.slot().map(|s| s.0).unwrap_or(0)
             };
             if tip_slot > 0 {
