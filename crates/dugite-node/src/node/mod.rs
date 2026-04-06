@@ -866,6 +866,7 @@ impl Node {
                 dugite_primitives::time::EpochLength(genesis.epoch_length),
                 genesis.slots_per_k_e_s_period,
                 genesis.max_k_e_s_evolutions,
+                args.config.max_major_protocol_version(),
             )
         } else {
             OuroborosPraos::new()

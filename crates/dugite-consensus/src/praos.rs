@@ -233,6 +233,7 @@ impl OuroborosPraos {
         active_slot_coeff: f64,
         security_param: u64,
         epoch_length: EpochLength,
+        max_major_prot_ver: u64,
     ) -> Self {
         let rational = dugite_primitives::protocol_params::f64_to_rational(active_slot_coeff);
         OuroborosPraos {
@@ -247,7 +248,7 @@ impl OuroborosPraos {
             nonce_established: false,
             snapshots_established: false,
             checkpoints: HashMap::new(),
-            max_major_prot_ver: crate::NODE_PROTOCOL_VERSION.0,
+            max_major_prot_ver,
             opcert_counters: HashMap::new(),
         }
     }
@@ -258,6 +259,7 @@ impl OuroborosPraos {
         epoch_length: EpochLength,
         slots_per_kes_period: u64,
         max_kes_evolutions: u64,
+        max_major_prot_ver: u64,
     ) -> Self {
         let rational = dugite_primitives::protocol_params::f64_to_rational(active_slot_coeff);
         OuroborosPraos {
@@ -272,7 +274,7 @@ impl OuroborosPraos {
             nonce_established: false,
             snapshots_established: false,
             checkpoints: HashMap::new(),
-            max_major_prot_ver: crate::NODE_PROTOCOL_VERSION.0,
+            max_major_prot_ver,
             opcert_counters: HashMap::new(),
         }
     }
@@ -2644,13 +2646,13 @@ mod tests {
     #[test]
     fn test_kes_params_from_genesis() {
         let praos =
-            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 129600, 62);
+            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 129600, 62, 10);
         assert_eq!(praos.slots_per_kes_period, 129600);
         assert_eq!(praos.max_kes_evolutions, 62);
 
         // Custom KES params
         let praos2 =
-            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 86400, 46);
+            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 86400, 46, 10);
         assert_eq!(praos2.slots_per_kes_period, 86400);
         assert_eq!(praos2.max_kes_evolutions, 46);
     }
@@ -3139,7 +3141,7 @@ mod tests {
     #[test]
     fn test_crypto_params_reflects_state() {
         let mut praos =
-            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 129600, 62);
+            OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 129600, 62, 10);
         let params = praos.crypto_params();
         assert!(!params.strict_verification);
         assert!(!params.nonce_established);
@@ -3161,6 +3163,7 @@ mod tests {
             EpochLength(86400),
             3600, // small KES period
             120,  // more evolutions
+            10,   // max major protocol version
         );
         assert!((praos.active_slot_coeff - 0.1).abs() < f64::EPSILON);
         assert_eq!(praos.security_param, 500);
@@ -3229,7 +3232,7 @@ mod tests {
         assert_eq!(praos.stability_window(), 129600);
 
         // k=500, f=0.1 → 3*500/0.1 = 15000
-        let praos2 = OuroborosPraos::with_params(0.1, 500, EpochLength(86400));
+        let praos2 = OuroborosPraos::with_params(0.1, 500, EpochLength(86400), 10);
         assert_eq!(praos2.stability_window(), 15000);
     }
 
@@ -3718,7 +3721,7 @@ mod tests {
 
         // Create with custom coefficient
         let praos_custom =
-            OuroborosPraos::with_params(0.1, 2160, dugite_primitives::time::mainnet_epoch_length());
+            OuroborosPraos::with_params(0.1, 2160, dugite_primitives::time::mainnet_epoch_length(), 10);
         assert!((praos_custom.active_slot_coeff - 0.1).abs() < f64::EPSILON);
     }
 
