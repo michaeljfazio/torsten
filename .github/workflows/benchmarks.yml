@@ -65,6 +65,7 @@ jobs:
       - name: Generate benchmark report
         run: |
           DATE=$(date -u +%Y-%m-%d)
+          mkdir -p benches/results
           REPORT="benches/results/${DATE}-nightly.md"
           echo "# Nightly Benchmark Results — ${DATE}" > "$REPORT"
           echo "" >> "$REPORT"
