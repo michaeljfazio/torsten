@@ -58,7 +58,7 @@ blake2 = "0.10"
 blake2b_simd = "1"
 sha2 = "0.10"
 rand = "0.8"
-rand_chacha = "0.3"
+rand_chacha = "0.9"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
