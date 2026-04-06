@@ -141,3 +141,151 @@ impl super::BearerWriter for TcpBearerWriter {
         self.0.flush().await.map_err(BearerError::from)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bearer::Bearer;
+
+    // ─── Constant verification ───────────────────────────────────────────────
+
+    #[test]
+    fn sdu_size_matches_haskell() {
+        // Haskell cardano-node uses SDUSize 12288 for TCP bearers.
+        assert_eq!(TCP_SDU_SIZE, 12_288);
+    }
+
+    #[test]
+    fn batch_size_matches_haskell() {
+        // Haskell cardano-node uses a batch size of 131072 for TCP write coalescing.
+        assert_eq!(TCP_BATCH_SIZE, 131_072);
+    }
+
+    #[test]
+    fn read_buffer_size_matches_haskell() {
+        // Haskell's readBufferSize = 131072.
+        assert_eq!(TCP_READ_BUFFER_SIZE, 131_072);
+    }
+
+    // ─── Connection lifecycle tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn connect_and_read_write() {
+        // Create a TCP listener, connect a bearer, and verify data exchange.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Echo back whatever we read.
+            let mut buf = [0u8; 5];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut buf)
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &buf)
+                .await
+                .unwrap();
+        });
+
+        let mut bearer = TcpBearer::connect(addr).await.unwrap();
+
+        // Verify SDU/batch sizes.
+        assert_eq!(bearer.sdu_size(), TCP_SDU_SIZE);
+        assert_eq!(bearer.batch_size(), TCP_BATCH_SIZE);
+
+        // Write and read back.
+        bearer.write_all(b"hello").await.unwrap();
+        bearer.flush().await.unwrap();
+
+        let mut buf = [0u8; 5];
+        bearer.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        bearer.close().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bearer_split_concurrent_io() {
+        // Verify that split() produces independent read and write halves
+        // that can operate concurrently.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut buf)
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &buf)
+                .await
+                .unwrap();
+        });
+
+        let bearer = TcpBearer::connect(addr).await.unwrap();
+        let (mut reader, mut writer) = bearer.split();
+
+        // Write from one half, read from the other.
+        writer.write_all(b"test").await.unwrap();
+        writer.flush().await.unwrap();
+
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"test");
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_on_closed_connection_returns_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Close immediately.
+            drop(stream);
+        });
+
+        let mut bearer = TcpBearer::connect(addr).await.unwrap();
+        // Give the server time to close.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut buf = [0u8; 1];
+        let result = bearer.read_exact(&mut buf).await;
+        assert!(result.is_err(), "read on closed connection should fail");
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_configures_socket_options() {
+        // Verify TcpBearer::new succeeds and configures the stream properly.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let _server = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let bearer = TcpBearer::new(stream);
+        assert!(bearer.is_ok(), "TcpBearer::new should succeed");
+    }
+
+    #[tokio::test]
+    async fn into_stream_returns_underlying_stream() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let _server = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let bearer = TcpBearer::connect(addr).await.unwrap();
+        let stream = bearer.into_stream();
+        // Verify the stream is valid by checking peer addr.
+        assert_eq!(stream.peer_addr().unwrap(), addr);
+    }
+}

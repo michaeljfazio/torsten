@@ -388,3 +388,293 @@ impl From<HandshakeError> for ConnectionError {
         Self::HandshakeFailed(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── BearerError classification from io::Error ───────────────────────────
+
+    #[test]
+    fn io_connection_reset_maps_to_bearer_connection_reset() {
+        let io_err = io::Error::new(io::ErrorKind::ConnectionReset, "reset");
+        let bearer_err: BearerError = io_err.into();
+        assert!(matches!(bearer_err, BearerError::ConnectionReset));
+    }
+
+    #[test]
+    fn io_broken_pipe_maps_to_bearer_connection_reset() {
+        let io_err = io::Error::new(io::ErrorKind::BrokenPipe, "broken");
+        let bearer_err: BearerError = io_err.into();
+        assert!(matches!(bearer_err, BearerError::ConnectionReset));
+    }
+
+    #[test]
+    fn io_timed_out_maps_to_bearer_timeout() {
+        let io_err = io::Error::new(io::ErrorKind::TimedOut, "timeout");
+        let bearer_err: BearerError = io_err.into();
+        assert!(matches!(bearer_err, BearerError::Timeout));
+    }
+
+    #[test]
+    fn io_other_maps_to_bearer_io() {
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
+        let bearer_err: BearerError = io_err.into();
+        assert!(matches!(bearer_err, BearerError::Io(_)));
+    }
+
+    // ─── Display impls ──────────────────────────────────────────────────────
+
+    #[test]
+    fn bearer_error_display() {
+        assert_eq!(BearerError::ConnectionReset.to_string(), "connection reset");
+        assert_eq!(BearerError::Timeout.to_string(), "timeout");
+        let io_err = BearerError::Io(io::Error::other("test"));
+        assert!(io_err.to_string().contains("I/O error"));
+    }
+
+    #[test]
+    fn mux_error_display() {
+        assert_eq!(
+            MuxError::InvalidHeader {
+                protocol_id: 2,
+                payload_len: 999
+            }
+            .to_string(),
+            "invalid SDU header: protocol=2, len=999"
+        );
+        assert_eq!(
+            MuxError::IngressQueueOverrun {
+                protocol_id: 3,
+                bytes: 500,
+                limit: 100
+            }
+            .to_string(),
+            "ingress queue overrun: protocol=3, 500/100 bytes"
+        );
+        assert_eq!(
+            MuxError::UnknownProtocol(42).to_string(),
+            "unknown protocol ID: 42"
+        );
+        assert_eq!(MuxError::BearerClosed.to_string(), "bearer closed");
+        assert_eq!(MuxError::ChannelClosed.to_string(), "channel closed");
+        assert_eq!(
+            MuxError::SduReadTimeout.to_string(),
+            "SDU read timeout (30s)"
+        );
+    }
+
+    #[test]
+    fn handshake_error_display() {
+        assert!(HandshakeError::NetworkMagicMismatch {
+            ours: 764824073,
+            theirs: 2
+        }
+        .to_string()
+        .contains("network magic mismatch"));
+
+        assert!(HandshakeError::VersionMismatch {
+            ours: vec![14, 15],
+            theirs: vec![13]
+        }
+        .to_string()
+        .contains("no common version"));
+
+        assert!(HandshakeError::DecodeError("bad cbor".into())
+            .to_string()
+            .contains("bad cbor"));
+
+        assert!(HandshakeError::Refused {
+            version: 14,
+            reason: "magic mismatch".into()
+        }
+        .to_string()
+        .contains("refused"));
+
+        assert_eq!(HandshakeError::Timeout.to_string(), "handshake timeout");
+    }
+
+    #[test]
+    fn protocol_error_display() {
+        assert!(ProtocolError::AgencyViolation {
+            protocol: "ChainSync",
+            state: "StIdle".into(),
+            received_tag: 5,
+        }
+        .to_string()
+        .contains("agency violation"));
+
+        assert!(ProtocolError::InvalidMessage {
+            protocol: "BlockFetch",
+            tag: 99,
+            reason: "bad tag".into(),
+        }
+        .to_string()
+        .contains("invalid message tag 99"));
+
+        assert!(ProtocolError::CborDecode {
+            protocol: "TxSubmission",
+            reason: "unexpected eof".into(),
+        }
+        .to_string()
+        .contains("CBOR decode error"));
+
+        assert!(ProtocolError::StateViolation {
+            protocol: "LocalTxMonitor",
+            expected: "StAcquired".into(),
+            actual: "StIdle".into(),
+        }
+        .to_string()
+        .contains("expected state"));
+
+        assert!(ProtocolError::BoundsExceeded {
+            protocol: "TxSubmission2",
+            reason: "too many tx IDs".into(),
+        }
+        .to_string()
+        .contains("bounds exceeded"));
+
+        assert!(ProtocolError::KeepAliveTimeout {
+            consecutive_failures: 3,
+        }
+        .to_string()
+        .contains("3 consecutive"));
+    }
+
+    #[test]
+    fn connection_error_display() {
+        assert_eq!(
+            ConnectionError::MaxConnectionsReached.to_string(),
+            "max connections reached"
+        );
+        assert!(
+            ConnectionError::RateLimited("127.0.0.1:3001".parse().unwrap())
+                .to_string()
+                .contains("rate limited")
+        );
+        assert_eq!(
+            ConnectionError::SimultaneousOpenConflict.to_string(),
+            "simultaneous open conflict"
+        );
+        assert_eq!(
+            ConnectionError::ConnectTimeout.to_string(),
+            "connect timeout"
+        );
+        assert!(ConnectionError::ForbiddenConnection
+            .to_string()
+            .contains("forbidden"));
+    }
+
+    #[test]
+    fn network_error_display_delegates() {
+        let ne = NetworkError::Bearer(BearerError::ConnectionReset);
+        assert!(ne.to_string().contains("bearer"));
+        assert!(ne.to_string().contains("connection reset"));
+
+        let ne = NetworkError::Mux(MuxError::BearerClosed);
+        assert!(ne.to_string().contains("mux"));
+
+        let ne = NetworkError::Handshake(HandshakeError::Timeout);
+        assert!(ne.to_string().contains("handshake"));
+
+        let ne = NetworkError::Protocol(ProtocolError::KeepAliveTimeout {
+            consecutive_failures: 2,
+        });
+        assert!(ne.to_string().contains("protocol"));
+
+        let ne = NetworkError::Connection(ConnectionError::ConnectTimeout);
+        assert!(ne.to_string().contains("connection"));
+    }
+
+    // ─── From conversions ───────────────────────────────────────────────────
+
+    #[test]
+    fn bearer_to_network_error() {
+        let ne: NetworkError = BearerError::Timeout.into();
+        assert!(matches!(ne, NetworkError::Bearer(BearerError::Timeout)));
+    }
+
+    #[test]
+    fn mux_to_network_error() {
+        let ne: NetworkError = MuxError::BearerClosed.into();
+        assert!(matches!(ne, NetworkError::Mux(MuxError::BearerClosed)));
+    }
+
+    #[test]
+    fn handshake_to_network_error() {
+        let ne: NetworkError = HandshakeError::Timeout.into();
+        assert!(matches!(
+            ne,
+            NetworkError::Handshake(HandshakeError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn protocol_to_network_error() {
+        let pe = ProtocolError::KeepAliveTimeout {
+            consecutive_failures: 1,
+        };
+        let ne: NetworkError = pe.into();
+        assert!(matches!(ne, NetworkError::Protocol(_)));
+    }
+
+    #[test]
+    fn connection_to_network_error() {
+        let ne: NetworkError = ConnectionError::ConnectTimeout.into();
+        assert!(matches!(
+            ne,
+            NetworkError::Connection(ConnectionError::ConnectTimeout)
+        ));
+    }
+
+    #[test]
+    fn bearer_to_mux_error() {
+        let me: MuxError = BearerError::ConnectionReset.into();
+        assert!(matches!(me, MuxError::Bearer(BearerError::ConnectionReset)));
+    }
+
+    #[test]
+    fn mux_to_handshake_error() {
+        let he: HandshakeError = MuxError::BearerClosed.into();
+        assert!(matches!(he, HandshakeError::Mux(MuxError::BearerClosed)));
+    }
+
+    #[test]
+    fn mux_to_protocol_error() {
+        let pe: ProtocolError = MuxError::ChannelClosed.into();
+        assert!(matches!(pe, ProtocolError::Mux(MuxError::ChannelClosed)));
+    }
+
+    #[test]
+    fn handshake_to_connection_error() {
+        let ce: ConnectionError = HandshakeError::Timeout.into();
+        assert!(matches!(
+            ce,
+            ConnectionError::HandshakeFailed(HandshakeError::Timeout)
+        ));
+    }
+
+    // ─── Error trait impls ──────────────────────────────────────────────────
+
+    #[test]
+    fn all_errors_implement_error_trait() {
+        fn assert_error<T: std::error::Error>() {}
+        assert_error::<NetworkError>();
+        assert_error::<BearerError>();
+        assert_error::<MuxError>();
+        assert_error::<HandshakeError>();
+        assert_error::<ProtocolError>();
+        assert_error::<ConnectionError>();
+    }
+
+    #[test]
+    fn all_errors_implement_debug() {
+        fn assert_debug<T: std::fmt::Debug>() {}
+        assert_debug::<NetworkError>();
+        assert_debug::<BearerError>();
+        assert_debug::<MuxError>();
+        assert_debug::<HandshakeError>();
+        assert_debug::<ProtocolError>();
+        assert_debug::<ConnectionError>();
+    }
+}
