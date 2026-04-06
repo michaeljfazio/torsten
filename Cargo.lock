@@ -368,9 +368,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.58"
+version = "1.2.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1e928d4b69e3077709075a938a05ffbedfa53a84c8f766efbf8220bb1ff60e1"
+checksum = "b7a4d3ec6524d28a329fc53654bbadc9bdd7b0431f5d65f1a56ffb28a1ee5283"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-cli"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "anyhow",
  "bech32 0.11.1",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-config"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-conformance"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "dugite-crypto",
  "dugite-ledger",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-consensus"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-crypto"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "criterion",
  "curve25519-dalek 3.2.0 (git+https://github.com/iquerejeta/curve25519-dalek?branch=ietf03_vrf_compat_ell2)",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-golden-tests"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "dugite-crypto",
  "dugite-network",
@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-integration-tests"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "anyhow",
  "hex",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-ledger"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "bincode 1.3.3",
  "criterion",
@@ -1106,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-lsm"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "byteorder",
  "crc32fast",
@@ -1120,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-mempool"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "criterion",
  "dashmap",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-monitor"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-network"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-node"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-primitives"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "bech32 0.11.1",
  "blake2 0.10.6",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-serialization"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "bincode 1.3.3",
  "bytes",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "dugite-storage"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -1425,11 +1425,11 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+checksum = "a043dc74da1e37d6afe657061213aa6f425f855399a11d3463c6ecccc4dfda1f"
 dependencies = [
- "getrandom 0.2.17",
+ "getrandom 0.3.4",
 ]
 
 [[package]]
@@ -1725,7 +1725,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "http",
- "indexmap 2.13.0",
+ "indexmap 2.13.1",
  "slab",
  "tokio",
  "tokio-util",
@@ -2114,9 +2114,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.13.0"
+version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7714e70437a7dc3ac8eb7e6f8df75fd8eb422675fc7678aff7364301092b1017"
+checksum = "45a8a2b9cb3e0b0c1803dbb0758ffac5de2f425b23c28f518faabd9d805342ff"
 dependencies = [
  "equivalent",
  "hashbrown 0.16.1",
@@ -3712,9 +3712,9 @@ dependencies = [
 
 [[package]]
 name = "semver"
-version = "1.0.27"
+version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
@@ -3816,7 +3816,7 @@ dependencies = [
  "chrono",
  "hex",
  "indexmap 1.9.3",
- "indexmap 2.13.0",
+ "indexmap 2.13.1",
  "schemars 0.9.0",
  "schemars 1.2.1",
  "serde_core",
@@ -4279,9 +4279,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.50.0"
+version = "1.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
+checksum = "2bd1c4c0fc4a7ab90fc15ef6daaa3ec3b893f004f915f2392557ed23237820cd"
 dependencies = [
  "bytes",
  "libc",
@@ -4296,9 +4296,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-macros"
-version = "2.6.1"
+version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c"
+checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4355,7 +4355,7 @@ version = "0.22.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
- "indexmap 2.13.0",
+ "indexmap 2.13.1",
  "serde",
  "serde_spanned",
  "toml_datetime",
@@ -4845,7 +4845,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909"
 dependencies = [
  "anyhow",
- "indexmap 2.13.0",
+ "indexmap 2.13.1",
  "wasm-encoder",
  "wasmparser",
 ]
@@ -4871,7 +4871,7 @@ checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
 dependencies = [
  "bitflags",
  "hashbrown 0.15.5",
- "indexmap 2.13.0",
+ "indexmap 2.13.1",
  "semver",
 ]
 
@@ -5213,7 +5213,7 @@ checksum = "b7c566e0f4b284dd6561c786d9cb0142da491f46a9fbed79ea69cdad5db17f21"
 dependencies = [
  "anyhow",
  "heck",
- "indexmap 2.13.0",
+ "indexmap 2.13.1",
  "prettyplease",
  "syn",
  "wasm-metadata",
@@ -5244,7 +5244,7 @@ checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
 dependencies = [
  "anyhow",
  "bitflags",
- "indexmap 2.13.0",
+ "indexmap 2.13.1",
  "log",
  "serde",
  "serde_derive",
@@ -5263,7 +5263,7 @@ checksum = "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736"
 dependencies = [
  "anyhow",
  "id-arena",
- "indexmap 2.13.0",
+ "indexmap 2.13.1",
  "log",
  "semver",
  "serde",
@@ -5275,9 +5275,9 @@ dependencies = [
 
 [[package]]
 name = "writeable"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "wyz"
