@@ -63,7 +63,8 @@ use dugite_primitives::{
 };
 
 use super::cbor_utils::{
-    decode_array_len, decode_int, decode_map_len, decode_rational, decode_uint,
+    decode_array_len, decode_array_len_or_indef, decode_int, decode_map_len, decode_rational,
+    decode_uint,
 };
 
 // ── Public entry point ──────────────────────────────────────────────────────
@@ -522,20 +523,42 @@ pub fn decode_cost_models(data: &[u8]) -> Result<(CostModels, usize), Serializat
 /// Each entry is decoded as a signed integer (`decode_int`) to correctly
 /// handle negative cost values that can appear in some experimental cost
 /// model configurations.
+///
+/// Supports both definite-length and indefinite-length CBOR arrays, since the
+/// Haskell node may use either encoding depending on the serialisation path.
 fn decode_cost_array(data: &[u8]) -> Result<(Vec<i64>, usize), SerializationError> {
     let mut off = 0;
 
-    let (arr_len, n) = decode_array_len(&data[off..])?;
+    let (maybe_len, n) = decode_array_len_or_indef(&data[off..])?;
     off += n;
 
-    let mut costs = Vec::with_capacity(arr_len);
-    for _ in 0..arr_len {
-        let (v, n) = decode_int(&data[off..])?;
-        off += n;
-        costs.push(v);
+    match maybe_len {
+        Some(arr_len) => {
+            let mut costs = Vec::with_capacity(arr_len);
+            for _ in 0..arr_len {
+                let (v, n) = decode_int(&data[off..])?;
+                off += n;
+                costs.push(v);
+            }
+            Ok((costs, off))
+        }
+        None => {
+            // Indefinite-length array: read until break byte 0xff.
+            let mut costs = Vec::new();
+            while off < data.len() && data[off] != 0xff {
+                let (v, n) = decode_int(&data[off..])?;
+                off += n;
+                costs.push(v);
+            }
+            if off >= data.len() {
+                return Err(SerializationError::CborDecode(
+                    "cost array: missing break byte in indefinite array".into(),
+                ));
+            }
+            off += 1; // consume 0xff break byte
+            Ok((costs, off))
+        }
     }
-
-    Ok((costs, off))
 }
 
 // ── minFeeRefScriptCostPerByte decoder ─────────────────────────────────────
@@ -559,8 +582,7 @@ pub fn decode_min_fee_ref_script(data: &[u8]) -> Result<(u64, usize), Serializat
         ));
     }
 
-    let is_rational = (data[0] == 0xd8 && data.get(1) == Some(&0x1e))
-        || ((data[0] >> 5) == 4); // major 4 = array (bare rational)
+    let is_rational = (data[0] == 0xd8 && data.get(1) == Some(&0x1e)) || ((data[0] >> 5) == 4); // major 4 = array (bare rational)
 
     if is_rational {
         let ((num, den), n) = decode_rational(data)?;

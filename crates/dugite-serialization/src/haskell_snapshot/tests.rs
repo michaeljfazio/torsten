@@ -1,11 +1,12 @@
 use super::cbor_utils::*;
 use super::certstate::decode_certstate;
+use super::decode_state_file;
 use super::govstate::decode_govstate;
 use super::pparams::decode_pparams;
 use super::praos::decode_praos_state;
 use super::snapshots::decode_snapshots;
 use dugite_primitives::hash::Hash32;
-use dugite_primitives::time::SlotNo;
+use dugite_primitives::time::{EpochNo, SlotNo};
 
 // ── decode_uint ────────────────────────────────────────────────────────────────
 
@@ -719,11 +720,7 @@ fn test_decode_snapshots() {
 
     // ── fee ──────────────────────────────────────────────────────────────────
     // The accumulated fee pot must be non-zero on a live testnet.
-    assert!(
-        snaps.fee > 0,
-        "fee must be non-zero; got {}",
-        snaps.fee
-    );
+    assert!(snaps.fee > 0, "fee must be non-zero; got {}", snaps.fee);
 
     // ── spot-check SAND pool in mark snapshot ─────────────────────────────────
     // Verify that the SAND pool (our test pool) appears in the mark snapshot
@@ -794,7 +791,10 @@ fn test_decode_govstate() {
     // ── raw CBOR blobs — non-empty ───────────────────────────────────────────
     // Proposals and DRep pulsing state are the two largest sub-structures;
     // both must be present on a live testnet.
-    assert!(!gov.proposals_raw.is_empty(), "proposals_raw must be non-empty");
+    assert!(
+        !gov.proposals_raw.is_empty(),
+        "proposals_raw must be non-empty"
+    );
     assert!(
         !gov.drep_pulsing_raw.is_empty(),
         "drep_pulsing_raw must be non-empty"
@@ -813,7 +813,10 @@ fn test_decode_govstate() {
     );
 
     // ── constitution ─────────────────────────────────────────────────────────
-    let constitution = gov.constitution.as_ref().expect("constitution must be present");
+    let constitution = gov
+        .constitution
+        .as_ref()
+        .expect("constitution must be present");
     // Anchor URL verified against on-chain governance metadata for preview.
     assert_eq!(
         constitution.anchor_url,
@@ -847,4 +850,174 @@ fn test_decode_govstate() {
         gov.future_pparams.is_none(),
         "futurePParams value must be None (SNothing)"
     );
+}
+
+// ── decode_state_file (full ExtLedgerState) ───────────────────────────────────
+
+/// End-to-end test: decode the full 16MB preview epoch 1259 state file,
+/// navigating the HFC telescope and wiring all sub-decoders together.
+///
+/// All expected values are cross-verified against the Haskell node's
+/// `ExtLedgerState` dump and Koios on-chain data for preview epoch 1259.
+#[test]
+fn test_decode_full_state_file() {
+    let data = include_bytes!("../../test_fixtures/preview_state_e1259.bin");
+    let state = decode_state_file(data).unwrap();
+
+    // ── Tip ─────────────────────────────────────────────────────────────────
+    assert_eq!(state.tip_slot, SlotNo(108_794_365), "tip_slot");
+    assert_eq!(state.tip_block_no, 4_168_174, "tip_block_no");
+    assert_ne!(state.tip_hash, Hash32::ZERO, "tip_hash must not be zero");
+
+    // ── Epoch ───────────────────────────────────────────────────────────────
+    assert_eq!(state.epoch, EpochNo(1259), "epoch");
+    assert_eq!(
+        state.new_epoch_state.epoch,
+        EpochNo(1259),
+        "new_epoch_state.epoch"
+    );
+
+    // ── Treasury / reserves ─────────────────────────────────────────────────
+    // Values verified against Koios totals endpoint for preview epoch 1259.
+    assert_eq!(
+        state.new_epoch_state.treasury, 6_565_463_297_854_481,
+        "treasury"
+    );
+    assert_eq!(
+        state.new_epoch_state.reserves, 8_198_151_574_246_707,
+        "reserves"
+    );
+
+    // ── Protocol parameters (from GovState) ─────────────────────────────────
+    assert_eq!(state.new_epoch_state.cur_pparams.min_fee_a, 44, "minFeeA");
+    assert_eq!(
+        state.new_epoch_state.cur_pparams.min_fee_b, 155_381,
+        "minFeeB"
+    );
+    assert_eq!(
+        state.new_epoch_state.cur_pparams.protocol_version_major, 10,
+        "protocolVersion.major"
+    );
+    assert_eq!(
+        state.new_epoch_state.cur_pparams.protocol_version_minor, 0,
+        "protocolVersion.minor"
+    );
+    assert_eq!(state.new_epoch_state.cur_pparams.n_opt, 500, "nOpt");
+
+    // ── PraosState nonces (must be non-zero — this was THE bug) ─────────────
+    assert_ne!(
+        state.praos_state.epoch_nonce,
+        Hash32::ZERO,
+        "epoch_nonce must not be zero"
+    );
+    assert_ne!(
+        state.praos_state.lab_nonce,
+        Hash32::ZERO,
+        "lab_nonce must not be zero"
+    );
+    assert_ne!(
+        state.praos_state.evolving_nonce,
+        Hash32::ZERO,
+        "evolving_nonce must not be zero"
+    );
+    assert_ne!(
+        state.praos_state.last_epoch_block_nonce,
+        Hash32::ZERO,
+        "last_epoch_block_nonce must not be zero"
+    );
+
+    // Spot-check epoch nonce hex (verified against Haskell node).
+    assert_eq!(
+        hex::encode(state.praos_state.epoch_nonce.as_bytes()),
+        "f778d4bbcfb2ff332d5eadc6726a8fe9148669832d50d995605ffa3870aa7b29",
+        "epoch_nonce hex"
+    );
+
+    // ── Opcert counters ─────────────────────────────────────────────────────
+    assert_eq!(
+        state.praos_state.opcert_counters.len(),
+        456,
+        "opcert_counters count"
+    );
+
+    // ── Last slot ───────────────────────────────────────────────────────────
+    assert_eq!(
+        state.praos_state.last_slot,
+        Some(SlotNo(108_794_365)),
+        "praos last_slot"
+    );
+
+    // ── Pools (PState) ──────────────────────────────────────────────────────
+    assert!(
+        state.new_epoch_state.cert_state.pstate.stake_pools.len() > 600,
+        "expected >600 pools, got {}",
+        state.new_epoch_state.cert_state.pstate.stake_pools.len()
+    );
+
+    // ── Delegations (DState) ────────────────────────────────────────────────
+    assert!(
+        state.new_epoch_state.cert_state.dstate.accounts.len() > 30_000,
+        "expected >30000 accounts, got {}",
+        state.new_epoch_state.cert_state.dstate.accounts.len()
+    );
+
+    // ── DReps (VState) ──────────────────────────────────────────────────────
+    assert!(
+        state.new_epoch_state.cert_state.vstate.dreps.len() > 8000,
+        "expected >8000 DReps, got {}",
+        state.new_epoch_state.cert_state.vstate.dreps.len()
+    );
+
+    // ── Snapshots ───────────────────────────────────────────────────────────
+    assert!(
+        state.new_epoch_state.snapshots.mark.stake.len() > 9000,
+        "mark stake too small: {}",
+        state.new_epoch_state.snapshots.mark.stake.len()
+    );
+    assert!(
+        state.new_epoch_state.snapshots.fee > 0,
+        "snapshot fee must be non-zero"
+    );
+
+    // ── Pool distribution ───────────────────────────────────────────────────
+    assert!(
+        state.new_epoch_state.pool_distr.len() > 600,
+        "expected >600 pool_distr entries, got {}",
+        state.new_epoch_state.pool_distr.len()
+    );
+    assert!(
+        state.new_epoch_state.pool_distr_total_stake > 0,
+        "pool_distr_total_stake must be > 0"
+    );
+
+    // ── Instant stake ───────────────────────────────────────────────────────
+    assert!(
+        state.new_epoch_state.instant_stake.len() > 9000,
+        "expected >9000 instant_stake entries, got {}",
+        state.new_epoch_state.instant_stake.len()
+    );
+
+    // ── Blocks made maps ────────────────────────────────────────────────────
+    // At epoch boundary, blocksMadeCur should have entries (pools made blocks).
+    // blocksMadePrev may be empty if the snapshot is at the very start of an epoch.
+    assert!(
+        !state.new_epoch_state.blocks_made_cur.is_empty()
+            || !state.new_epoch_state.blocks_made_prev.is_empty(),
+        "at least one blocks_made map must be non-empty"
+    );
+
+    // ── GovState ────────────────────────────────────────────────────────────
+    assert!(
+        !state.new_epoch_state.gov_state.proposals_raw.is_empty(),
+        "proposals_raw must be non-empty"
+    );
+    assert!(
+        state.new_epoch_state.gov_state.constitution.is_some(),
+        "constitution must be present"
+    );
+
+    // ── Deposited / fees / donation ─────────────────────────────────────────
+    assert!(state.new_epoch_state.deposited > 0, "deposited must be > 0");
+    // fees can be zero at epoch boundary, but deposited should always be > 0
+    // on an active testnet.
 }

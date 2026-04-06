@@ -48,10 +48,12 @@
 
 use crate::error::SerializationError;
 use crate::haskell_snapshot::cbor_utils::{
-    decode_array_len, decode_bytes, decode_credential, decode_hash28, decode_hash32, decode_map_len,
-    decode_null, decode_rational, decode_text, decode_uint, skip_cbor_value,
+    decode_array_len, decode_bytes, decode_credential, decode_hash28, decode_hash32, decode_null,
+    decode_rational, decode_text, decode_uint, skip_cbor_value, MapReader,
 };
-use crate::haskell_snapshot::types::{HaskellRelay, HaskellSnapShot, HaskellSnapShotPool, HaskellSnapShots};
+use crate::haskell_snapshot::types::{
+    HaskellRelay, HaskellSnapShot, HaskellSnapShotPool, HaskellSnapShots,
+};
 use dugite_primitives::hash::{Hash28, Hash32};
 use std::collections::HashMap;
 
@@ -115,35 +117,37 @@ fn decode_snapshot_old(
     _len: usize,
 ) -> Result<HaskellSnapShot, SerializationError> {
     // [0] stake: map(credential → uint)
-    let (stake_count, n) = decode_definite_map_len(&data[*off..])?;
+    let (mut reader, n) = MapReader::new(&data[*off..])?;
     *off += n;
-    let mut stake: HashMap<(u8, Hash28), u64> = HashMap::with_capacity(stake_count);
-    for _ in 0..stake_count {
+    let mut stake: HashMap<(u8, Hash28), u64> = HashMap::with_capacity(reader.size_hint());
+    while reader.has_next(&data[*off..])? {
         let (cred, n) = decode_credential(&data[*off..])?;
         *off += n;
         let (coin, n) = decode_uint(&data[*off..])?;
         *off += n;
         stake.insert(cred, coin);
     }
+    *off += reader.finish(&data[*off..])?;
 
     // [1] delegations: map(credential → bytes(28))
-    let (deleg_count, n) = decode_definite_map_len(&data[*off..])?;
+    let (mut reader, n) = MapReader::new(&data[*off..])?;
     *off += n;
-    let mut delegations: HashMap<(u8, Hash28), Hash28> = HashMap::with_capacity(deleg_count);
-    for _ in 0..deleg_count {
+    let mut delegations: HashMap<(u8, Hash28), Hash28> = HashMap::with_capacity(reader.size_hint());
+    while reader.has_next(&data[*off..])? {
         let (cred, n) = decode_credential(&data[*off..])?;
         *off += n;
         let (pool_hash, n) = decode_hash28(&data[*off..])?;
         *off += n;
         delegations.insert(cred, pool_hash);
     }
+    *off += reader.finish(&data[*off..])?;
 
     // [2] poolParams: map(bytes(28) → SnapShotPool)
-    let (pool_count, n) = decode_definite_map_len(&data[*off..])?;
+    let (mut reader, n) = MapReader::new(&data[*off..])?;
     *off += n;
     let mut pool_params: HashMap<Hash28, HaskellSnapShotPool> =
-        HashMap::with_capacity(pool_count);
-    for _ in 0..pool_count {
+        HashMap::with_capacity(reader.size_hint());
+    while reader.has_next(&data[*off..])? {
         // Map key: bytes(28) pool hash
         let (pool_id, n) = decode_hash28(&data[*off..])?;
         *off += n;
@@ -152,6 +156,7 @@ fn decode_snapshot_old(
         *off += n;
         pool_params.insert(pool_id, pool);
     }
+    *off += reader.finish(&data[*off..])?;
 
     Ok(HaskellSnapShot {
         stake,
@@ -175,11 +180,11 @@ fn decode_snapshot_new(
     _len: usize,
 ) -> Result<HaskellSnapShot, SerializationError> {
     // [0] stakeWithDelegation: map(credential → [coin, pool_hash])
-    let (active_count, n) = decode_definite_map_len(&data[*off..])?;
+    let (mut reader, n) = MapReader::new(&data[*off..])?;
     *off += n;
-    let mut stake: HashMap<(u8, Hash28), u64> = HashMap::with_capacity(active_count);
-    let mut delegations: HashMap<(u8, Hash28), Hash28> = HashMap::with_capacity(active_count);
-    for _ in 0..active_count {
+    let mut stake: HashMap<(u8, Hash28), u64> = HashMap::with_capacity(reader.size_hint());
+    let mut delegations: HashMap<(u8, Hash28), Hash28> = HashMap::with_capacity(reader.size_hint());
+    while reader.has_next(&data[*off..])? {
         let (cred, n) = decode_credential(&data[*off..])?;
         *off += n;
 
@@ -199,19 +204,21 @@ fn decode_snapshot_new(
         stake.insert(cred, coin);
         delegations.insert(cred, pool_hash);
     }
+    *off += reader.finish(&data[*off..])?;
 
     // [1] poolSnapshots: map(bytes(28) → SnapShotPool)
-    let (pool_count, n) = decode_definite_map_len(&data[*off..])?;
+    let (mut reader, n) = MapReader::new(&data[*off..])?;
     *off += n;
     let mut pool_params: HashMap<Hash28, HaskellSnapShotPool> =
-        HashMap::with_capacity(pool_count);
-    for _ in 0..pool_count {
+        HashMap::with_capacity(reader.size_hint());
+    while reader.has_next(&data[*off..])? {
         let (pool_id, n) = decode_hash28(&data[*off..])?;
         *off += n;
         let (pool, n) = decode_snapshot_pool(&data[*off..])?;
         *off += n;
         pool_params.insert(pool_id, pool);
     }
+    *off += reader.finish(&data[*off..])?;
 
     Ok(HaskellSnapShot {
         stake,
@@ -478,20 +485,6 @@ fn decode_optional_pool_metadata(
     off += n;
 
     Ok((Some((url.to_string(), hash)), off))
-}
-
-/// Decode a definite-length map header, returning the element count.
-///
-/// Returns an error on indefinite-length maps, which are not used in the
-/// Haskell snapshot wire format.
-fn decode_definite_map_len(data: &[u8]) -> Result<(usize, usize), SerializationError> {
-    let (opt_len, n) = decode_map_len(data)?;
-    match opt_len {
-        Some(len) => Ok((len, n)),
-        None => Err(SerializationError::CborDecode(
-            "SnapShots: expected definite-length map, got indefinite".into(),
-        )),
-    }
 }
 
 /// Skip CBOR set tag 258 (`0xd9 0x01 0x02`) if present.

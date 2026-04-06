@@ -113,7 +113,10 @@ pub fn decode_bigint_or_uint(data: &[u8]) -> Result<(u64, usize), SerializationE
     )))
 }
 
-/// Decode a CBOR array header, returning `(length, bytes_consumed)`.
+/// Decode a CBOR definite-length array header, returning `(length, bytes_consumed)`.
+///
+/// Returns an error on indefinite-length arrays (`0x9f`).  Use
+/// [`skip_cbor_value`] to skip indefinite arrays without knowing their length.
 pub fn decode_array_len(data: &[u8]) -> Result<(usize, usize), SerializationError> {
     if data.is_empty() {
         return Err(eof());
@@ -125,6 +128,11 @@ pub fn decode_array_len(data: &[u8]) -> Result<(usize, usize), SerializationErro
             "expected array (major 4), got major {major} at byte {:#04x}",
             data[0]
         )));
+    }
+    if info == 31 {
+        return Err(SerializationError::CborDecode(
+            "expected definite-length array, got indefinite (0x9f)".into(),
+        ));
     }
     let (len, consumed) = decode_uint_info(data, info)?;
     Ok((len as usize, consumed))
@@ -426,15 +434,114 @@ pub fn skip_cbor_value(data: &[u8]) -> Result<usize, SerializationError> {
         7 => match info {
             0..=23 => Ok(1), // simple value (null=22, true=21, false=20, etc.)
             24 => Ok(2),
-            25 => Ok(3),  // float16
-            26 => Ok(5),  // float32
-            27 => Ok(9),  // float64
-            31 => Ok(1),  // break code (should not appear at top level, but handle gracefully)
+            25 => Ok(3), // float16
+            26 => Ok(5), // float32
+            27 => Ok(9), // float64
+            31 => Ok(1), // break code (should not appear at top level, but handle gracefully)
             _ => Err(SerializationError::CborDecode(
                 "invalid simple/float encoding".into(),
             )),
         },
         _ => unreachable!("CBOR major type is 3 bits, range 0-7"),
+    }
+}
+
+/// Decode a CBOR array header, returning `(Some(length), bytes_consumed)` for a
+/// definite-length array, or `(None, 1)` for an indefinite-length array (`0x9f`).
+///
+/// Use this instead of [`decode_array_len`] when the caller can handle both
+/// definite and indefinite arrays.
+pub fn decode_array_len_or_indef(
+    data: &[u8],
+) -> Result<(Option<usize>, usize), SerializationError> {
+    if data.is_empty() {
+        return Err(eof());
+    }
+    let major = data[0] >> 5;
+    let info = data[0] & 0x1f;
+    if major != 4 {
+        return Err(SerializationError::CborDecode(format!(
+            "expected array (major 4), got major {major} at byte {:#04x}",
+            data[0]
+        )));
+    }
+    if info == 31 {
+        return Ok((None, 1));
+    }
+    let (len, consumed) = decode_uint_info(data, info)?;
+    Ok((Some(len as usize), consumed))
+}
+
+/// State for iterating over a CBOR map, supporting both definite-length and
+/// indefinite-length encodings.
+///
+/// Usage:
+/// ```ignore
+/// let (mut reader, n) = MapReader::new(data)?;
+/// off += n;
+/// while reader.has_next(&data[off..])? {
+///     // decode key-value pair ...
+///     off += consumed;
+/// }
+/// off += reader.finish(&data[off..])?;
+/// ```
+pub struct MapReader {
+    remaining: Option<usize>, // None = indefinite
+}
+
+impl MapReader {
+    /// Decode a CBOR map header (definite or indefinite) and return a `MapReader`.
+    ///
+    /// Returns `(reader, bytes_consumed_by_header)`.
+    pub fn new(data: &[u8]) -> Result<(Self, usize), SerializationError> {
+        let (opt_len, n) = decode_map_len(data)?;
+        Ok((MapReader { remaining: opt_len }, n))
+    }
+
+    /// Check whether there is another key-value pair to read.
+    ///
+    /// For definite-length maps this decrements the remaining count.
+    /// For indefinite maps this peeks for the break byte (0xff).
+    pub fn has_next(&mut self, data: &[u8]) -> Result<bool, SerializationError> {
+        match &mut self.remaining {
+            Some(count) => {
+                if *count == 0 {
+                    Ok(false)
+                } else {
+                    *count -= 1;
+                    Ok(true)
+                }
+            }
+            None => {
+                if data.is_empty() {
+                    Err(eof())
+                } else {
+                    Ok(data[0] != 0xff)
+                }
+            }
+        }
+    }
+
+    /// Consume the trailing break byte for indefinite-length maps.
+    /// Returns 0 for definite-length maps, 1 for indefinite (the 0xff byte).
+    pub fn finish(&self, data: &[u8]) -> Result<usize, SerializationError> {
+        match self.remaining {
+            Some(_) => Ok(0),
+            None => {
+                if data.is_empty() || data[0] != 0xff {
+                    Err(SerializationError::CborDecode(
+                        "expected break byte (0xff) at end of indefinite map".into(),
+                    ))
+                } else {
+                    Ok(1)
+                }
+            }
+        }
+    }
+
+    /// Hint for pre-allocating collections.  Returns 0 for indefinite maps.
+    pub fn size_hint(&self) -> usize {
+        self.remaining.unwrap_or(0)
     }
 }
 
