@@ -127,14 +127,14 @@ pub fn arb_unit_rational() -> impl Strategy<Value = Rational> {
 /// Uses modest cost/pledge values representative of a testnet pool.
 pub fn arb_pool_registration(pool_id: Hash28) -> impl Strategy<Value = PoolRegistration> {
     (
-        arb_hash32(),            // vrf_keyhash
-        arb_lovelace(0, 50_000_000_000), // pledge
+        arb_hash32(),                             // vrf_keyhash
+        arb_lovelace(0, 50_000_000_000),          // pledge
         arb_lovelace(340_000_000, 1_000_000_000), // cost (min pool cost range)
-        arb_unit_rational(),     // margin
-        arb_reward_account(),    // reward_account
+        arb_unit_rational(),                      // margin
+        arb_reward_account(),                     // reward_account
     )
-        .prop_map(
-            move |(vrf_keyhash, pledge, cost, margin, reward_account)| PoolRegistration {
+        .prop_map(move |(vrf_keyhash, pledge, cost, margin, reward_account)| {
+            PoolRegistration {
                 pool_id,
                 vrf_keyhash,
                 pledge,
@@ -146,8 +146,8 @@ pub fn arb_pool_registration(pool_id: Hash28) -> impl Strategy<Value = PoolRegis
                 relays: vec![],
                 metadata_url: None,
                 metadata_hash: None,
-            },
-        )
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -242,10 +242,10 @@ pub fn arb_utxo_set(count: usize) -> impl Strategy<Value = (UtxoSet, Vec<Transac
 /// (size limits, collateral, etc.) behaves predictably.
 pub fn arb_protocol_params() -> impl Strategy<Value = ProtocolParameters> {
     (
-        1u64..=100u64,         // min_fee_a (coefficient per byte)
+        1u64..=100u64,             // min_fee_a (coefficient per byte)
         100_000u64..=1_000_000u64, // min_fee_b (constant)
-        arb_unit_rational(),   // rho: monetary expansion [0,1]
-        arb_unit_rational(),   // tau: treasury growth [0,1]
+        arb_unit_rational(),       // rho: monetary expansion [0,1]
+        arb_unit_rational(),       // tau: treasury growth [0,1]
     )
         .prop_map(|(min_fee_a, min_fee_b, rho, tau)| {
             let mut p = ProtocolParameters::mainnet_defaults();
@@ -267,11 +267,7 @@ pub fn arb_protocol_params() -> impl Strategy<Value = ProtocolParameters> {
 /// The transaction body is structurally valid (single output, specified fee)
 /// but is NOT signed and carries no witnesses. It is intended for ledger-level
 /// validation tests, not for submission to an actual network.
-pub fn build_simple_tx(
-    inputs: Vec<TransactionInput>,
-    output_value: u64,
-    fee: u64,
-) -> Transaction {
+pub fn build_simple_tx(inputs: Vec<TransactionInput>, output_value: u64, fee: u64) -> Transaction {
     Transaction {
         hash: Hash32::ZERO,
         era: Era::Conway,
@@ -462,8 +458,8 @@ pub fn arb_ledger_state(config: LedgerStateConfig) -> impl Strategy<Value = Ledg
                 })
                 .collect();
 
-            let deposits_pot: u64 = (n_delegations as u64) * key_deposit
-                + (n_pools as u64) * pool_deposit;
+            let deposits_pot: u64 =
+                (n_delegations as u64) * key_deposit + (n_pools as u64) * pool_deposit;
 
             // Budget the pots:
             //   available = MAX_LOVELACE_SUPPLY - deposits_pot - fee_pot
@@ -472,14 +468,20 @@ pub fn arb_ledger_state(config: LedgerStateConfig) -> impl Strategy<Value = Ledg
             //   treasury   = remaining / 3
             //   rewards    = remaining / 3 (shared equally across delegations)
             //   reserves   = MAX_LOVELACE_SUPPLY - all others
-            let available = MAX_LOVELACE_SUPPLY.saturating_sub(deposits_pot).saturating_sub(fee_pot);
+            let available = MAX_LOVELACE_SUPPLY
+                .saturating_sub(deposits_pot)
+                .saturating_sub(fee_pot);
             let utxo_total = available * utxo_pct / 100;
             let remaining = available.saturating_sub(utxo_total);
             let treasury = remaining / 3;
             let rewards_total = remaining / 3;
             // reserves absorbs any rounding to maintain the identity exactly.
-            let reserves =
-                MAX_LOVELACE_SUPPLY - utxo_total - treasury - rewards_total - deposits_pot - fee_pot;
+            let reserves = MAX_LOVELACE_SUPPLY
+                - utxo_total
+                - treasury
+                - rewards_total
+                - deposits_pot
+                - fee_pot;
 
             let reward_per_key: u64 = if n_delegations > 0 {
                 rewards_total / n_delegations as u64

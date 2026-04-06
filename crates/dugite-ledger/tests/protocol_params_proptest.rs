@@ -83,13 +83,19 @@ fn all_rational_fields(p: &ProtocolParameters) -> Vec<(&'static str, &Rational)>
         ("dvt_hard_fork", &p.dvt_hard_fork),
         ("dvt_no_confidence", &p.dvt_no_confidence),
         ("dvt_committee_normal", &p.dvt_committee_normal),
-        ("dvt_committee_no_confidence", &p.dvt_committee_no_confidence),
+        (
+            "dvt_committee_no_confidence",
+            &p.dvt_committee_no_confidence,
+        ),
         ("dvt_constitution", &p.dvt_constitution),
         ("dvt_treasury_withdrawal", &p.dvt_treasury_withdrawal),
         // SPO voting thresholds
         ("pvt_motion_no_confidence", &p.pvt_motion_no_confidence),
         ("pvt_committee_normal", &p.pvt_committee_normal),
-        ("pvt_committee_no_confidence", &p.pvt_committee_no_confidence),
+        (
+            "pvt_committee_no_confidence",
+            &p.pvt_committee_no_confidence,
+        ),
         ("pvt_hard_fork", &p.pvt_hard_fork),
         ("pvt_pp_security_group", &p.pvt_pp_security_group),
     ]
@@ -107,12 +113,18 @@ fn governance_threshold_fields(p: &ProtocolParameters) -> Vec<(&'static str, &Ra
         ("dvt_hard_fork", &p.dvt_hard_fork),
         ("dvt_no_confidence", &p.dvt_no_confidence),
         ("dvt_committee_normal", &p.dvt_committee_normal),
-        ("dvt_committee_no_confidence", &p.dvt_committee_no_confidence),
+        (
+            "dvt_committee_no_confidence",
+            &p.dvt_committee_no_confidence,
+        ),
         ("dvt_constitution", &p.dvt_constitution),
         ("dvt_treasury_withdrawal", &p.dvt_treasury_withdrawal),
         ("pvt_motion_no_confidence", &p.pvt_motion_no_confidence),
         ("pvt_committee_normal", &p.pvt_committee_normal),
-        ("pvt_committee_no_confidence", &p.pvt_committee_no_confidence),
+        (
+            "pvt_committee_no_confidence",
+            &p.pvt_committee_no_confidence,
+        ),
         ("pvt_hard_fork", &p.pvt_hard_fork),
         ("pvt_pp_security_group", &p.pvt_pp_security_group),
     ]
