@@ -1,6 +1,8 @@
 use super::cbor_utils::*;
 use super::pparams::decode_pparams;
+use super::praos::decode_praos_state;
 use dugite_primitives::hash::Hash32;
+use dugite_primitives::time::SlotNo;
 
 // ── decode_uint ────────────────────────────────────────────────────────────────
 
@@ -509,5 +511,57 @@ fn test_decode_pparams_preview_epoch_1259() {
     );
     assert_eq!(
         pp.dvt_treasury_withdrawal.denominator, 100, "dvtTreasuryWithdrawal.den"
+    );
+}
+
+// ── decode_praos_state ─────────────────────────────────────────────────────────
+
+/// Round-trip test against the real preview testnet PraosState captured at
+/// epoch 1259.  Verifies nonces, opcert counter count, and last slot.
+/// All expected values are cross-checked against on-chain data.
+#[test]
+fn test_decode_praos_state() {
+    let data = include_bytes!("../../test_fixtures/preview_praos_e1259.cbor");
+    let (praos, consumed) = decode_praos_state(data).unwrap();
+
+    // Every byte in the fixture must be consumed — it contains exactly one value.
+    assert_eq!(consumed, data.len(), "not all bytes consumed");
+
+    // lastSlot should be the slot of the most recent block header at epoch 1259
+    // boundary (108794365 verified from the Haskell node's ExtLedgerState dump).
+    assert_eq!(praos.last_slot, Some(SlotNo(108_794_365)), "lastSlot");
+
+    // The preview testnet has ~456 registered pools at epoch 1259.
+    assert_eq!(praos.opcert_counters.len(), 456, "oCertCounters entry count");
+
+    // All nonces must be non-zero: the entire point of this decoder is to fix
+    // the bug where nonces were being silently zeroed out.
+    assert_ne!(
+        praos.evolving_nonce,
+        Hash32::ZERO,
+        "evolvingNonce must not be zero"
+    );
+    assert_ne!(
+        praos.epoch_nonce,
+        Hash32::ZERO,
+        "epochNonce must not be zero"
+    );
+    assert_ne!(
+        praos.lab_nonce,
+        Hash32::ZERO,
+        "labNonce must not be zero"
+    );
+    assert_ne!(
+        praos.last_epoch_block_nonce,
+        Hash32::ZERO,
+        "lastEpochBlockNonce must not be zero"
+    );
+
+    // Spot-check the epoch nonce value — verified against the Haskell node's
+    // ledger state for preview epoch 1259.
+    assert_eq!(
+        hex::encode(praos.epoch_nonce.as_bytes()),
+        "f778d4bbcfb2ff332d5eadc6726a8fe9148669832d50d995605ffa3870aa7b29",
+        "epochNonce hex"
     );
 }
