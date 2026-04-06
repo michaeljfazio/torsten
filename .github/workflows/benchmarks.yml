@@ -65,8 +65,8 @@ jobs:
       - name: Generate benchmark report
         run: |
           DATE=$(date -u +%Y-%m-%d)
-          mkdir -p benches/results
-          REPORT="benches/results/${DATE}-nightly.md"
+          mkdir -p benches
+          REPORT="benches/${DATE}-nightly.md"
           echo "# Nightly Benchmark Results — ${DATE}" > "$REPORT"
           echo "" >> "$REPORT"
           echo "Machine: GitHub Actions ubuntu-latest" >> "$REPORT"
@@ -91,18 +91,18 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: benchmark-results-${{ github.run_number }}
-          path: benches/results/*-nightly.md
+          path: benches/*-nightly.md
           retention-days: 90
 
       - name: Copy results to docs and commit
         run: |
           DATE=$(date -u +%Y-%m-%d)
-          LATEST="benches/results/${DATE}-nightly.md"
+          LATEST="benches/${DATE}-nightly.md"
           if [ -f "$LATEST" ]; then
             cp "$LATEST" docs/src/reference/benchmarks.md
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add "benches/results/${DATE}-nightly.md" docs/src/reference/benchmarks.md
+            git add "benches/${DATE}-nightly.md" docs/src/reference/benchmarks.md
             git commit -m "Update nightly benchmark results (${DATE})" || echo "No changes to commit"
             git pull --rebase origin main || true
             git push || echo "Push failed — results saved as artifact"
