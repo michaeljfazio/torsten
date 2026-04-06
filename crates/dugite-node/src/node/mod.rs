@@ -1082,6 +1082,75 @@ impl Node {
                 kes_period = creds.opcert_kes_period,
                 "Block producer mode",
             );
+
+            // Validate KES period at startup: warn if the opcert's KES period
+            // is already expired or will expire soon. This catches the common
+            // misconfiguration of issuing an opcert with --kes-period 0 instead
+            // of the current KES period.
+            let tip_slot = {
+                let ls = ledger_state.blocking_read();
+                ls.tip.point.slot().map(|s| s.0).unwrap_or(0)
+            };
+            if tip_slot > 0 {
+                let slots_per_kes = consensus.slots_per_kes_period;
+                let max_kes = consensus.max_kes_evolutions;
+                let current_kes_period = tip_slot / slots_per_kes;
+                let opcert_kes_period = creds.opcert_kes_period;
+
+                if current_kes_period < opcert_kes_period {
+                    warn!(
+                        current_kes_period,
+                        opcert_kes_period,
+                        "Operational certificate KES period is in the future — \
+                         the certificate is not yet valid. Block forging will fail \
+                         until slot {}.",
+                        opcert_kes_period * slots_per_kes,
+                    );
+                } else {
+                    let kes_offset = current_kes_period - opcert_kes_period;
+                    if kes_offset >= max_kes {
+                        error!(
+                            current_kes_period,
+                            opcert_kes_period,
+                            kes_offset,
+                            max_kes_evolutions = max_kes,
+                            "KES key is EXPIRED. Offset {} >= max evolutions {}. \
+                             Block forging will fail. Generate new KES keys and \
+                             reissue the operational certificate with \
+                             --kes-period {current_kes_period}.",
+                            kes_offset,
+                            max_kes,
+                        );
+                    } else {
+                        let remaining = max_kes - kes_offset;
+                        let remaining_slots = remaining * slots_per_kes;
+                        info!(
+                            current_kes_period,
+                            opcert_kes_period,
+                            kes_offset,
+                            periods_remaining = remaining,
+                            "KES key valid — {} of {} evolutions used, \
+                             ~{} slots remaining",
+                            kes_offset,
+                            max_kes,
+                            remaining_slots,
+                        );
+                        // Warn when fewer than 10 periods remain (~15 days on
+                        // preview/mainnet with slotsPerKESPeriod=129600).
+                        if remaining <= 10 {
+                            warn!(
+                                periods_remaining = remaining,
+                                "KES key expiring soon — only {} periods remaining. \
+                                 Rotate KES keys and reissue the operational \
+                                 certificate before period {}.",
+                                remaining,
+                                opcert_kes_period + max_kes,
+                            );
+                        }
+                    }
+                }
+            }
+
             Some(creds)
         };
 
