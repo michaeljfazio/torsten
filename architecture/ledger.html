@@ -1,0 +1,399 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Ledger - Dugite Documentation</title>
+
+
+        <!-- Custom HTML head -->
+        
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+    </head>
+    <body class="sidebar-visible no-js">
+    <div id="body-container">
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            var html = document.querySelector('html');
+            html.classList.remove('light')
+            html.classList.add(theme);
+            var body = document.querySelector('body');
+            body.classList.remove('no-js')
+            body.classList.add('js');
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var body = document.querySelector('body');
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            body.classList.remove('sidebar-visible');
+            body.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <div class="sidebar-scrollbox">
+                <ol class="chapter"><li class="chapter-item expanded affix "><a href="../introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">Getting Started</li><li class="chapter-item expanded "><a href="../installation.html"><strong aria-hidden="true">1.</strong> Installation</a></li><li class="chapter-item expanded "><a href="../quickstart.html"><strong aria-hidden="true">2.</strong> Quick Start</a></li><li class="chapter-item expanded affix "><li class="part-title">Running a Node</li><li class="chapter-item expanded "><a href="../running/configuration.html"><strong aria-hidden="true">3.</strong> Configuration</a></li><li class="chapter-item expanded "><a href="../running/config-editor.html"><strong aria-hidden="true">4.</strong> Configuration Editor (dugite-config)</a></li><li class="chapter-item expanded "><a href="../running/topology.html"><strong aria-hidden="true">5.</strong> Topology</a></li><li class="chapter-item expanded "><a href="../running/networks.html"><strong aria-hidden="true">6.</strong> Networks</a></li><li class="chapter-item expanded "><a href="../running/mithril.html"><strong aria-hidden="true">7.</strong> Mithril Snapshot Import</a></li><li class="chapter-item expanded "><a href="../running/logging.html"><strong aria-hidden="true">8.</strong> Logging</a></li><li class="chapter-item expanded "><a href="../running/monitoring.html"><strong aria-hidden="true">9.</strong> Monitoring</a></li><li class="chapter-item expanded "><a href="../running/relay.html"><strong aria-hidden="true">10.</strong> Relay Node</a></li><li class="chapter-item expanded "><a href="../running/block-producer.html"><strong aria-hidden="true">11.</strong> Block Producer</a></li><li class="chapter-item expanded "><a href="../running/kubernetes.html"><strong aria-hidden="true">12.</strong> Kubernetes Deployment</a></li><li class="chapter-item expanded affix "><li class="part-title">CLI Reference</li><li class="chapter-item expanded "><a href="../cli/overview.html"><strong aria-hidden="true">13.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../cli/dugite-node.html"><strong aria-hidden="true">14.</strong> dugite-node</a></li><li class="chapter-item expanded "><a href="../cli/key-generation.html"><strong aria-hidden="true">15.</strong> Key Generation</a></li><li class="chapter-item expanded "><a href="../cli/transactions.html"><strong aria-hidden="true">16.</strong> Transactions</a></li><li class="chapter-item expanded "><a href="../cli/queries.html"><strong aria-hidden="true">17.</strong> Queries</a></li><li class="chapter-item expanded "><a href="../cli/stake-address.html"><strong aria-hidden="true">18.</strong> Stake Address</a></li><li class="chapter-item expanded "><a href="../cli/stake-pool.html"><strong aria-hidden="true">19.</strong> Stake Pool</a></li><li class="chapter-item expanded "><a href="../cli/node-commands.html"><strong aria-hidden="true">20.</strong> Node Commands</a></li><li class="chapter-item expanded "><a href="../cli/governance.html"><strong aria-hidden="true">21.</strong> Governance</a></li><li class="chapter-item expanded affix "><li class="part-title">Architecture</li><li class="chapter-item expanded "><a href="../architecture/overview.html"><strong aria-hidden="true">22.</strong> Overview</a></li><li class="chapter-item expanded "><a href="../architecture/sync-pipeline.html"><strong aria-hidden="true">23.</strong> Sync Pipeline</a></li><li class="chapter-item expanded "><a href="../architecture/storage.html"><strong aria-hidden="true">24.</strong> Storage</a></li><li class="chapter-item expanded "><a href="../architecture/ledger.html" class="active"><strong aria-hidden="true">25.</strong> Ledger</a></li><li class="chapter-item expanded "><a href="../architecture/consensus.html"><strong aria-hidden="true">26.</strong> Consensus</a></li><li class="chapter-item expanded "><a href="../architecture/networking.html"><strong aria-hidden="true">27.</strong> Networking</a></li><li class="chapter-item expanded "><a href="../architecture/p2p-governor.html"><strong aria-hidden="true">28.</strong> P2P Governor</a></li><li class="chapter-item expanded "><a href="../architecture/genesis-support.html"><strong aria-hidden="true">29.</strong> Genesis Support</a></li><li class="chapter-item expanded affix "><li class="part-title">Reference</li><li class="chapter-item expanded "><a href="../reference/protocol-parameters.html"><strong aria-hidden="true">30.</strong> Protocol Parameters</a></li><li class="chapter-item expanded "><a href="../reference/mini-protocols.html"><strong aria-hidden="true">31.</strong> Mini-Protocol Reference</a></li><li class="chapter-item expanded "><a href="../reference/benchmarks.html"><strong aria-hidden="true">32.</strong> Benchmarks</a></li><li class="chapter-item expanded "><a href="../reference/third-party-licenses.html"><strong aria-hidden="true">33.</strong> Third-Party Licenses</a></li><li class="chapter-item expanded "><a href="../reference/troubleshooting.html"><strong aria-hidden="true">34.</strong> Troubleshooting</a></li></ol>
+            </div>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <!-- Track and set sidebar scroll position -->
+        <script>
+            var sidebarScrollbox = document.querySelector('#sidebar .sidebar-scrollbox');
+            sidebarScrollbox.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A') {
+                    sessionStorage.setItem('sidebar-scroll', sidebarScrollbox.scrollTop);
+                }
+            }, { passive: true });
+            var sidebarScrollTop = sessionStorage.getItem('sidebar-scroll');
+            sessionStorage.removeItem('sidebar-scroll');
+            if (sidebarScrollTop) {
+                // preserve sidebar scroll position when navigating via links within sidebar
+                sidebarScrollbox.scrollTop = sidebarScrollTop;
+            } else {
+                // scroll sidebar to current active section when navigating via "next/previous chapter" buttons
+                var activeSection = document.querySelector('#sidebar .active');
+                if (activeSection) {
+                    activeSection.scrollIntoView({ block: 'center' });
+                }
+            }
+        </script>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Dugite Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/dugite" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/michaeljfazio/dugite/edit/main/docs/src/architecture/ledger.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="ledger"><a class="header" href="#ledger">Ledger</a></h1>
+<p>Dugite's ledger layer (<code>dugite-ledger</code>) implements full Cardano transaction validation, UTxO management, stake distribution, reward calculation, and Conway-era governance. It closely follows the Haskell cardano-ledger STS (State Transition System) rules.</p>
+<h2 id="ledger-state"><a class="header" href="#ledger-state">Ledger State</a></h2>
+<p>The <code>LedgerState</code> is the complete mutable state of the Cardano ledger at a given point in the chain:</p>
+<pre><code class="language-mermaid">flowchart TD
+    LS[LedgerState] --&gt; UTXO[UtxoSet&lt;br/&gt;On-disk via LSM tree]
+    LS --&gt; DELEG[Delegations&lt;br/&gt;Stake → Pool mapping]
+    LS --&gt; POOLS[Pool Parameters&lt;br/&gt;Registered pools + future updates]
+    LS --&gt; REWARDS[Reward Accounts&lt;br/&gt;Per-credential balances]
+    LS --&gt; GOV[GovernanceState&lt;br/&gt;DReps, proposals, committee, constitution]
+    LS --&gt; SNAP[EpochSnapshots&lt;br/&gt;Mark / Set / Go]
+    LS --&gt; PP[Protocol Parameters&lt;br/&gt;Current + previous epoch]
+    LS --&gt; FIN[Treasury + Reserves&lt;br/&gt;Financial state]
+</code></pre>
+<p>Key design decisions:</p>
+<ul>
+<li><strong>Arc-wrapped collections</strong> — Large mutable fields (<code>delegations</code>, <code>pool_params</code>, <code>reward_accounts</code>, <code>governance</code>) are wrapped in <code>Arc</code> for copy-on-write semantics. Cloning <code>LedgerState</code> bumps reference counts; mutations via <code>Arc::make_mut()</code> only copy when shared.</li>
+<li><strong>On-disk UTxO</strong> — The UTxO set lives in an LSM tree (<code>dugite-lsm</code>) rather than in memory, matching Haskell's UTxO-HD architecture. At mainnet scale (~20M UTxOs), this avoids multi-gigabyte memory pressure.</li>
+<li><strong>Exact rational arithmetic</strong> — Reward calculations use <code>Rat</code> (backed by <code>num_bigint::BigInt</code>) for lossless intermediate computation, with a single floor operation at the end matching Haskell's <code>rationalToCoinViaFloor</code>.</li>
+</ul>
+<h2 id="block-application-pipeline"><a class="header" href="#block-application-pipeline">Block Application Pipeline</a></h2>
+<p>When a new block arrives, <code>apply_block()</code> processes it through this pipeline:</p>
+<pre><code class="language-mermaid">flowchart TD
+    BLK[New Block] --&gt; CONN[Check prev_hash chain]
+    CONN --&gt; EPOCH{Epoch boundary?}
+    EPOCH --&gt;|Yes| ET[Process epoch transition]
+    EPOCH --&gt;|No| TXS[Process transactions]
+    ET --&gt; TXS
+    TXS --&gt; P1[Phase-1 Validation&lt;br/&gt;Structural + witness checks]
+    P1 --&gt; P2{Plutus scripts?}
+    P2 --&gt;|Yes| EVAL[Phase-2 Evaluation&lt;br/&gt;uplc CEK machine]
+    P2 --&gt;|No| APPLY[Apply UTxO changes]
+    EVAL --&gt; APPLY
+    APPLY --&gt; CERT[Process certificates]
+    CERT --&gt; GOV[Process governance actions]
+    GOV --&gt; DIFF[Record UtxoDiff]
+</code></pre>
+<h3 id="block-validation-modes"><a class="header" href="#block-validation-modes">Block Validation Modes</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Mode</th><th>Plutus Evaluation</th><th>Use Case</th></tr></thead><tbody>
+<tr><td><code>ValidateAll</code></td><td>Re-evaluate, verify <code>is_valid</code> flag</td><td>New blocks from peers</td></tr>
+<tr><td><code>ApplyOnly</code></td><td>Trust <code>is_valid</code> flag</td><td>ImmutableDB replay, Mithril import, self-forged blocks</td></tr>
+</tbody></table>
+</div>
+<p>Invalid transactions (<code>is_valid: false</code>) skip normal input/output processing. Instead, collateral inputs are consumed and collateral return is added.</p>
+<h2 id="transaction-validation"><a class="header" href="#transaction-validation">Transaction Validation</a></h2>
+<h3 id="phase-1-structural--witness"><a class="header" href="#phase-1-structural--witness">Phase-1 (Structural + Witness)</a></h3>
+<p>Phase-1 validation checks structural rules without executing scripts:</p>
+<ol>
+<li><strong>Inputs exist</strong> — All transaction inputs are present in the UTxO set</li>
+<li><strong>Fee sufficient</strong> — Fee covers minimum fee based on tx size, execution units, and reference script size (CIP-0112 tiered pricing in Conway)</li>
+<li><strong>Value conserved</strong> — Inputs = outputs + fee (+ minting/burning for multi-asset)</li>
+<li><strong>TTL valid</strong> — Transaction has not expired (time-to-live check against current slot)</li>
+<li><strong>Witness verification</strong> — Ed25519 signatures match required signers from inputs, withdrawals, and certificates</li>
+<li><strong>Multi-asset rules</strong> — No negative quantities, minting requires policy witness</li>
+<li><strong>Reference inputs</strong> — All reference inputs exist (not consumed, only read)</li>
+<li><strong>Output minimum</strong> — Each output meets the minimum lovelace requirement</li>
+<li><strong>Transaction size</strong> — Does not exceed max transaction size</li>
+<li><strong>Network ID</strong> — Matches the expected network</li>
+</ol>
+<h3 id="phase-2-plutus-script-execution"><a class="header" href="#phase-2-plutus-script-execution">Phase-2 (Plutus Script Execution)</a></h3>
+<p>For transactions containing Plutus scripts (V1/V2/V3):</p>
+<ol>
+<li><strong>Script data hash</strong> — Matches the hash of redeemers + datums + cost models</li>
+<li><strong>Collateral</strong> — Sufficient collateral provided (150% of estimated fees in Conway)</li>
+<li><strong>Execution units</strong> — Each redeemer's CPU and memory within budget</li>
+<li><strong>Script evaluation</strong> — Each script is executed via the uplc CEK machine with the appropriate cost model</li>
+<li><strong>Block budget</strong> — Total execution units across all transactions do not exceed block limits</li>
+</ol>
+<p>Scripts are evaluated in parallel using rayon when the <code>parallel-verification</code> feature is enabled (default).</p>
+<h3 id="validation-error-types"><a class="header" href="#validation-error-types">Validation Error Types</a></h3>
+<p>The <code>ValidationError</code> enum covers 50+ error variants across all categories: structural, UTxO, fees, witnesses, time, scripts, collateral, Plutus, era-gating, certificates, governance, datums, withdrawals, network, and auxiliary data.</p>
+<h2 id="certificate-processing"><a class="header" href="#certificate-processing">Certificate Processing</a></h2>
+<p>Dugite processes all Shelley through Conway certificate types:</p>
+<div class="table-wrapper"><table><thead><tr><th>Certificate</th><th>Description</th></tr></thead><tbody>
+<tr><td>StakeRegistration</td><td>Register a stake credential (deposit required)</td></tr>
+<tr><td>StakeDeregistration</td><td>Deregister a stake credential (deposit refunded)</td></tr>
+<tr><td>StakeDelegation</td><td>Delegate stake to a pool</td></tr>
+<tr><td>PoolRegistration</td><td>Register a new stake pool</td></tr>
+<tr><td>PoolRetirement</td><td>Schedule pool retirement at a future epoch</td></tr>
+<tr><td>RegDRep</td><td>Register a delegated representative (Conway)</td></tr>
+<tr><td>UnregDRep</td><td>Deregister a DRep (Conway)</td></tr>
+<tr><td>UpdateDRep</td><td>Update DRep metadata anchor (Conway)</td></tr>
+<tr><td>VoteDelegation</td><td>Delegate voting power to a DRep (Conway)</td></tr>
+<tr><td>StakeVoteDelegation</td><td>Combined stake + vote delegation (Conway)</td></tr>
+<tr><td>RegStakeDeleg</td><td>Combined registration + stake delegation (Conway)</td></tr>
+<tr><td>RegStakeVoteDeleg</td><td>Combined registration + stake + vote delegation (Conway)</td></tr>
+<tr><td>CommitteeHotAuth</td><td>Authorize a hot key for a constitutional committee member (Conway)</td></tr>
+<tr><td>CommitteeColdResign</td><td>Resign a constitutional committee cold key (Conway)</td></tr>
+<tr><td>MoveInstantaneousRewards</td><td>Transfer between treasury and reserves (pre-Conway)</td></tr>
+</tbody></table>
+</div>
+<h2 id="governance-cip-1694"><a class="header" href="#governance-cip-1694">Governance (CIP-1694)</a></h2>
+<p>The <code>GovernanceState</code> tracks all Conway-era governance:</p>
+<h3 id="drep-lifecycle"><a class="header" href="#drep-lifecycle">DRep Lifecycle</a></h3>
+<ul>
+<li><strong>Registration</strong> — DReps register with a deposit, becoming eligible to vote</li>
+<li><strong>Activity tracking</strong> — DReps must vote within <code>drepActivity</code> epochs or become inactive</li>
+<li><strong>Expiration</strong> — Inactive DReps' delegated stake counts as abstaining</li>
+<li><strong>Delegation</strong> — Stake credentials delegate voting power to DReps, AlwaysAbstain, or AlwaysNoConfidence</li>
+</ul>
+<h3 id="constitutional-committee"><a class="header" href="#constitutional-committee">Constitutional Committee</a></h3>
+<ul>
+<li><strong>Hot key authorization</strong> — Cold keys authorize hot keys for voting</li>
+<li><strong>Member expiration</strong> — Each member has an epoch-based term limit</li>
+<li><strong>Quorum</strong> — Threshold fraction of non-expired, non-resigned members must approve</li>
+</ul>
+<h3 id="governance-actions"><a class="header" href="#governance-actions">Governance Actions</a></h3>
+<p>Seven action types with per-type ratification thresholds:</p>
+<div class="table-wrapper"><table><thead><tr><th>Action</th><th>DRep Threshold</th><th>SPO Threshold</th><th>CC Required</th></tr></thead><tbody>
+<tr><td>ParameterChange</td><td>Varies by param group (4 groups)</td><td>Varies by param group (5 groups)</td><td>Yes</td></tr>
+<tr><td>HardForkInitiation</td><td>DRep threshold</td><td>SPO threshold</td><td>Yes</td></tr>
+<tr><td>TreasuryWithdrawals</td><td>DRep threshold</td><td>No</td><td>Yes</td></tr>
+<tr><td>NoConfidence</td><td>DRep threshold</td><td>SPO threshold</td><td>No</td></tr>
+<tr><td>UpdateCommittee</td><td>DRep threshold</td><td>SPO threshold</td><td>No (if NoConfidence)</td></tr>
+<tr><td>NewConstitution</td><td>DRep threshold</td><td>No</td><td>Yes</td></tr>
+<tr><td>InfoAction</td><td>No threshold</td><td>No threshold</td><td>No</td></tr>
+</tbody></table>
+</div>
+<h3 id="ratification"><a class="header" href="#ratification">Ratification</a></h3>
+<p>Ratification uses a <strong>two-epoch delay</strong>: proposals and votes from epoch E are considered at the E+1 → E+2 boundary using a frozen <code>RatificationSnapshot</code>. This prevents mid-epoch voting from affecting the current epoch's ratification. Thresholds use exact rational arithmetic via u128 cross-multiplication.</p>
+<h2 id="epoch-transitions"><a class="header" href="#epoch-transitions">Epoch Transitions</a></h2>
+<p>At each epoch boundary, <code>process_epoch_transition()</code> follows the Haskell NEWEPOCH STS rule:</p>
+<pre><code class="language-mermaid">flowchart TD
+    NE[NEWEPOCH] --&gt; RUPD[Apply pending RUPD&lt;br/&gt;treasury += deltaT&lt;br/&gt;reserves -= deltaR&lt;br/&gt;credit rewards]
+    RUPD --&gt; SNAP[SNAP&lt;br/&gt;Rotate mark → set → go&lt;br/&gt;Capture current fees]
+    SNAP --&gt; POOLREAP[POOLREAP&lt;br/&gt;Process pool retirements&lt;br/&gt;Refund deposits]
+    POOLREAP --&gt; RAT[RATIFY&lt;br/&gt;Governance ratification&lt;br/&gt;Enact approved actions]
+    RAT --&gt; RESET[Reset block counters&lt;br/&gt;Clear RUPD state]
+</code></pre>
+<h3 id="reward-distribution-rupd"><a class="header" href="#reward-distribution-rupd">Reward Distribution (RUPD)</a></h3>
+<p>Rewards follow a deferred schedule matching Haskell's pulsing reward computation:</p>
+<ol>
+<li><strong>Epoch E → E+1</strong>: Compute RUPD (monetary expansion + fees - treasury cut)</li>
+<li><strong>Epoch E+1 → E+2</strong>: Apply RUPD (credit rewards to accounts, update treasury/reserves)</li>
+</ol>
+<p>The reward calculation uses the "go" snapshot (two epochs old) for stake distribution, ensuring a stable base for computation.</p>
+<h3 id="stake-snapshots"><a class="header" href="#stake-snapshots">Stake Snapshots</a></h3>
+<p>The mark/set/go model ensures different subsystems use consistent, non-overlapping snapshots:</p>
+<div class="table-wrapper"><table><thead><tr><th>Snapshot</th><th>Age</th><th>Used For</th></tr></thead><tbody>
+<tr><td>Mark</td><td>Current epoch boundary</td><td>Future leader election (2 epochs later)</td></tr>
+<tr><td>Set</td><td>Previous epoch boundary</td><td>Current epoch leader election</td></tr>
+<tr><td>Go</td><td>Two epochs ago</td><td>Current epoch reward distribution</td></tr>
+</tbody></table>
+</div>
+<h2 id="utxo-storage"><a class="header" href="#utxo-storage">UTxO Storage</a></h2>
+<h3 id="utxostore"><a class="header" href="#utxostore">UtxoStore</a></h3>
+<p>The persistent UTxO set wraps a <code>dugite-lsm</code> LSM tree:</p>
+<ul>
+<li><strong>36-byte keys</strong> — 32-byte transaction hash + 4-byte output index (big-endian)</li>
+<li><strong>Bincode values</strong> — <code>TransactionOutput</code> serialized via bincode</li>
+<li><strong>Address index</strong> — In-memory <code>HashMap&lt;Address, HashSet&lt;TransactionInput&gt;&gt;</code> for N2C LocalStateQuery <code>GetUTxOByAddress</code> efficiency</li>
+<li><strong>Bloom filters</strong> — 10 bits per key (~1% false positive rate) for fast negative lookups during validation</li>
+</ul>
+<h3 id="diffseq-rollback-support"><a class="header" href="#diffseq-rollback-support">DiffSeq (Rollback Support)</a></h3>
+<p>Each block produces a <code>UtxoDiff</code> recording inserted and deleted UTxOs. The <code>DiffSeq</code> holds the last k=2160 diffs, enabling O(1) rollback by applying diffs in reverse without reloading snapshots.</p>
+<h3 id="ledgerseq-anchored-state-sequence"><a class="header" href="#ledgerseq-anchored-state-sequence">LedgerSeq (Anchored State Sequence)</a></h3>
+<p><code>LedgerSeq</code> implements Haskell's V2 LedgerDB architecture:</p>
+<ul>
+<li><strong>Anchor</strong> — One full <code>LedgerState</code> at the immutable tip (persisted to disk)</li>
+<li><strong>Volatile deltas</strong> — Per-block <code>LedgerDelta</code> for the last k blocks</li>
+<li><strong>Checkpoints</strong> — Full state snapshots every ~100 blocks for fast reconstruction</li>
+<li><strong>Rollback</strong> — Drop trailing deltas and reconstruct from the nearest checkpoint</li>
+</ul>
+<p>This avoids the 17-34 GB memory overhead of storing k full state copies.</p>
+<h2 id="compositeutxoview-mempool-support"><a class="header" href="#compositeutxoview-mempool-support">CompositeUtxoView (Mempool Support)</a></h2>
+<p>All <code>validate_transaction_*</code> functions accept any <code>UtxoLookup</code> implementation. The <code>CompositeUtxoView</code> layers a mempool overlay on top of the on-chain UTxO set, enabling validation of chained mempool transactions (where one tx spends outputs of another unconfirmed tx) without mutating the live ledger state.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../architecture/storage.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../architecture/consensus.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../architecture/storage.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../architecture/consensus.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
