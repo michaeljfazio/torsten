@@ -6,6 +6,11 @@ on:
     # Nightly at 2 AM UTC
     - cron: '0 2 * * *'
 
+env:
+  CARGO_HOME: /home/runner/.cargo
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
 jobs:
   fuzz:
     runs-on: ubuntu-latest
@@ -23,9 +28,20 @@ jobs:
           - governance
           - ledger_snapshot
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-${{ matrix.target }}-
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -40,7 +56,7 @@ jobs:
 
       - name: Upload corpus
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: corpus-${{ matrix.target }}
           path: fuzz/corpus/fuzz_${{ matrix.target }}/
@@ -48,7 +64,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: crashes-${{ matrix.target }}
           path: fuzz/artifacts/fuzz_${{ matrix.target }}/
