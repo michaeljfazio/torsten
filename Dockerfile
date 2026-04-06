@@ -1,5 +1,5 @@
 # ---- Build stage ----
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.93-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libclang-dev clang pkg-config && \
