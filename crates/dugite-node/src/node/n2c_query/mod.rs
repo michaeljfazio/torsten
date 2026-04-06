@@ -524,10 +524,12 @@ impl QueryHandler {
             }
             38 => {
                 // Tag 38: GetMaxMajorProtocolVersion (V21+)
-                // The hardcoded 10 matches the consensus config's max_major_prot_ver
-                // (OuroborosPraos.max_major_prot_ver). Both must be updated together.
+                // Derived from the same node-level constant as OuroborosPraos.max_major_prot_ver
+                // and the forged block header protocol version.
                 debug!("Query: GetMaxMajorProtocolVersion");
-                QueryResult::MaxMajorProtocolVersion(10)
+                QueryResult::MaxMajorProtocolVersion(
+                    dugite_consensus::NODE_PROTOCOL_VERSION.0 as u32,
+                )
             }
             39 => {
                 // Tag 39: GetDRepDelegations (V23+)

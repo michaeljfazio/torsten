@@ -234,8 +234,9 @@ pub struct BlockProducerConfig {
 
 impl Default for BlockProducerConfig {
     fn default() -> Self {
+        let (major, minor) = dugite_consensus::NODE_PROTOCOL_VERSION;
         BlockProducerConfig {
-            protocol_version: ProtocolVersion { major: 9, minor: 0 },
+            protocol_version: ProtocolVersion { major, minor },
             _max_block_body_size: 90112,
             _max_txs_per_block: 500,
             era: Era::Conway,

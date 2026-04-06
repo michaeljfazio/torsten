@@ -224,7 +224,7 @@ impl OuroborosPraos {
             nonce_established: false,
             snapshots_established: false,
             checkpoints: HashMap::new(),
-            max_major_prot_ver: 10,
+            max_major_prot_ver: crate::NODE_PROTOCOL_VERSION.0,
             opcert_counters: HashMap::new(),
         }
     }
@@ -247,7 +247,7 @@ impl OuroborosPraos {
             nonce_established: false,
             snapshots_established: false,
             checkpoints: HashMap::new(),
-            max_major_prot_ver: 10,
+            max_major_prot_ver: crate::NODE_PROTOCOL_VERSION.0,
             opcert_counters: HashMap::new(),
         }
     }
@@ -272,7 +272,7 @@ impl OuroborosPraos {
             nonce_established: false,
             snapshots_established: false,
             checkpoints: HashMap::new(),
-            max_major_prot_ver: 10,
+            max_major_prot_ver: crate::NODE_PROTOCOL_VERSION.0,
             opcert_counters: HashMap::new(),
         }
     }
