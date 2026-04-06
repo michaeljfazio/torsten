@@ -1,4 +1,5 @@
 use super::cbor_utils::*;
+use super::pparams::decode_pparams;
 use dugite_primitives::hash::Hash32;
 
 // ── decode_uint ────────────────────────────────────────────────────────────────
@@ -321,4 +322,192 @@ fn test_decode_bigint_tag2() {
     let (v, n) = decode_bigint_or_uint(&data).unwrap();
     assert_eq!(v, 256);
     assert_eq!(n, 4);
+}
+
+// ── decode_pparams ─────────────────────────────────────────────────────────
+
+/// Round-trip test against the real preview testnet PParams captured at
+/// epoch 1259.  All expected values are verified against Koios on-chain data.
+#[test]
+fn test_decode_pparams_preview_epoch_1259() {
+    let pp_cbor = include_bytes!("../../test_fixtures/preview_pparams_e1259.cbor");
+    let (pp, consumed) = decode_pparams(pp_cbor).unwrap();
+
+    // All bytes must be consumed — the fixture contains exactly one PParams value.
+    assert_eq!(consumed, pp_cbor.len(), "not all bytes were consumed");
+
+    // ── basic fee / size fields ──────────────────────────────────────────────
+    assert_eq!(pp.min_fee_a, 44, "minFeeA");
+    assert_eq!(pp.min_fee_b, 155381, "minFeeB");
+    assert_eq!(pp.max_block_body_size, 90112, "maxBlockBodySize");
+    assert_eq!(pp.max_tx_size, 16384, "maxTxSize");
+    assert_eq!(pp.max_block_header_size, 1100, "maxBlockHeaderSize");
+
+    // ── staking deposits ────────────────────────────────────────────────────
+    assert_eq!(pp.key_deposit.0, 2_000_000, "keyDeposit");
+    assert_eq!(pp.pool_deposit.0, 500_000_000, "poolDeposit");
+
+    // ── economy parameters ───────────────────────────────────────────────────
+    assert_eq!(pp.e_max, 18, "eMax");
+    assert_eq!(pp.n_opt, 500, "nOpt");
+    // a0 = 3/10
+    assert_eq!(pp.a0.numerator, 3, "a0.num");
+    assert_eq!(pp.a0.denominator, 10, "a0.den");
+    // rho = 3/1000
+    assert_eq!(pp.rho.numerator, 3, "rho.num");
+    assert_eq!(pp.rho.denominator, 1000, "rho.den");
+    // tau = 1/5
+    assert_eq!(pp.tau.numerator, 1, "tau.num");
+    assert_eq!(pp.tau.denominator, 5, "tau.den");
+
+    // ── protocol version ─────────────────────────────────────────────────────
+    assert_eq!(pp.protocol_version_major, 10, "protocolVersion.major");
+    assert_eq!(pp.protocol_version_minor, 0, "protocolVersion.minor");
+
+    // ── UTxO and pool minimums ────────────────────────────────────────────────
+    assert_eq!(pp.min_pool_cost.0, 170_000_000, "minPoolCost");
+    assert_eq!(pp.ada_per_utxo_byte.0, 4310, "adaPerUTxOByte");
+
+    // ── cost models present ──────────────────────────────────────────────────
+    assert!(pp.cost_models.plutus_v1.is_some(), "PlutusV1 cost model missing");
+    assert!(pp.cost_models.plutus_v2.is_some(), "PlutusV2 cost model missing");
+    assert!(pp.cost_models.plutus_v3.is_some(), "PlutusV3 cost model missing");
+    // Spot-check entry counts (matches cardano-node 10.x Conway cost models)
+    assert_eq!(
+        pp.cost_models.plutus_v1.as_ref().unwrap().len(),
+        166,
+        "PlutusV1 cost count"
+    );
+    assert_eq!(
+        pp.cost_models.plutus_v2.as_ref().unwrap().len(),
+        175,
+        "PlutusV2 cost count"
+    );
+    assert_eq!(
+        pp.cost_models.plutus_v3.as_ref().unwrap().len(),
+        297,
+        "PlutusV3 cost count"
+    );
+
+    // ── execution unit prices ────────────────────────────────────────────────
+    // mem_price = 577/10000, step_price = 721/10000000
+    assert_eq!(pp.execution_costs.mem_price.numerator, 577, "mem_price.num");
+    assert_eq!(
+        pp.execution_costs.mem_price.denominator, 10000, "mem_price.den"
+    );
+    assert_eq!(
+        pp.execution_costs.step_price.numerator, 721, "step_price.num"
+    );
+    assert_eq!(
+        pp.execution_costs.step_price.denominator, 10_000_000, "step_price.den"
+    );
+
+    // ── execution unit limits ────────────────────────────────────────────────
+    assert_eq!(pp.max_tx_ex_units.mem, 16_500_000, "maxTxExUnits.mem");
+    assert_eq!(
+        pp.max_tx_ex_units.steps, 10_000_000_000, "maxTxExUnits.steps"
+    );
+    assert_eq!(pp.max_block_ex_units.mem, 72_000_000, "maxBlockExUnits.mem");
+    assert_eq!(
+        pp.max_block_ex_units.steps, 20_000_000_000, "maxBlockExUnits.steps"
+    );
+
+    // ── collateral ───────────────────────────────────────────────────────────
+    assert_eq!(pp.max_val_size, 5000, "maxValSize");
+    assert_eq!(pp.collateral_percentage, 150, "collateralPercentage");
+    assert_eq!(pp.max_collateral_inputs, 3, "maxCollateralInputs");
+
+    // ── Conway governance ────────────────────────────────────────────────────
+    assert_eq!(pp.committee_min_size, 3, "committeeMinSize");
+    assert_eq!(pp.committee_max_term_length, 365, "committeeMaxTermLength");
+    assert_eq!(pp.gov_action_lifetime, 30, "govActionLifetime");
+    assert_eq!(pp.gov_action_deposit.0, 100_000_000_000, "govActionDeposit");
+    assert_eq!(pp.drep_deposit.0, 500_000_000, "dRepDeposit");
+    assert_eq!(pp.drep_activity, 31, "dRepActivity");
+
+    // ── ref script fee ───────────────────────────────────────────────────────
+    // Haskell encodes as rational 15/1; we extract 15.
+    assert_eq!(
+        pp.min_fee_ref_script_cost_per_byte, 15,
+        "minFeeRefScriptCostPerByte"
+    );
+
+    // ── pool voting thresholds (all 51/100 on preview) ────────────────────────
+    assert_eq!(
+        pp.pvt_motion_no_confidence.numerator, 51,
+        "pvtMotionNoConfidence.num"
+    );
+    assert_eq!(
+        pp.pvt_motion_no_confidence.denominator, 100,
+        "pvtMotionNoConfidence.den"
+    );
+    assert_eq!(pp.pvt_committee_normal.numerator, 51, "pvtCommitteeNormal.num");
+    assert_eq!(
+        pp.pvt_committee_normal.denominator, 100, "pvtCommitteeNormal.den"
+    );
+    assert_eq!(
+        pp.pvt_committee_no_confidence.numerator, 51,
+        "pvtCommitteeNoConfidence.num"
+    );
+    assert_eq!(
+        pp.pvt_committee_no_confidence.denominator, 100,
+        "pvtCommitteeNoConfidence.den"
+    );
+    assert_eq!(pp.pvt_hard_fork.numerator, 51, "pvtHardFork.num");
+    assert_eq!(pp.pvt_hard_fork.denominator, 100, "pvtHardFork.den");
+    assert_eq!(
+        pp.pvt_pp_security_group.numerator, 51, "pvtPPSecurityGroup.num"
+    );
+    assert_eq!(
+        pp.pvt_pp_security_group.denominator, 100, "pvtPPSecurityGroup.den"
+    );
+
+    // ── DRep voting thresholds ────────────────────────────────────────────────
+    // dvtMotionNoConfidence = 67/100
+    assert_eq!(
+        pp.dvt_no_confidence.numerator, 67, "dvtNoConfidence.num"
+    );
+    assert_eq!(
+        pp.dvt_no_confidence.denominator, 100, "dvtNoConfidence.den"
+    );
+    // dvtCommitteeNormal = 67/100
+    assert_eq!(
+        pp.dvt_committee_normal.numerator, 67, "dvtCommitteeNormal.num"
+    );
+    // dvtCommitteeNoConfidence = 3/5
+    assert_eq!(
+        pp.dvt_committee_no_confidence.numerator, 3,
+        "dvtCommitteeNoConfidence.num"
+    );
+    assert_eq!(
+        pp.dvt_committee_no_confidence.denominator, 5,
+        "dvtCommitteeNoConfidence.den"
+    );
+    // dvtUpdateToConstitution (→ dvt_constitution) = 3/4
+    assert_eq!(
+        pp.dvt_constitution.numerator, 3, "dvtConstitution.num"
+    );
+    assert_eq!(
+        pp.dvt_constitution.denominator, 4, "dvtConstitution.den"
+    );
+    // dvtHardForkInitiation = 3/5
+    assert_eq!(pp.dvt_hard_fork.numerator, 3, "dvtHardFork.num");
+    assert_eq!(pp.dvt_hard_fork.denominator, 5, "dvtHardFork.den");
+    // dvtPPNetworkGroup = 67/100
+    assert_eq!(
+        pp.dvt_pp_network_group.numerator, 67, "dvtPPNetworkGroup.num"
+    );
+    assert_eq!(
+        pp.dvt_pp_network_group.denominator, 100, "dvtPPNetworkGroup.den"
+    );
+    // dvtPPGovGroup = 3/4
+    assert_eq!(pp.dvt_pp_gov_group.numerator, 3, "dvtPPGovGroup.num");
+    assert_eq!(pp.dvt_pp_gov_group.denominator, 4, "dvtPPGovGroup.den");
+    // dvtTreasuryWithdrawal = 67/100
+    assert_eq!(
+        pp.dvt_treasury_withdrawal.numerator, 67, "dvtTreasuryWithdrawal.num"
+    );
+    assert_eq!(
+        pp.dvt_treasury_withdrawal.denominator, 100, "dvtTreasuryWithdrawal.den"
+    );
 }
