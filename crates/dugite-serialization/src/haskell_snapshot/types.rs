@@ -201,20 +201,33 @@ pub struct HaskellSnapShotPool {
     pub metadata: Option<(String, Hash32)>,
 }
 
-/// Governance state (simplified — captures fields needed by dugite).
+/// Governance state decoded from `ConwayGovState array(7)`.
+///
+/// The PParams fields ([3] curPParams and [4] prevPParams) are fully decoded
+/// here because they live inside the GovState CBOR.  The top-level decoder
+/// copies them into `HaskellNewEpochState` after calling `decode_govstate`.
+///
+/// All complex sub-structures that dugite does not currently need (proposals,
+/// committee, DRep pulsing state) are preserved verbatim as raw CBOR bytes so
+/// consumers can decode them on-demand without re-parsing the entire snapshot.
 #[derive(Debug)]
 pub struct HaskellGovState {
     /// Raw proposals CBOR (complex structure, decoded on-demand).
     pub proposals_raw: Vec<u8>,
-    /// Committee raw CBOR bytes (if present).
+    /// Committee raw CBOR bytes (inner value only, StrictMaybe wrapper stripped).
     pub committee_raw: Option<Vec<u8>>,
     /// Constitution anchor + optional script hash.
     pub constitution: Option<HaskellConstitution>,
+    /// Current protocol parameters (decoded from GovState position [3]).
+    pub cur_pparams: ProtocolParameters,
+    /// Previous protocol parameters (decoded from GovState position [4]).
+    pub prev_pparams: ProtocolParameters,
+    /// FuturePParams variant tag: 0=NoPParamsUpdate, 1=Definite, 2=Potential.
+    pub future_pparams_tag: u8,
+    /// Decoded future PParams if the variant carries one.
+    pub future_pparams: Option<ProtocolParameters>,
     /// DRep pulsing state raw CBOR.
     pub drep_pulsing_raw: Vec<u8>,
-    /// FuturePParams variant tag (0=none, 1=definite, 2=potential).
-    pub future_pparams_tag: u8,
-    pub future_pparams: Option<ProtocolParameters>,
 }
 
 /// Constitution anchor.

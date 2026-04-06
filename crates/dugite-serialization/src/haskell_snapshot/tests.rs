@@ -1,5 +1,6 @@
 use super::cbor_utils::*;
 use super::certstate::decode_certstate;
+use super::govstate::decode_govstate;
 use super::pparams::decode_pparams;
 use super::praos::decode_praos_state;
 use super::snapshots::decode_snapshots;
@@ -743,5 +744,107 @@ fn test_decode_snapshots() {
         sand.vrf_hash.as_bytes().len(),
         32,
         "SAND vrf_hash must be 32 bytes"
+    );
+}
+
+// ── decode_govstate ───────────────────────────────────────────────────────────
+
+/// Round-trip test against the real preview testnet GovState captured at
+/// epoch 1259.  The fixture is the full `ConwayGovState array(7)` CBOR.
+///
+/// Expected values are verified against Koios on-chain data and the Haskell
+/// node's `ExtLedgerState` dump for preview epoch 1259.
+#[test]
+fn test_decode_govstate() {
+    let data = include_bytes!("../../test_fixtures/preview_govstate_e1259.cbor");
+    let (gov, consumed) = decode_govstate(data).unwrap();
+
+    // Every byte in the fixture must be consumed — it contains exactly one
+    // ConwayGovState value.
+    assert_eq!(consumed, data.len(), "not all bytes consumed");
+
+    // ── current protocol parameters ─────────────────────────────────────────
+    // These values are cross-verified against Koios epoch_params for
+    // preview epoch 1259.
+    assert_eq!(gov.cur_pparams.min_fee_a, 44, "curPParams.minFeeA");
+    assert_eq!(gov.cur_pparams.min_fee_b, 155_381, "curPParams.minFeeB");
+    assert_eq!(
+        gov.cur_pparams.protocol_version_major, 10,
+        "curPParams.protocolVersion.major"
+    );
+    assert_eq!(gov.cur_pparams.n_opt, 500, "curPParams.nOpt");
+    assert_eq!(
+        gov.cur_pparams.gov_action_deposit.0, 100_000_000_000,
+        "curPParams.govActionDeposit"
+    );
+    assert_eq!(
+        gov.cur_pparams.drep_deposit.0, 500_000_000,
+        "curPParams.dRepDeposit"
+    );
+
+    // ── previous protocol parameters ────────────────────────────────────────
+    // On preview epoch 1259 there was no PParams update in the prior epoch,
+    // so prevPParams matches curPParams for the fee parameters.
+    assert_eq!(gov.prev_pparams.min_fee_a, 44, "prevPParams.minFeeA");
+    assert_eq!(
+        gov.prev_pparams.protocol_version_major, 10,
+        "prevPParams.protocolVersion.major"
+    );
+
+    // ── raw CBOR blobs — non-empty ───────────────────────────────────────────
+    // Proposals and DRep pulsing state are the two largest sub-structures;
+    // both must be present on a live testnet.
+    assert!(!gov.proposals_raw.is_empty(), "proposals_raw must be non-empty");
+    assert!(
+        !gov.drep_pulsing_raw.is_empty(),
+        "drep_pulsing_raw must be non-empty"
+    );
+
+    // ── committee — present on preview at epoch 1259 ─────────────────────────
+    // The committee field holds active constitutional committee members; it is
+    // non-empty on preview where governance is live.
+    assert!(
+        gov.committee_raw.is_some(),
+        "committee must be Some on preview testnet"
+    );
+    assert!(
+        !gov.committee_raw.as_ref().unwrap().is_empty(),
+        "committee_raw must be non-empty"
+    );
+
+    // ── constitution ─────────────────────────────────────────────────────────
+    let constitution = gov.constitution.as_ref().expect("constitution must be present");
+    // Anchor URL verified against on-chain governance metadata for preview.
+    assert_eq!(
+        constitution.anchor_url,
+        "ipfs://bafkreifnwj6zpu3ixa4siz2lndqybyc5wnnt3jkwyutci4e2tmbnj3xrdm",
+        "constitution anchor URL"
+    );
+    // Anchor hash verified against the Haskell node dump for preview epoch 1259.
+    assert_eq!(
+        hex::encode(constitution.anchor_hash.as_bytes()),
+        "ca41a91f399259bcefe57f9858e91f6d00e1a38d6d9c63d4052914ea7bd70cb2",
+        "constitution anchor hash"
+    );
+    // Script hash present — preview constitution has a guardrail script.
+    assert!(
+        constitution.script_hash.is_some(),
+        "constitution script hash must be present on preview"
+    );
+    assert_eq!(
+        hex::encode(constitution.script_hash.as_ref().unwrap().as_bytes()),
+        "fa24fb305126805cf2164c161d852a0e7330cf988f1fe558cf7d4a64",
+        "constitution script hash"
+    );
+
+    // ── futurePParams — PotentialPParamsUpdate(SNothing) ────────────────────
+    // At epoch 1259 no PParams update was queued, so tag=2, value=None.
+    assert_eq!(
+        gov.future_pparams_tag, 2,
+        "futurePParams tag must be 2 (Potential)"
+    );
+    assert!(
+        gov.future_pparams.is_none(),
+        "futurePParams value must be None (SNothing)"
     );
 }
