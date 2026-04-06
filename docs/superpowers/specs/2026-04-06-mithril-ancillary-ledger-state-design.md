@@ -275,18 +275,37 @@ tvar_file = array(1) [
 
 **TxIn encoding** (34 bytes packed):
 ```
-bytes(34) = TxId(32 bytes) || TxIx(2 bytes, big-endian)
+bytes(34) = TxId(32 bytes, big-endian) || TxIx(2 bytes, LITTLE-ENDIAN)
 ```
+NOTE: TxIx uses host-native byte order (little-endian on x86_64/ARM64). The comment in
+Haskell's `Snapshots.hs` says "big-endian txix" but the implementation uses `writeWord8ArrayAsWord16#`
+which is host-native. Verified against real data: TxIx=1 encodes as `01 00`, not `00 01`.
 
 **TxOut encoding** (MemPack binary, NOT CBOR):
-- Header byte encodes variant flags:
-  - Bit 0: has datum (hash or inline)
-  - Bit 1: has multi-asset value
-  - Bit 2: has reference script
-- Followed by compact address encoding + value + optional datum/script
-- Distribution on preview: 49% ADA-only (0x00), 34% multi-asset (0x02), 15% ref-script (0x04), 2% datum variants
+First byte is a **tag** (0-5) identifying the TxOut variant:
 
-**Implementation approach**: Build a MemPack decoder by porting the `MemPack` trait instances from cardano-ledger. Start with the simplest variant (0x00 = ADA-only, no datum, no script) which covers ~49% of UTxOs, then extend to multi-asset and datum/script variants.
+| Tag | Variant | Fields |
+|-----|---------|--------|
+| 0 | TxOutCompact | CompactAddr + CompactValue |
+| 1 | TxOutCompactDH | CompactAddr + CompactValue + DataHash(32 bytes) |
+| 2 | AddrHash28_AdaOnly | Credential + Addr28Extra + CompactCoin (optimized) |
+| 3 | AddrHash28_AdaOnly_DataHash32 | Credential + Addr28Extra + CompactCoin + DataHash32 |
+| 4 | TxOutCompactDatum | CompactAddr + CompactValue + Datum(MemPack) |
+| 5 | TxOutCompactRefScript | CompactAddr + CompactValue + Datum(MemPack) + Script(MemPack) |
+
+Distribution on preview: ~49% tag 0, ~34% tag 2, ~15% tag 4, ~2% tags 1/5.
+
+Sub-encodings:
+- **CompactAddr**: VarLen(length) + raw address bytes. VarLen uses 7-bit groups, LSB first,
+  continuation bit in MSB. Typical Shelley address (57 bytes): `0x39` (1 byte) + 57 bytes.
+- **CompactValue (ADA-only)**: `tag(0) + VarLen(lovelace)`
+- **CompactValue (multi-asset)**: `tag(1) + VarLen(lovelace) + VarLen(numAssets) + MultiAsset_repr`
+- Tags 2/3 are optimized representations for enterprise/pointer addresses with ADA-only value;
+  require `decodeAddress28`/`decodeDataHash32` unpacking.
+
+**Implementation approach**: Build a MemPack decoder by porting the `MemPack` trait instances
+from cardano-ledger's `Babbage/TxOut.hs`. Start with tags 0 and 2 (ADA-only variants, ~83%
+of entries), then extend to multi-asset (tag 4/5) and datum variants (tag 1/3).
 
 ### 3. Mithril V2 API Integration
 
