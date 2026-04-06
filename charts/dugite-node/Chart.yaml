@@ -3,7 +3,7 @@ name: dugite-node
 description: A Helm chart for deploying Dugite, a Rust implementation of the Cardano node
 type: application
 version: 0.1.0
-appVersion: "1.0.1-alpha"
+appVersion: "1.0.2-alpha"
 keywords:
   - cardano
   - blockchain
