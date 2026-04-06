@@ -1191,6 +1191,7 @@ dependencies = [
  "dugite-primitives",
  "dugite-serialization",
  "dugite-storage",
+ "ed25519-dalek",
  "fs2",
  "futures",
  "futures-util",

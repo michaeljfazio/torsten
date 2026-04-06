@@ -12,9 +12,12 @@ use anyhow::{Context, Result};
 use dugite_primitives::hash::Hash32;
 #[cfg(test)]
 use dugite_primitives::time::{BlockNo, SlotNo};
+#[allow(unused_imports)]
+use ed25519_dalek::{Signature, VerifyingKey};
 use indicatif::{ProgressBar, ProgressStyle};
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -79,7 +82,7 @@ struct SnapshotListItem {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-struct SnapshotBeacon {
+pub(crate) struct SnapshotBeacon {
     epoch: u64,
     immutable_file_number: u64,
 }
@@ -1148,9 +1151,392 @@ fn skip_item(decoder: &mut minicbor::Decoder) -> Result<(), minicbor::decode::Er
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ancillary archive download and Ed25519 verification (Mithril V2 API)
+//
+// These types and functions are used by tests now and will be integrated into
+// the import_snapshot flow in a follow-up (Task 10). Allow dead_code until then.
+// ---------------------------------------------------------------------------
+
+/// Cardano Database snapshot from the V2 `/artifact/cardano-database` API.
+#[allow(dead_code)]
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CardanoDatabaseSnapshot {
+    pub hash: String,
+    pub beacon: SnapshotBeacon,
+    pub ancillary: AncillaryInfo,
+    pub certificate_hash: String,
+}
+
+/// Information about the ancillary archive within a Cardano Database snapshot.
+#[allow(dead_code)]
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct AncillaryInfo {
+    pub size_uncompressed: u64,
+    pub locations: Vec<AncillaryLocation>,
+}
+
+/// A download location for the ancillary archive.
+#[allow(dead_code)]
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct AncillaryLocation {
+    /// Location type: "cloud_storage" or "aggregator_uri".
+    #[serde(rename = "type")]
+    pub location_type: String,
+    /// URI — plain string for cloud_storage, or `{"Template": "..."}` for aggregator.
+    pub uri: serde_json::Value,
+    /// Compression algorithm (usually "zstandard").
+    pub compression_algorithm: Option<String>,
+}
+
+/// Manifest accompanying the ancillary archive, listing file paths and their
+/// SHA-256 digests, plus an optional Ed25519 signature over the manifest hash.
+#[allow(dead_code)]
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct AncillaryManifest {
+    /// Map of relative file paths to their hex-encoded SHA-256 digests.
+    /// BTreeMap ensures deterministic iteration order (sorted keys), which is
+    /// required for computing the manifest hash that the signature covers.
+    pub data: BTreeMap<String, String>,
+    /// Hex-encoded Ed25519 signature over the manifest hash (64 bytes decoded).
+    pub signature: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Ancillary verification keys per network
+// ---------------------------------------------------------------------------
+//
+// These are hex-encoded JSON byte arrays (the same encoding Mithril uses for
+// genesis verification keys). Each decodes to a 32-byte Ed25519 public key
+// used to verify the ancillary manifest signature.
+//
+// Source: mithril-infra/configuration/<env>/ancillary.vkey
+
+#[allow(dead_code)]
+/// Preview ancillary verification key.
+const PREVIEW_ANCILLARY_VKEY: &str = "5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d";
+
+#[allow(dead_code)]
+/// Preprod ancillary verification key.
+const PREPROD_ANCILLARY_VKEY: &str = "5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d";
+
+#[allow(dead_code)]
+/// Mainnet ancillary verification key.
+const MAINNET_ANCILLARY_VKEY: &str = "5b32332c37312c39362c3133332c34372c3235332c3232362c3133362c3233352c35372c3136342c3130362c3138362c322c32312c32392c3132302c3136332c38392c3132312c3137372c3133382c3230382c3133382c3231342c39392c35382c32322c302c35382c332c36395d";
+
+/// Decode a Mithril-format hex-encoded JSON byte array into 32 raw key bytes.
+///
+/// The wire format is: hex(json_array_of_u8_values), e.g.
+/// `"5b3138392c..."` → `[189,192,216,...]` → 32-byte Ed25519 public key.
+#[allow(dead_code)]
+fn decode_ancillary_vkey(hex_json: &str) -> Result<[u8; 32]> {
+    let json_bytes = hex::decode(hex_json).context("ancillary vkey: hex decode failed")?;
+    let json_str = std::str::from_utf8(&json_bytes).context("ancillary vkey: invalid UTF-8")?;
+    let arr: Vec<u8> =
+        serde_json::from_str(json_str).context("ancillary vkey: JSON parse failed")?;
+    if arr.len() != 32 {
+        anyhow::bail!("ancillary vkey: expected 32 bytes, got {}", arr.len());
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&arr);
+    Ok(key)
+}
+
+/// Look up the ancillary verification key for a given network magic.
+/// Returns `None` for unknown/private networks.
+#[allow(dead_code)]
+fn ancillary_verification_key(network_magic: u64) -> Option<[u8; 32]> {
+    let hex_json = match network_magic {
+        764824073 => Some(MAINNET_ANCILLARY_VKEY),
+        2 => Some(PREVIEW_ANCILLARY_VKEY),
+        1 => Some(PREPROD_ANCILLARY_VKEY),
+        _ => None,
+    }?;
+    decode_ancillary_vkey(hex_json).ok()
+}
+
+/// Compute the manifest hash used for Ed25519 signature verification.
+///
+/// Algorithm (matches Mithril `ManifestSigner::compute_hash`):
+///   sha256 = SHA256::new()
+///   for (key, value) in manifest.data:  // BTreeMap = sorted by key
+///     sha256.update(key.as_bytes())
+///     sha256.update(value.as_bytes())   // hex string bytes, NOT decoded
+///   hash = sha256.finalize()
+#[allow(dead_code)]
+fn compute_manifest_hash(manifest: &AncillaryManifest) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for (key, value) in &manifest.data {
+        hasher.update(key.as_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Verify the ancillary manifest: per-file SHA-256 digests and Ed25519 signature.
+///
+/// 1. For each `(path, expected_hash)` in the manifest, reads the file at
+///    `base_dir/path`, computes its SHA-256 hex digest, and compares.
+/// 2. Computes the manifest hash (SHA-256 over sorted key+value pairs).
+/// 3. Verifies the Ed25519 signature over the 32-byte hash.
+#[allow(dead_code)]
+pub(crate) fn verify_ancillary_manifest(
+    base_dir: &Path,
+    manifest: &AncillaryManifest,
+    verification_key: &[u8; 32],
+) -> Result<()> {
+    // Step 1: Verify per-file SHA-256 digests.
+    let total_files = manifest.data.len() as u64;
+    let pb = ProgressBar::new(total_files);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files (verifying ancillary)",
+            )
+            .expect("progress bar template is a valid constant")
+            .progress_chars("█▉▊▋▌▍▎▏ "),
+    );
+
+    let mut buf = [0u8; 256 * 1024];
+    for (path, expected_hash) in &manifest.data {
+        let file_path = base_dir.join(path);
+        let mut file_hasher = Sha256::new();
+        let mut file = fs::File::open(&file_path)
+            .with_context(|| format!("ancillary: failed to open {}", file_path.display()))?;
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buf)
+                .with_context(|| format!("ancillary: IO error reading {}", file_path.display()))?;
+            if n == 0 {
+                break;
+            }
+            file_hasher.update(&buf[..n]);
+        }
+        let computed = hex::encode(file_hasher.finalize());
+        if computed != *expected_hash {
+            anyhow::bail!(
+                "ancillary: file digest mismatch for {path}\n  \
+                 expected: {expected_hash}\n  computed: {computed}"
+            );
+        }
+        pb.inc(1);
+    }
+    pb.finish_with_message("File digests verified");
+
+    // Step 2: Compute manifest hash and verify signature.
+    let manifest_hash = compute_manifest_hash(manifest);
+
+    let signature_hex = manifest
+        .signature
+        .as_ref()
+        .context("ancillary manifest has no signature")?;
+    let sig_bytes = hex::decode(signature_hex).context("ancillary: signature hex decode failed")?;
+    let signature = Signature::from_slice(&sig_bytes)
+        .map_err(|e| anyhow::anyhow!("ancillary: invalid signature: {e}"))?;
+
+    let verifying_key = VerifyingKey::from_bytes(verification_key)
+        .map_err(|e| anyhow::anyhow!("ancillary: invalid verification key: {e}"))?;
+
+    verifying_key
+        .verify_strict(&manifest_hash, &signature)
+        .map_err(|e| anyhow::anyhow!("ancillary: Ed25519 signature verification failed: {e}"))?;
+
+    info!(
+        files = manifest.data.len(),
+        "Ancillary manifest verified (file digests + Ed25519 signature)"
+    );
+    Ok(())
+}
+
+/// Download and verify the ancillary archive from the Mithril V2 API.
+///
+/// Steps:
+/// 1. Fetch the latest Cardano Database snapshot from the aggregator.
+/// 2. Extract the cloud storage URI for the ancillary archive.
+/// 3. Download the tar.zst archive with progress reporting.
+/// 4. Extract to a temporary directory.
+/// 5. Parse and verify the ancillary manifest (file digests + Ed25519 signature).
+/// 6. Return the path to the extracted ancillary directory.
+#[allow(dead_code)]
+pub(crate) async fn download_ancillary(
+    aggregator: &str,
+    network_magic: u64,
+    _database_path: &Path,
+    temp_dir: &Path,
+) -> Result<PathBuf> {
+    let client = reqwest::Client::builder()
+        .user_agent("dugite-node/0.1")
+        .build()?;
+
+    // Step 1: Get latest Cardano Database snapshot list.
+    info!("Fetching Cardano Database snapshot list from V2 API...");
+    let snapshots: Vec<CardanoDatabaseSnapshot> = client
+        .get(format!("{aggregator}/artifact/cardano-database"))
+        .send()
+        .await?
+        .error_for_status()
+        .context("Failed to fetch Cardano Database snapshot list")?
+        .json()
+        .await?;
+
+    let latest = snapshots
+        .first()
+        .context("No Cardano Database snapshots available")?;
+
+    info!(
+        hash = %latest.hash,
+        epoch = latest.beacon.epoch,
+        immutable = latest.beacon.immutable_file_number,
+        "Found Cardano Database snapshot"
+    );
+
+    // Step 2: Fetch snapshot detail to get full ancillary location info.
+    let snapshot_detail: CardanoDatabaseSnapshot = client
+        .get(format!(
+            "{aggregator}/artifact/cardano-database/{}",
+            latest.hash
+        ))
+        .send()
+        .await?
+        .error_for_status()
+        .context("Failed to fetch Cardano Database snapshot detail")?
+        .json()
+        .await?;
+
+    // Step 3: Extract the first cloud_storage URI with a plain string value.
+    let download_url = snapshot_detail
+        .ancillary
+        .locations
+        .iter()
+        .find_map(|loc| {
+            if loc.location_type == "cloud_storage" {
+                loc.uri.as_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .context(
+            "No cloud_storage URI found in ancillary locations. \
+             Available locations: {:?}",
+        )?;
+
+    info!(url = %download_url, "Downloading ancillary archive...");
+
+    // Step 4: Download to temp directory.
+    fs::create_dir_all(temp_dir)?;
+    let archive_path = temp_dir.join("ancillary.tar.zst");
+    download_snapshot(
+        &client,
+        &download_url,
+        &archive_path,
+        snapshot_detail.ancillary.size_uncompressed,
+    )
+    .await?;
+
+    // Step 5: Extract archive.
+    let extract_dir = temp_dir.join("ancillary");
+    info!("Extracting ancillary archive...");
+    extract_archive(&archive_path, &extract_dir)?;
+
+    // Step 6: Parse and verify the manifest.
+    //
+    // The manifest may be at the top level of the extract directory or inside
+    // a subdirectory. Search for it.
+    let manifest_path = find_ancillary_manifest(&extract_dir)
+        .context("Could not find ancillary_manifest.json in extracted ancillary archive")?;
+
+    let manifest_content = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest: AncillaryManifest = serde_json::from_str(&manifest_content)
+        .context("Failed to parse ancillary_manifest.json")?;
+
+    info!(
+        files = manifest.data.len(),
+        signature = manifest.signature.is_some(),
+        "Parsed ancillary manifest"
+    );
+
+    // The manifest file paths are relative to the directory containing the manifest.
+    let manifest_base = manifest_path.parent().unwrap_or(&extract_dir);
+
+    if let Some(vkey) = ancillary_verification_key(network_magic) {
+        verify_ancillary_manifest(manifest_base, &manifest, &vkey)?;
+    } else {
+        warn!(
+            "No ancillary verification key for network magic {network_magic}; \
+             skipping Ed25519 signature verification"
+        );
+        // Still verify file digests without the signature check.
+        verify_ancillary_file_digests(manifest_base, &manifest)?;
+    }
+
+    // Clean up the archive.
+    if let Err(e) = fs::remove_file(&archive_path) {
+        warn!(error = %e, "Failed to remove ancillary archive");
+    }
+
+    Ok(extract_dir)
+}
+
+/// Verify only the per-file SHA-256 digests (no signature check).
+/// Used when no verification key is available for the network.
+#[allow(dead_code)]
+fn verify_ancillary_file_digests(base_dir: &Path, manifest: &AncillaryManifest) -> Result<()> {
+    let mut buf = [0u8; 256 * 1024];
+    for (path, expected_hash) in &manifest.data {
+        let file_path = base_dir.join(path);
+        let mut file_hasher = Sha256::new();
+        let mut file = fs::File::open(&file_path)
+            .with_context(|| format!("ancillary: failed to open {}", file_path.display()))?;
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buf)
+                .with_context(|| format!("ancillary: IO error reading {}", file_path.display()))?;
+            if n == 0 {
+                break;
+            }
+            file_hasher.update(&buf[..n]);
+        }
+        let computed = hex::encode(file_hasher.finalize());
+        if computed != *expected_hash {
+            anyhow::bail!(
+                "ancillary: file digest mismatch for {path}\n  \
+                 expected: {expected_hash}\n  computed: {computed}"
+            );
+        }
+    }
+    info!(
+        files = manifest.data.len(),
+        "Ancillary file digests verified (no signature — unknown network)"
+    );
+    Ok(())
+}
+
+/// Search for `ancillary_manifest.json` within the extract directory.
+#[allow(dead_code)]
+fn find_ancillary_manifest(extract_dir: &Path) -> Option<PathBuf> {
+    // Direct location
+    let direct = extract_dir.join("ancillary_manifest.json");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    // One level deeper
+    if let Ok(entries) = fs::read_dir(extract_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let nested = path.join("ancillary_manifest.json");
+                if nested.is_file() {
+                    return Some(nested);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::Signer;
 
     #[test]
     fn test_aggregator_url_mainnet() {
@@ -1775,5 +2161,392 @@ mod tests {
         let fake_archive = dir.path().join("nonexistent.tar.zst");
         let result = extract_archive(&fake_archive, &extract_dir);
         assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Ancillary verification tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_decode_ancillary_vkey_preview() {
+        let key = decode_ancillary_vkey(PREVIEW_ANCILLARY_VKEY).unwrap();
+        assert_eq!(key.len(), 32);
+        // First byte should be 189 (from the JSON array [189,192,...])
+        assert_eq!(key[0], 189);
+    }
+
+    #[test]
+    fn test_decode_ancillary_vkey_mainnet() {
+        let key = decode_ancillary_vkey(MAINNET_ANCILLARY_VKEY).unwrap();
+        assert_eq!(key.len(), 32);
+        // First byte should be 23 (from the JSON array [23,71,...])
+        assert_eq!(key[0], 23);
+    }
+
+    #[test]
+    fn test_decode_ancillary_vkey_all_networks() {
+        // All three known networks should decode to valid 32-byte keys.
+        for (magic, name) in [(764824073, "mainnet"), (2, "preview"), (1, "preprod")] {
+            let key = ancillary_verification_key(magic);
+            assert!(
+                key.is_some(),
+                "ancillary vkey should exist for {name} (magic={magic})"
+            );
+            assert_eq!(key.unwrap().len(), 32);
+        }
+    }
+
+    #[test]
+    fn test_decode_ancillary_vkey_preview_preprod_same() {
+        // Preview and preprod share the same ancillary verification key.
+        let preview = ancillary_verification_key(2).unwrap();
+        let preprod = ancillary_verification_key(1).unwrap();
+        assert_eq!(preview, preprod);
+    }
+
+    #[test]
+    fn test_decode_ancillary_vkey_mainnet_differs() {
+        // Mainnet has a distinct key from preview/preprod.
+        let mainnet = ancillary_verification_key(764824073).unwrap();
+        let preview = ancillary_verification_key(2).unwrap();
+        assert_ne!(mainnet, preview);
+    }
+
+    #[test]
+    fn test_ancillary_vkey_unknown_network() {
+        assert!(ancillary_verification_key(999).is_none());
+        assert!(ancillary_verification_key(0).is_none());
+    }
+
+    #[test]
+    fn test_decode_ancillary_vkey_invalid_hex() {
+        assert!(decode_ancillary_vkey("not_hex").is_err());
+    }
+
+    #[test]
+    fn test_decode_ancillary_vkey_wrong_length() {
+        // Encode a JSON array with only 16 bytes
+        let short_arr: Vec<u8> = (0..16).collect();
+        let json = serde_json::to_string(&short_arr).unwrap();
+        let hex_json = hex::encode(json.as_bytes());
+        assert!(decode_ancillary_vkey(&hex_json).is_err());
+    }
+
+    #[test]
+    fn test_compute_manifest_hash_deterministic() {
+        let mut data = BTreeMap::new();
+        data.insert("file_a.dat".to_string(), "aabbcc".to_string());
+        data.insert("file_b.dat".to_string(), "ddeeff".to_string());
+        let manifest = AncillaryManifest {
+            data,
+            signature: None,
+        };
+
+        let hash1 = compute_manifest_hash(&manifest);
+        let hash2 = compute_manifest_hash(&manifest);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_manifest_hash_sorted_order() {
+        // BTreeMap iteration is sorted, so inserting in different order
+        // should yield the same hash.
+        let mut data1 = BTreeMap::new();
+        data1.insert("z_file".to_string(), "hash_z".to_string());
+        data1.insert("a_file".to_string(), "hash_a".to_string());
+
+        let mut data2 = BTreeMap::new();
+        data2.insert("a_file".to_string(), "hash_a".to_string());
+        data2.insert("z_file".to_string(), "hash_z".to_string());
+
+        let m1 = AncillaryManifest {
+            data: data1,
+            signature: None,
+        };
+        let m2 = AncillaryManifest {
+            data: data2,
+            signature: None,
+        };
+        assert_eq!(compute_manifest_hash(&m1), compute_manifest_hash(&m2));
+    }
+
+    #[test]
+    fn test_compute_manifest_hash_known_value() {
+        // Compute expected hash manually:
+        //   SHA256("file_a" || "hash_a" || "file_b" || "hash_b")
+        let mut data = BTreeMap::new();
+        data.insert("file_a".to_string(), "hash_a".to_string());
+        data.insert("file_b".to_string(), "hash_b".to_string());
+        let manifest = AncillaryManifest {
+            data,
+            signature: None,
+        };
+
+        let hash = compute_manifest_hash(&manifest);
+
+        let mut expected_hasher = Sha256::new();
+        expected_hasher.update(b"file_a");
+        expected_hasher.update(b"hash_a");
+        expected_hasher.update(b"file_b");
+        expected_hasher.update(b"hash_b");
+        let expected: [u8; 32] = expected_hasher.finalize().into();
+
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_verify_ancillary_manifest_file_digests() {
+        // Create temp files and a manifest with correct digests.
+        let dir = tempfile::tempdir().unwrap();
+        let content_a = b"hello world";
+        let content_b = b"foo bar baz";
+        fs::write(dir.path().join("a.txt"), content_a).unwrap();
+        fs::write(dir.path().join("b.txt"), content_b).unwrap();
+
+        let hash_a = hex::encode(Sha256::digest(content_a));
+        let hash_b = hex::encode(Sha256::digest(content_b));
+
+        let mut data = BTreeMap::new();
+        data.insert("a.txt".to_string(), hash_a);
+        data.insert("b.txt".to_string(), hash_b);
+
+        // Generate a real Ed25519 signature over the manifest hash.
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let vkey_bytes: [u8; 32] = signing_key.verifying_key().to_bytes();
+
+        let manifest_hash = {
+            let mut hasher = Sha256::new();
+            for (k, v) in &data {
+                hasher.update(k.as_bytes());
+                hasher.update(v.as_bytes());
+            }
+            let h: [u8; 32] = hasher.finalize().into();
+            h
+        };
+        let sig = signing_key.sign(&manifest_hash);
+        let sig_hex = hex::encode(sig.to_bytes());
+
+        let manifest = AncillaryManifest {
+            data,
+            signature: Some(sig_hex),
+        };
+
+        let result = verify_ancillary_manifest(dir.path(), &manifest, &vkey_bytes);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_verify_ancillary_manifest_bad_file_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"real content").unwrap();
+
+        let mut data = BTreeMap::new();
+        data.insert(
+            "a.txt".to_string(),
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        );
+
+        let manifest = AncillaryManifest {
+            data,
+            signature: Some("00".repeat(64)),
+        };
+
+        let vkey = [0u8; 32];
+        let result = verify_ancillary_manifest(dir.path(), &manifest, &vkey);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("digest mismatch"));
+    }
+
+    #[test]
+    fn test_verify_ancillary_manifest_bad_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"content";
+        fs::write(dir.path().join("f.txt"), content).unwrap();
+
+        let hash = hex::encode(Sha256::digest(content));
+        let mut data = BTreeMap::new();
+        data.insert("f.txt".to_string(), hash);
+
+        // Use a valid key but wrong signature (all zeros is not a valid sig
+        // for this message with overwhelming probability).
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let vkey_bytes = signing_key.verifying_key().to_bytes();
+
+        // Create a valid-format but wrong signature.
+        let wrong_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let manifest_hash = compute_manifest_hash(&AncillaryManifest {
+            data: data.clone(),
+            signature: None,
+        });
+        let wrong_sig = wrong_key.sign(&manifest_hash);
+
+        let manifest = AncillaryManifest {
+            data,
+            signature: Some(hex::encode(wrong_sig.to_bytes())),
+        };
+
+        let result = verify_ancillary_manifest(dir.path(), &manifest, &vkey_bytes);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("signature verification failed"));
+    }
+
+    #[test]
+    fn test_verify_ancillary_manifest_missing_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), b"x").unwrap();
+
+        let mut data = BTreeMap::new();
+        data.insert("f.txt".to_string(), hex::encode(Sha256::digest(b"x")));
+
+        let manifest = AncillaryManifest {
+            data,
+            signature: None,
+        };
+
+        let vkey = ancillary_verification_key(2).unwrap();
+        let result = verify_ancillary_manifest(dir.path(), &manifest, &vkey);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no signature"));
+    }
+
+    #[test]
+    fn test_verify_ancillary_manifest_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Don't create the file referenced in the manifest.
+        let mut data = BTreeMap::new();
+        data.insert("nonexistent.dat".to_string(), "abcd".to_string());
+
+        let manifest = AncillaryManifest {
+            data,
+            signature: Some("00".repeat(64)),
+        };
+
+        let vkey = [0u8; 32];
+        let result = verify_ancillary_manifest(dir.path(), &manifest, &vkey);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to open"));
+    }
+
+    /// End-to-end test using the real preview manifest fixture.
+    /// Verifies that we can parse the manifest and that the hash/signature
+    /// computation is consistent with what Mithril produces.
+    #[test]
+    fn test_ancillary_manifest_fixture_parse_and_hash() {
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../dugite-serialization/test_fixtures/preview_manifest_e1259.json"
+        );
+        let content =
+            fs::read_to_string(fixture_path).expect("Failed to read preview manifest fixture");
+        let manifest: AncillaryManifest =
+            serde_json::from_str(&content).expect("Failed to parse manifest fixture");
+
+        // Should have files in the data map.
+        assert!(
+            !manifest.data.is_empty(),
+            "manifest data should not be empty"
+        );
+
+        // Should have a signature.
+        assert!(
+            manifest.signature.is_some(),
+            "fixture should have a signature"
+        );
+
+        // Verify the signature hex decodes to 64 bytes.
+        let sig_hex = manifest.signature.as_ref().unwrap();
+        let sig_bytes = hex::decode(sig_hex).expect("signature should be valid hex");
+        assert_eq!(sig_bytes.len(), 64, "Ed25519 signature should be 64 bytes");
+
+        // Compute manifest hash and verify it's deterministic.
+        let hash = compute_manifest_hash(&manifest);
+        assert_eq!(hash.len(), 32);
+        let hash2 = compute_manifest_hash(&manifest);
+        assert_eq!(hash, hash2, "manifest hash should be deterministic");
+
+        // Verify the signature against the preview ancillary verification key.
+        let vkey = ancillary_verification_key(2).unwrap();
+        let verifying_key = VerifyingKey::from_bytes(&vkey).unwrap();
+        let signature = Signature::from_slice(&sig_bytes).unwrap();
+        let result = verifying_key.verify_strict(&hash, &signature);
+        assert!(
+            result.is_ok(),
+            "Preview manifest fixture signature should verify against the preview ancillary vkey: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_find_ancillary_manifest_direct() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("ancillary_manifest.json"), "{}").unwrap();
+        assert_eq!(
+            find_ancillary_manifest(dir.path()),
+            Some(dir.path().join("ancillary_manifest.json"))
+        );
+    }
+
+    #[test]
+    fn test_find_ancillary_manifest_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("subdir");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("ancillary_manifest.json"), "{}").unwrap();
+        assert_eq!(
+            find_ancillary_manifest(dir.path()),
+            Some(sub.join("ancillary_manifest.json"))
+        );
+    }
+
+    #[test]
+    fn test_find_ancillary_manifest_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_ancillary_manifest(dir.path()), None);
+    }
+
+    #[test]
+    fn test_cardano_database_snapshot_deserialize() {
+        // Minimal JSON to verify our struct deserialization.
+        let json = r#"{
+            "hash": "abc123",
+            "beacon": { "epoch": 100, "immutable_file_number": 5000 },
+            "ancillary": {
+                "size_uncompressed": 1234567,
+                "locations": [
+                    {
+                        "type": "cloud_storage",
+                        "uri": "https://example.com/ancillary.tar.zst",
+                        "compression_algorithm": "zstandard"
+                    },
+                    {
+                        "type": "aggregator_uri",
+                        "uri": {"Template": "https://agg/{hash}"},
+                        "compression_algorithm": null
+                    }
+                ]
+            },
+            "certificate_hash": "def456"
+        }"#;
+
+        let snapshot: CardanoDatabaseSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snapshot.hash, "abc123");
+        assert_eq!(snapshot.beacon.epoch, 100);
+        assert_eq!(snapshot.beacon.immutable_file_number, 5000);
+        assert_eq!(snapshot.ancillary.size_uncompressed, 1234567);
+        assert_eq!(snapshot.ancillary.locations.len(), 2);
+        assert_eq!(
+            snapshot.ancillary.locations[0].location_type,
+            "cloud_storage"
+        );
+        assert_eq!(
+            snapshot.ancillary.locations[0].uri.as_str().unwrap(),
+            "https://example.com/ancillary.tar.zst"
+        );
+        // Second location has an object URI.
+        assert!(snapshot.ancillary.locations[1].uri.is_object());
+        assert_eq!(snapshot.certificate_hash, "def456");
     }
 }
