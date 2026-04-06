@@ -250,7 +250,7 @@ The block production pipeline is **actively soak-tested** on the Cardano preview
 
 ## Performance
 
-See the [latest benchmark results](benches/results/2026-03-14-all-profiles.md) for detailed storage, UTxO, and cryptographic operation benchmarks across all storage profiles.
+See the [latest benchmark results](benches/2026-03-14-all-profiles.md) for detailed storage, UTxO, and cryptographic operation benchmarks across all storage profiles.
 
 ### Sync Performance
 
@@ -317,7 +317,7 @@ cargo bench -p dugite-storage --bench storage_bench -- "scaling/"
 cargo bench -p dugite-ledger --bench utxo_bench -- "utxo_scaling/"
 ```
 
-Results are saved to `target/criterion/` with HTML reports at `target/criterion/report/index.html`. Baseline results are tracked in `benches/results/`.
+Results are saved to `target/criterion/` with HTML reports at `target/criterion/report/index.html`. Baseline results are tracked in `benches/`.
 
 ### Storage Profiles
 

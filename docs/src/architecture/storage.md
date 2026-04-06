@@ -220,7 +220,7 @@ cargo bench -p dugite-crypto --bench crypto_bench
 cargo bench -p dugite-primitives --bench hash_bench
 ```
 
-Results are saved to `target/criterion/` with HTML reports. Baseline results are tracked in `benches/results/`.
+Results are saved to `target/criterion/` with HTML reports. Baseline results are tracked in `benches/`.
 
 ### Latest Results (Apple M2 Max, 32GB, 2026-03-14)
 
@@ -258,4 +258,4 @@ A typical block with 50 witnesses: ~1.4ms for signature verification, ~6.4µs fo
 
 All storage profiles perform identically at benchmark scale — config differences emerge at mainnet scale (20M+ UTxOs) where working set exceeds cache capacity.
 
-See `benches/results/2026-03-14-all-profiles.md` for full results.
+See `benches/2026-03-14-all-profiles.md` for full results.
