@@ -356,18 +356,104 @@ pub async fn import_snapshot(
         }
     }
 
-    // Ledger state is not imported — the node rebuilds it via block replay.
+    // Step 7b: Download ancillary archive (Haskell ledger state + next immutable trio).
     //
-    // Step 7b: Clear stale UTxO store and ledger snapshots.
+    // The ancillary archive contains the serialised Haskell ledger state from the
+    // same snapshot epoch.  If available it is placed at database_path/haskell-ledger/
+    // so that Task 11 (Node::new) can deserialise it directly, skipping the full
+    // block-replay path.  Ancillary download is NON-FATAL: if it fails the node
+    // falls back to full replay from genesis (original behaviour).
+    info!("Downloading ancillary archive (Haskell ledger state)...");
+    match download_ancillary(aggregator, network_magic, database_path, &work_dir).await {
+        Ok(ancillary_dir) => {
+            // Move ledger/ to database_path/haskell-ledger/
+            let haskell_ledger_dir = database_path.join("haskell-ledger");
+            if haskell_ledger_dir.exists() {
+                if let Err(e) = fs::remove_dir_all(&haskell_ledger_dir) {
+                    warn!(error = %e, "Failed to remove old haskell-ledger directory");
+                }
+            }
+
+            let ancillary_ledger = ancillary_dir.join("ledger");
+            if ancillary_ledger.exists() {
+                // Prefer rename (zero-copy, same filesystem); fall back to recursive
+                // copy when the temp dir and database live on different mounts.
+                if let Err(e) = fs::rename(&ancillary_ledger, &haskell_ledger_dir) {
+                    warn!(error = %e, "rename of ledger/ failed, falling back to copy");
+                    copy_dir_recursive(&ancillary_ledger, &haskell_ledger_dir)?;
+                    fs::remove_dir_all(&ancillary_ledger)?;
+                }
+                info!(
+                    path = %haskell_ledger_dir.display(),
+                    "Haskell ledger state saved"
+                );
+            } else {
+                warn!(
+                    path = %ancillary_dir.display(),
+                    "Ancillary archive extracted but contained no ledger/ directory"
+                );
+            }
+
+            // Also absorb the next-immutable trio (the partial chunk at the tip)
+            // if the ancillary archive included one.
+            let ancillary_immutable = ancillary_dir.join("immutable");
+            if ancillary_immutable.exists() {
+                let immutable_dest = database_path.join("immutable");
+                fs::create_dir_all(&immutable_dest)?;
+                let mut moved = 0u32;
+                for entry in fs::read_dir(&ancillary_immutable)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    let dest = immutable_dest.join(entry.file_name());
+                    if let Err(e) = fs::rename(entry.path(), &dest) {
+                        // Cross-filesystem fallback
+                        if let Err(e2) = fs::copy(entry.path(), &dest) {
+                            warn!(
+                                error = %e,
+                                copy_error = %e2,
+                                "Failed to move ancillary immutable file"
+                            );
+                        } else {
+                            let _ = fs::remove_file(entry.path());
+                            moved += 1;
+                        }
+                    } else {
+                        moved += 1;
+                    }
+                }
+                if moved > 0 {
+                    info!(files = moved, "Moved ancillary immutable files");
+                }
+            }
+
+            // Clean up the ancillary extract directory (ledger/ was renamed above;
+            // any remaining artefacts can be removed).
+            if let Err(e) = fs::remove_dir_all(&ancillary_dir) {
+                warn!(error = %e, "Failed to remove ancillary extract directory");
+            }
+        }
+        Err(e) => {
+            // Non-fatal: the node can still sync from genesis, just slower.
+            warn!(
+                error = %e,
+                "Ancillary download failed — node will fall back to full block replay"
+            );
+        }
+    }
+
+    // Step 7c: Clear stale UTxO store and ledger snapshots.
     //
     // The on-disk LSM UTxO store (utxo-store/) is separate from the immutable DB.
-    // After a Mithril import, the old UTxO store reflects a previous chain state
-    // that may not match the new immutable tip. If left in place, the node would
+    // After a Mithril import the old UTxO store reflects a previous chain state
+    // that may not match the new immutable tip.  If left in place the node would
     // have phantom UTxOs (entries that were consumed on-chain but not removed from
     // the store), causing invalid transaction propagation.
     //
-    // Similarly, old ledger snapshots reference the previous immutable tip and
-    // must be removed so the node replays from genesis or the Mithril snapshot.
+    // Old dugite-format ledger snapshots (ledger-snapshot*.bin) are also removed;
+    // they reference the previous immutable tip.  The newly-placed haskell-ledger/
+    // directory is intentionally left in place — Task 11 reads from it on startup.
     let utxo_store_path = database_path.join("utxo-store");
     if utxo_store_path.exists() {
         info!("Removing stale UTxO store (will be rebuilt during replay)");
