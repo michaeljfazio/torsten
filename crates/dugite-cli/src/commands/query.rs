@@ -570,8 +570,8 @@ struct ShelleyGenesisParams {
 fn read_shelley_genesis(path: &std::path::Path) -> Result<ShelleyGenesisParams> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Cannot read genesis file '{}': {e}", path.display()))?;
-    let genesis: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Invalid genesis JSON: {e}"))?;
+    let genesis: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| anyhow::anyhow!("Invalid genesis JSON: {e}"))?;
 
     let active_slots_coeff = genesis["activeSlotsCoeff"]
         .as_f64()
@@ -2361,8 +2361,7 @@ impl QueryCmd {
                 let json_entries: Vec<serde_json::Value> = schedule
                     .iter()
                     .map(|s| {
-                        let time =
-                            slot_to_utc(s.slot.0, gp.system_start_unix, gp.slot_length);
+                        let time = slot_to_utc(s.slot.0, gp.system_start_unix, gp.slot_length);
                         serde_json::json!({
                             "slotNumber": s.slot.0,
                             "slotTime": time,
@@ -2839,7 +2838,7 @@ mod tests {
         enc.array(2).ok(); // Versioned
         enc.u8(0).ok();
         enc.array(7).ok(); // PraosState
-        // [0] lastSlot = Origin
+                           // [0] lastSlot = Origin
         enc.array(1).ok();
         enc.u8(0).ok();
         // [1] ocertCounters = empty map
