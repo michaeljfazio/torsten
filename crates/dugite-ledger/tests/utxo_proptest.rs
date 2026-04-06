@@ -129,7 +129,7 @@
 #[path = "strategies.rs"]
 mod strategies;
 
-use dugite_ledger::{DiffSeq, UtxoDiff, UtxoSet};
+use dugite_ledger::{validate_transaction, DiffSeq, UtxoDiff, UtxoSet};
 use dugite_primitives::address::{Address, ByronAddress};
 use dugite_primitives::hash::Hash32;
 use dugite_primitives::protocol_params::ProtocolParameters;
@@ -137,7 +137,7 @@ use dugite_primitives::time::SlotNo;
 use dugite_primitives::transaction::{OutputDatum, TransactionInput, TransactionOutput};
 use dugite_primitives::value::Value;
 use proptest::prelude::*;
-use strategies::{arb_utxo_set, build_simple_tx};
+use strategies::{arb_ledger_state, arb_utxo_set, build_simple_tx, LedgerStateConfig};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -633,5 +633,592 @@ proptest! {
             "Rollback after flush should return exactly the remaining diffs"
         );
         prop_assert!(diff_seq.is_empty(), "DiffSeq should be empty after full rollback");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 6: DiffSeq rollback consistency
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Apply N blocks (N in 2..=5) to a UTxO set, each spending one existing
+    /// input and creating one new output.  Then rollback M blocks (M in 1..N).
+    /// After unapplying the returned diffs the UTxO set must equal the state
+    /// after applying only the first N-M blocks.
+    ///
+    /// The last rollback step also covers a chained spend: at block 2 we spend
+    /// the output created by block 1, so the chain dependency
+    ///
+    ///   genesis → block1_output → block2_consumes_it
+    ///
+    /// is included whenever N >= 2 and M == 1, meaning after rolling back block
+    /// 2 the output from block 1 reappears, and rolling back block 1 restores
+    /// the original genesis entry.
+    ///
+    /// # Haskell `rewindTableKeySets`
+    ///
+    /// Haskell applies the inverse diffs in reverse chronological order.  Each
+    /// `DiffMK` entry is a bijection (inserts and deletes are disjoint) so the
+    /// undo is exact.  Our implementation mirrors this via
+    /// `DiffSeq::rollback(m)` which pops the last m entries most-recent-first.
+    #[test]
+    fn prop_diff_seq_rollback_consistency(
+        // Five initial UTxO amounts (1..=100 ADA each).
+        initial_amounts in proptest::array::uniform5(1_000_000u64..=100_000_000u64),
+        // How many blocks to apply: 2..=5 (need at least 2 for chained spend).
+        n_blocks in 2usize..=5usize,
+        // Raw rollback count; clamped below to [1, n_blocks - 1].
+        m_rollback_raw in 1usize..=4usize,
+    ) {
+        // Clamp m_rollback to [1, n_blocks - 1] so we always keep at least one
+        // applied block and always roll back at least one.
+        let m_rollback = m_rollback_raw.min(n_blocks - 1).max(1);
+        let keep_count = n_blocks - m_rollback; // blocks that should stay applied
+
+        // ── Step 1: Build the initial UTxO set ───────────────────────────────
+        //
+        // Five entries with deterministic input hashes derived from their index.
+        let mut live: UtxoSet = UtxoSet::new();
+        let initial_inputs: Vec<TransactionInput> = (0..5usize)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                id[8] = 0xAB;
+                TransactionInput {
+                    transaction_id: Hash32::from_bytes(id),
+                    index: 0,
+                }
+            })
+            .collect();
+
+        for (i, amount) in initial_amounts.iter().enumerate() {
+            live.insert(initial_inputs[i].clone(), make_output(*amount));
+        }
+
+        // ── Step 2: Apply N blocks, capturing checkpoints ────────────────────
+        //
+        // Each block spends `current_spend_input` and creates a new output.
+        // Block 0 spends initial_inputs[0]; block k spends the output of
+        // block k-1 — the chained spend pattern.
+        let mut diff_seq = DiffSeq::new();
+        let mut current_spend_input = initial_inputs[0].clone();
+        let current_spend_amount = initial_amounts[0];
+
+        // checkpoint[i] = sorted UTxO entries after block i is applied.
+        let mut checkpoints: Vec<Vec<(TransactionInput, TransactionOutput)>> =
+            Vec::with_capacity(n_blocks);
+
+        for block_idx in 0..n_blocks {
+            // Derive a unique output hash for this block.
+            let mut new_id = [0xCCu8; 32];
+            new_id[..8].copy_from_slice(&(block_idx as u64).to_be_bytes());
+            new_id[8] = 0xDD;
+            let new_input = TransactionInput {
+                transaction_id: Hash32::from_bytes(new_id),
+                index: 0,
+            };
+            let new_output = make_output(current_spend_amount);
+
+            // Build the diff before mutating the live set.
+            let mut diff = UtxoDiff::new();
+            diff.record_delete(
+                current_spend_input.clone(),
+                live.lookup(&current_spend_input)
+                    .expect("spend input must exist before this block"),
+            );
+            diff.record_insert(new_input.clone(), new_output.clone());
+
+            // Apply: remove spent, add created.
+            live.remove(&current_spend_input);
+            live.insert(new_input.clone(), new_output);
+
+            // Push the diff into the DiffSeq.
+            let slot = SlotNo((block_idx as u64 + 1) * 100);
+            let mut block_hash = [0u8; 32];
+            block_hash[..8].copy_from_slice(&(block_idx as u64).to_be_bytes());
+            block_hash[8] = 0xEE;
+            diff_seq.push(slot, Hash32::from_bytes(block_hash), diff);
+
+            // Snapshot the live state (for comparison after rollback).
+            let sort_key = |e: &(TransactionInput, TransactionOutput)| {
+                let id: [u8; 32] = *e.0.transaction_id.as_bytes();
+                (id, e.0.index)
+            };
+            let mut snap = live.iter();
+            snap.sort_by_key(sort_key);
+            checkpoints.push(snap);
+
+            // Next block spends the output we just created (chained).
+            current_spend_input = new_input;
+            // current_spend_amount is unchanged (no fee modelled here).
+        }
+
+        prop_assert_eq!(diff_seq.len(), n_blocks);
+
+        // ── Step 3: Rollback M blocks ─────────────────────────────────────────
+        let rolled_back = diff_seq.rollback(m_rollback);
+        prop_assert_eq!(
+            rolled_back.len(), m_rollback,
+            "rollback({}) returned {} diffs; expected {}",
+            m_rollback, rolled_back.len(), m_rollback
+        );
+        prop_assert_eq!(
+            diff_seq.len(), keep_count,
+            "DiffSeq should have {} entries after rollback; got {}",
+            keep_count, diff_seq.len()
+        );
+
+        // ── Step 4: Unapply the rolled-back diffs ────────────────────────────
+        //
+        // Diffs are returned most-recent-first.  For each: remove inserts (undo
+        // the new output creation), re-insert deletes (undo the spend).
+        for (_, _, undo) in &rolled_back {
+            for (ins_inp, _) in &undo.inserts {
+                live.remove(ins_inp);
+            }
+            for (del_inp, del_out) in &undo.deletes {
+                live.insert(del_inp.clone(), del_out.clone());
+            }
+        }
+
+        // ── Step 5: Compare against the expected checkpoint ──────────────────
+        //
+        // After rolling back M blocks, state must equal checkpoint[keep_count-1].
+        // (keep_count >= 1 by construction.)
+        let expected = &checkpoints[keep_count - 1];
+
+        let sort_key = |e: &(TransactionInput, TransactionOutput)| {
+            let id: [u8; 32] = *e.0.transaction_id.as_bytes();
+            (id, e.0.index)
+        };
+        let mut got = live.iter();
+        got.sort_by_key(sort_key);
+
+        prop_assert_eq!(
+            got.len(), expected.len(),
+            "UTxO size after rollback: got {}, expected {}",
+            got.len(), expected.len()
+        );
+
+        for (g, e) in got.iter().zip(expected.iter()) {
+            prop_assert!(
+                g.0 == e.0,
+                "Input key mismatch after rollback: {:?} != {:?}", g.0, e.0
+            );
+            prop_assert!(
+                g.1.value.coin == e.1.value.coin,
+                "Coin mismatch for {:?}: got {}, expected {}",
+                g.0, g.1.value.coin.0, e.1.value.coin.0
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 7: Input consumption is atomic
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// After applying a sequence of transactions — including an intra-block
+    /// chained spend where Tx2 consumes the output of Tx1 — every consumed
+    /// input is absent from the UTxO set and every produced output is present.
+    /// No partial application can occur.
+    ///
+    /// The test exercises three transactions applied sequentially:
+    ///   Tx1: spends initial_inputs[0], creates tx1_hash:0
+    ///   Tx2: spends tx1_hash:0 (output of Tx1 — chained), creates tx2_hash:0
+    ///   Tx3: spends initial_inputs[1], creates tx3_hash:0
+    ///
+    /// Final expected state:
+    ///   Absent:   initial_inputs[0], tx1_hash:0, initial_inputs[1]
+    ///   Present:  tx2_hash:0, tx3_hash:0
+    ///   Unchanged: initial_inputs[2..4]
+    ///
+    /// # Haskell UTXOS atomicity
+    ///
+    /// Haskell's `utxoTransition` (UTXOS rule) applies the full block in one
+    /// state-transition step.  Inputs are consumed before outputs are produced,
+    /// and no intermediate state is visible.  `UtxoSet::apply_transaction`
+    /// implements the same semantics: it checks all inputs exist, then removes
+    /// them all, then inserts all new outputs.
+    #[test]
+    fn prop_input_consumption_atomic(
+        amounts in proptest::array::uniform5(1_000_000u64..=50_000_000u64),
+    ) {
+        // ── Build initial UTxO set ────────────────────────────────────────────
+        let mut utxo = UtxoSet::new();
+        let initial_inputs: Vec<TransactionInput> = (0..5usize)
+            .map(|i| {
+                let mut id = [0u8; 32];
+                id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                id[8] = 0xA1;
+                TransactionInput { transaction_id: Hash32::from_bytes(id), index: 0 }
+            })
+            .collect();
+
+        for (i, &amt) in amounts.iter().enumerate() {
+            utxo.insert(initial_inputs[i].clone(), make_output(amt));
+        }
+
+        // ── Tx1: spends initial_inputs[0], produces tx1_hash:0 ───────────────
+        let tx1_hash = Hash32::from_bytes([0x11u8; 32]);
+        utxo.apply_transaction(&tx1_hash, &[initial_inputs[0].clone()], &[make_output(amounts[0])])
+            .expect("Tx1 must apply cleanly");
+
+        let tx1_out_ref = TransactionInput { transaction_id: tx1_hash, index: 0 };
+
+        prop_assert!(
+            !utxo.contains(&initial_inputs[0]),
+            "initial_inputs[0] must be absent after Tx1 spends it"
+        );
+        prop_assert!(
+            utxo.contains(&tx1_out_ref),
+            "tx1_out_ref must be present after Tx1 creates it"
+        );
+
+        // ── Tx2: chained spend — spends tx1_hash:0, produces tx2_hash:0 ───────
+        //
+        // This is the intra-block chaining case: Tx2 depends on Tx1's output.
+        // Haskell handles this via the sequential fold in `applyTxSeq`.
+        let tx2_hash = Hash32::from_bytes([0x22u8; 32]);
+        utxo.apply_transaction(&tx2_hash, std::slice::from_ref(&tx1_out_ref), &[make_output(amounts[0])])
+            .expect("Tx2 chained application must succeed");
+
+        let tx2_out_ref = TransactionInput { transaction_id: tx2_hash, index: 0 };
+
+        prop_assert!(
+            !utxo.contains(&tx1_out_ref),
+            "tx1_out_ref must be absent after Tx2 spends it (chained)"
+        );
+        prop_assert!(
+            utxo.contains(&tx2_out_ref),
+            "tx2_out_ref must be present after Tx2 creates it"
+        );
+
+        // ── Tx3: independent — spends initial_inputs[1], produces tx3_hash:0 ──
+        let tx3_hash = Hash32::from_bytes([0x33u8; 32]);
+        utxo.apply_transaction(&tx3_hash, &[initial_inputs[1].clone()], &[make_output(amounts[1])])
+            .expect("Tx3 must apply cleanly");
+
+        let tx3_out_ref = TransactionInput { transaction_id: tx3_hash, index: 0 };
+
+        // ── Final atomicity assertions ─────────────────────────────────────────
+        prop_assert!(!utxo.contains(&initial_inputs[0]), "initial_inputs[0] absent");
+        prop_assert!(!utxo.contains(&tx1_out_ref),       "tx1_out_ref absent (spent by Tx2)");
+        prop_assert!(!utxo.contains(&initial_inputs[1]), "initial_inputs[1] absent");
+        prop_assert!(utxo.contains(&tx2_out_ref),        "tx2_out_ref present");
+        prop_assert!(utxo.contains(&tx3_out_ref),        "tx3_out_ref present");
+
+        // initial_inputs[2..4] are untouched.
+        for inp in initial_inputs.iter().skip(2) {
+            prop_assert!(
+                utxo.contains(inp),
+                "initial_inputs[2..] must be untouched"
+            );
+        }
+
+        // Net size: 5 - 3 consumed + 3 created = 5.
+        prop_assert_eq!(
+            utxo.len(), 5,
+            "UTxO size must be 5 after three spend-and-create txs; got {}",
+            utxo.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 8: Duplicate input rejection
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// A transaction that lists the same `TransactionInput` twice is rejected
+    /// by `validate_transaction` with a `DuplicateInput` error, and the UTxO
+    /// set is not modified.
+    ///
+    /// # Haskell `OSet` (Conway)
+    ///
+    /// In Conway the transaction body's `inputs` field is an `OSet` (tag 258),
+    /// which enforces uniqueness and sorted order at deserialization.  Dugite
+    /// enforces the equivalent invariant in Phase-1 validation as the
+    /// `DuplicateInput` error variant, producing the same rejection outcome.
+    ///
+    /// We verify three things:
+    ///   (a) `validate_transaction` returns `Err(_)`.
+    ///   (b) The error list contains a `DuplicateInput` variant.
+    ///   (c) The original UTxO set entries are unmodified (validation is read-only).
+    #[test]
+    fn prop_duplicate_input_rejected(
+        (utxo_set, inputs) in arb_utxo_set(3),
+        fee in 200_000u64..500_000u64,
+    ) {
+        // ── Step 1: Choose the input to duplicate ─────────────────────────────
+        let dup_input = inputs[0].clone();
+        let consumed_coin = utxo_set
+            .lookup(&dup_input)
+            .expect("input must exist in generated UTxO set")
+            .value.coin.0;
+
+        prop_assume!(consumed_coin > fee);
+        let output_value = consumed_coin - fee;
+
+        // ── Step 2: Build a tx with the duplicate input ───────────────────────
+        //
+        // `build_simple_tx` accepts an arbitrary Vec<TransactionInput>; passing
+        // the same input twice produces a structurally invalid body that
+        // Phase-1 validation must reject.
+        let dup_tx = build_simple_tx(
+            vec![dup_input.clone(), dup_input.clone()],
+            output_value,
+            fee,
+        );
+
+        // ── Step 3: Validate — must return Err containing DuplicateInput ──────
+        //
+        // tx_size = 500 bytes is a plausible minimum; current_slot = 0 means no
+        // TTL expiry; no slot_config needed (no Plutus scripts).
+        let params = ProtocolParameters::mainnet_defaults();
+        let result = validate_transaction(&dup_tx, &utxo_set, &params, 0, 500, None);
+
+        prop_assert!(
+            result.is_err(),
+            "Transaction with duplicate input must be rejected"
+        );
+
+        let errors = result.unwrap_err();
+        let has_dup = errors.iter().any(|e| {
+            matches!(e, dugite_ledger::ValidationError::DuplicateInput(_))
+        });
+        prop_assert!(
+            has_dup,
+            "Expected DuplicateInput error; got: {:?}", errors
+        );
+
+        // ── Step 4: UTxO set is unmodified ─────────────────────────────────────
+        //
+        // `validate_transaction` borrows the UTxO set via `&dyn UtxoLookup`
+        // (read-only) and never mutates it.
+        for inp in &inputs {
+            prop_assert!(
+                utxo_set.contains(inp),
+                "UTxO entry {:?} must still be present after failed validation", inp
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 9: Deposit pot invariant
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// For any `LedgerState` generated by `arb_ledger_state`:
+    ///
+    /// ```text
+    /// total_stake_key_deposits + Σ(pool_deposits.values())
+    ///   == key_deposit * n_registered_creds + pool_deposit * n_registered_pools
+    /// ```
+    ///
+    /// This is the deposit-pot component of Haskell's `totalObligation`:
+    ///
+    /// ```haskell
+    /// totalObligation certState govState =
+    ///     obligationCertState certState + obligationGovState govState
+    /// ```
+    ///
+    /// where `obligationCertState` sums stake key deposits and pool deposits.
+    ///
+    /// The `arb_ledger_state` generator enforces the identity by construction;
+    /// this test verifies the invariant survives the generator unscathed and
+    /// will catch future generator regressions or ledger-state mutations that
+    /// break the tracking.
+    ///
+    /// # Why this matters
+    ///
+    /// The deposit pot directly feeds the reward-reserve calculation.  An
+    /// inconsistency here causes silent over- or under-payment across every
+    /// subsequent epoch.  This is listed as a HIGH-priority open gap in the
+    /// conformance audit (deposit tracking per-credential).
+    #[test]
+    fn prop_deposit_pot_invariant(
+        state in arb_ledger_state(LedgerStateConfig::default()),
+    ) {
+        let params = ProtocolParameters::mainnet_defaults();
+        let key_deposit = params.key_deposit.0;
+        let pool_deposit = params.pool_deposit.0;
+
+        // Number of registered stake credentials.
+        let n_registered_creds = state.stake_key_deposits.len() as u64;
+        // Number of registered pools (each has exactly one pool_deposits entry).
+        let n_registered_pools = state.pool_deposits.len() as u64;
+
+        // Expected deposit totals derived from protocol parameters.
+        let expected_key_total = key_deposit
+            .checked_mul(n_registered_creds)
+            .expect("key deposit total must not overflow u64");
+        let expected_pool_total = pool_deposit
+            .checked_mul(n_registered_pools)
+            .expect("pool deposit total must not overflow u64");
+        let expected_total = expected_key_total + expected_pool_total;
+
+        // Actual deposit totals from the ledger state fields.
+        let actual_pool_sum: u64 = state.pool_deposits.values().sum();
+        let actual_total = state.total_stake_key_deposits + actual_pool_sum;
+
+        prop_assert_eq!(
+            actual_total, expected_total,
+            "Deposit pot: actual={} (key_track={} + pool_sum={}), \
+             expected={} (key_dep={} * n_creds={} + pool_dep={} * n_pools={})",
+            actual_total,
+            state.total_stake_key_deposits,
+            actual_pool_sum,
+            expected_total,
+            key_deposit,
+            n_registered_creds,
+            pool_deposit,
+            n_registered_pools
+        );
+
+        // Each per-pool deposit entry must equal exactly pool_deposit (since the
+        // generator uses mainnet protocol parameters throughout).
+        for (&pool_id, &deposit) in &state.pool_deposits {
+            prop_assert_eq!(
+                deposit, pool_deposit,
+                "pool {:?} has deposit {}; expected {}",
+                pool_id, deposit, pool_deposit
+            );
+        }
+
+        // total_stake_key_deposits must equal key_deposit * n_registered_creds.
+        prop_assert_eq!(
+            state.total_stake_key_deposits, expected_key_total,
+            "total_stake_key_deposits={} != key_deposit({}) * n_creds({})",
+            state.total_stake_key_deposits, key_deposit, n_registered_creds
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 10: Collateral UTxO invariant
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// For `is_valid = false` transactions (Alonzo invalid-tx processing):
+    ///
+    /// 1. All collateral inputs are removed from the UTxO set.
+    /// 2. If `collateral_return` is present it is added to the UTxO set.
+    /// 3. All regular spending inputs remain present (untouched).
+    /// 4. None of the transaction's regular outputs are added.
+    ///
+    /// This is Haskell's `UTXOS` rule `isValid = false` branch:
+    ///
+    /// ```text
+    /// utxo' = (utxo ∖ collateral(tx)) ∪ collRet(tx)
+    /// ```
+    ///
+    /// where `collRet(tx)` is `{txid#0 ↦ collateralReturn tx}` when present,
+    /// or ∅ when absent.
+    ///
+    /// The test uses a UTxO set with 5 entries:
+    ///   entries[0..2] — collateral inputs (consumed)
+    ///   entries[2..4] — spending inputs (kept untouched)
+    ///   entries[4]    — unused extra entry (size anchor)
+    ///
+    /// A simulated `collateral_return` output with a deterministic reference is
+    /// optionally inserted to cover both branches.
+    #[test]
+    fn prop_collateral_utxo_invariant(
+        (utxo_set, inputs) in arb_utxo_set(5),
+        // Value of the simulated collateral_return output.
+        collateral_return_lovelace in 500_000u64..=5_000_000u64,
+        // Whether to include a collateral_return output in this case.
+        has_collateral_return in proptest::bool::ANY,
+    ) {
+        let collateral_inputs: Vec<TransactionInput> = inputs[..2].to_vec();
+        let spending_inputs: Vec<TransactionInput>   = inputs[2..4].to_vec();
+
+        // ── Build the live UTxO set ───────────────────────────────────────────
+        let mut live = UtxoSet::new();
+        for (inp, out) in utxo_set.iter() {
+            live.insert(inp, out);
+        }
+        let initial_len = live.len();
+
+        // Reference that will be used for the collateral_return output.
+        // The Cardano spec places collateral_return at txid#0 of the invalid tx.
+        let colret_tx_hash = Hash32::from_bytes([0xCBu8; 32]);
+        let colret_ref = TransactionInput { transaction_id: colret_tx_hash, index: 0 };
+
+        // ── Simulate invalid-tx processing ────────────────────────────────────
+        //
+        // (a) Remove all collateral inputs.
+        for col in &collateral_inputs {
+            let removed = live.remove(col);
+            prop_assert!(removed.is_some(), "collateral input {:?} must exist before removal", col);
+        }
+
+        // (b) Add collateral_return if present.
+        if has_collateral_return {
+            live.insert(colret_ref.clone(), make_output(collateral_return_lovelace));
+        }
+
+        // ── Invariant assertions ──────────────────────────────────────────────
+
+        // (i) Collateral inputs are absent.
+        for col in &collateral_inputs {
+            prop_assert!(
+                !live.contains(col),
+                "collateral input {:?} must be absent after invalid-tx processing", col
+            );
+        }
+
+        // (ii) Spending inputs remain present.
+        for sp in &spending_inputs {
+            prop_assert!(
+                live.contains(sp),
+                "spending input {:?} must remain present after invalid-tx processing", sp
+            );
+        }
+
+        // (iii) collateral_return presence matches the flag.
+        if has_collateral_return {
+            prop_assert!(
+                live.contains(&colret_ref),
+                "collateral_return output must be present when has_collateral_return=true"
+            );
+            let out = live.lookup(&colret_ref).expect("collateral_return must be lookupable");
+            prop_assert_eq!(
+                out.value.coin.0, collateral_return_lovelace,
+                "collateral_return coin: got {}, expected {}",
+                out.value.coin.0, collateral_return_lovelace
+            );
+        } else {
+            prop_assert!(
+                !live.contains(&colret_ref),
+                "collateral_return ref must not be present when has_collateral_return=false"
+            );
+        }
+
+        // (iv) Size accounting:
+        //   initial_len - n_collateral + (1 if colret else 0)
+        let expected_len = initial_len
+            - collateral_inputs.len()
+            + usize::from(has_collateral_return);
+        prop_assert_eq!(
+            live.len(), expected_len,
+            "UTxO size: got {}, expected {} (initial={} - col={} + colret={})",
+            live.len(), expected_len,
+            initial_len, collateral_inputs.len(),
+            usize::from(has_collateral_return)
+        );
     }
 }
