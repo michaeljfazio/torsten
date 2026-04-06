@@ -146,26 +146,44 @@ enum QuerySubcommand {
         #[arg(long)]
         testnet_magic: Option<u64>,
     },
-    /// Compute the leader schedule for a stake pool
+    /// Get the slots the node is expected to mint a block in
     LeadershipSchedule {
-        /// Path to the VRF signing key file
+        /// Path to the node socket. Overrides CARDANO_NODE_SOCKET_PATH env.
+        #[arg(long, default_value = "node.sock")]
+        socket_path: PathBuf,
+        /// Use the mainnet magic id
+        #[arg(long, group = "network")]
+        mainnet: bool,
+        /// Specify a testnet magic id
+        #[arg(long, group = "network")]
+        testnet_magic: Option<u64>,
+        /// Shelley genesis filepath
+        #[arg(long)]
+        genesis: PathBuf,
+        /// Stake pool ID (hex-encoded hash)
+        #[arg(long)]
+        stake_pool_id: Option<String>,
+        /// Filepath of the cold verification key
+        #[arg(long)]
+        cold_verification_key_file: Option<PathBuf>,
+        /// Input filepath of the VRF signing key
         #[arg(long)]
         vrf_signing_key_file: PathBuf,
-        /// Epoch nonce (64-character hex string)
+        /// Get the leadership schedule for the current epoch
+        #[arg(long, group = "epoch_choice")]
+        current: bool,
+        /// Get the leadership schedule for the following epoch
+        #[arg(long, group = "epoch_choice")]
+        next: bool,
+        /// Format output to JSON (default)
         #[arg(long)]
-        epoch_nonce: String,
-        /// First slot of the epoch
+        output_json: bool,
+        /// Format output to TEXT
         #[arg(long)]
-        epoch_start_slot: u64,
-        /// Number of slots in the epoch
-        #[arg(long, default_value = "432000")]
-        epoch_length: u64,
-        /// Pool's relative stake (0.0 to 1.0)
+        output_text: bool,
+        /// Optional output file. Default is stdout.
         #[arg(long)]
-        relative_stake: f64,
-        /// Active slot coefficient (default: 0.05)
-        #[arg(long, default_value = "0.05")]
-        active_slot_coeff: f64,
+        out_file: Option<PathBuf>,
     },
     /// Convert a UTC timestamp to a Cardano slot number.
     ///
@@ -230,6 +248,7 @@ enum QuerySubcommand {
 /// f64_to_rational helper inside dugite-crypto's leader_check module, so
 /// callers that pass `f = 0.05` will always get `(1, 20)` rather than some
 /// floating-point approximation.
+#[allow(dead_code)]
 fn f64_to_rational_approx(value: f64) -> (u64, u64) {
     for den in [1u64, 2, 4, 5, 10, 20, 25, 50, 100, 200, 1000, 10000] {
         let num = (value * den as f64).round() as u64;
@@ -245,6 +264,7 @@ fn f64_to_rational_approx(value: f64) -> (u64, u64) {
     (num / g, den / g)
 }
 
+#[allow(dead_code)]
 fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
         let t = b;
@@ -350,6 +370,271 @@ async fn connect_and_acquire(
 async fn release_and_done(client: &mut dugite_network::N2CClient) {
     client.release().await.ok();
     client.done().await.ok();
+}
+
+// ── Task 2: Protocol State CBOR Parser ──────────────────────────────────────
+
+/// Nonce values extracted from PraosState (protocol state query).
+#[allow(dead_code)]
+struct PraosNonces {
+    /// The epoch nonce used for VRF leader checks in the current epoch.
+    epoch_nonce: [u8; 32],
+    /// The candidate nonce (becomes the epoch nonce for the next epoch).
+    candidate_nonce: [u8; 32],
+}
+
+/// Parse a Nonce CBOR value: array(1)[0] = NeutralNonce, array(2)[1, bytes32] = Nonce.
+/// Returns 32 zero bytes for NeutralNonce.
+#[allow(dead_code)]
+fn parse_cbor_nonce(d: &mut minicbor::Decoder<'_>) -> Result<[u8; 32]> {
+    let len = d
+        .array()?
+        .ok_or_else(|| anyhow::anyhow!("Expected definite-length nonce array"))?;
+    let tag = d.u8()?;
+    if tag == 0 && len == 1 {
+        Ok([0u8; 32])
+    } else if tag == 1 && len == 2 {
+        let bytes = d.bytes()?;
+        let mut nonce = [0u8; 32];
+        if bytes.len() == 32 {
+            nonce.copy_from_slice(bytes);
+        }
+        Ok(nonce)
+    } else {
+        anyhow::bail!("Invalid nonce encoding: tag={tag}, len={len}");
+    }
+}
+
+/// Parse the raw MsgResult CBOR from `query_protocol_state()` and extract nonces.
+///
+/// Wire format: MsgResult [tag, HFC [array(2)[version=0, array(7)[...PraosState fields...]]]]
+#[allow(dead_code)]
+fn parse_protocol_state_nonces(raw: &[u8]) -> Result<PraosNonces> {
+    let mut d = minicbor::Decoder::new(raw);
+
+    // MsgResult outer array
+    let _ = d.array();
+    let tag = d.u32()?;
+    if tag != 6 {
+        anyhow::bail!("Protocol state query failed (tag {tag})");
+    }
+
+    // Strip HFC wrapper: array(2)[1, payload] or array(1)[payload]
+    let pos = d.position();
+    if let Ok(Some(2)) = d.array() {
+        let _ = d.u64(); // HFC success tag
+    } else if let Ok(Some(1)) = {
+        d.set_position(pos);
+        d.array()
+    } {
+        // single-element wrapper, consumed
+    } else {
+        d.set_position(pos);
+    }
+
+    // Versioned wrapper: array(2)[0, payload]
+    let _ = d.array();
+    let version = d.u8()?;
+    if version != 0 {
+        anyhow::bail!("Unexpected PraosState version: {version}");
+    }
+
+    // PraosState: array(7)
+    let _ = d.array();
+
+    // [0] lastSlot (WithOrigin) — skip
+    let slot_len = d
+        .array()?
+        .ok_or_else(|| anyhow::anyhow!("Expected definite-length slot array"))?;
+    let _ = d.u8();
+    if slot_len == 2 {
+        let _ = d.u64();
+    }
+
+    // [1] ocertCounters (Map) — skip
+    let map_len = d.map()?.unwrap_or(0);
+    for _ in 0..map_len {
+        let _ = d.bytes();
+        let _ = d.u64();
+    }
+
+    // [2] evolvingNonce — skip
+    let _ = parse_cbor_nonce(&mut d)?;
+
+    // [3] candidateNonce
+    let candidate_nonce = parse_cbor_nonce(&mut d)?;
+
+    // [4] epochNonce
+    let epoch_nonce = parse_cbor_nonce(&mut d)?;
+
+    Ok(PraosNonces {
+        epoch_nonce,
+        candidate_nonce,
+    })
+}
+
+// ── Task 3: Stake Snapshot Parser ───────────────────────────────────────────
+
+/// Pool stake and total active stake from a stake snapshot query.
+#[allow(dead_code)]
+struct PoolStakeInfo {
+    /// Pool's delegated stake (lovelace) from the "set" snapshot (current) or "mark" (next).
+    pool_stake: u64,
+    /// Total active stake across all pools (lovelace).
+    total_active_stake: u64,
+}
+
+/// Parse raw MsgResult from `query_stake_snapshot()` and extract a specific pool's stake.
+///
+/// Wire format: MsgResult [tag, HFC [array(4) [pool_map, mark_total, set_total, go_total]]]
+/// pool_map: Map<pool_hash(28B), array(3)[mark, set, go]>
+///
+/// `use_mark` controls which snapshot to use: true = mark (for --next), false = set (for --current).
+#[allow(dead_code)]
+fn parse_stake_for_pool(raw: &[u8], pool_id_hex: &str, use_mark: bool) -> Result<PoolStakeInfo> {
+    let mut d = minicbor::Decoder::new(raw);
+
+    // MsgResult outer array
+    let _ = d.array();
+    let tag = d.u32()?;
+    if tag != 6 {
+        anyhow::bail!("Stake snapshot query failed (tag {tag})");
+    }
+
+    // Strip HFC wrapper
+    let pos = d.position();
+    if let Ok(Some(2)) = d.array() {
+        let _ = d.u64();
+    } else if let Ok(Some(1)) = {
+        d.set_position(pos);
+        d.array()
+    } {
+    } else {
+        d.set_position(pos);
+    }
+
+    // array(4) [pool_map, mark_total, set_total, go_total]
+    let _ = d.array();
+
+    // pool_map: Map<pool_hash(28B), array(3)[mark, set, go]>
+    let pool_count = d.map()?.unwrap_or(0);
+    let mut pool_stake: Option<u64> = None;
+    let pool_id_lower = pool_id_hex.to_lowercase();
+
+    for _ in 0..pool_count {
+        let pool_hash = hex::encode(d.bytes().unwrap_or(&[]));
+        let _ = d.array();
+        let mark = d.u64().unwrap_or(0);
+        let set = d.u64().unwrap_or(0);
+        let _go = d.u64().unwrap_or(0);
+
+        if pool_hash == pool_id_lower {
+            pool_stake = Some(if use_mark { mark } else { set });
+        }
+    }
+
+    let total_mark = d.u64().unwrap_or(0);
+    let total_set = d.u64().unwrap_or(0);
+    let _total_go = d.u64().unwrap_or(0);
+
+    let total_active_stake = if use_mark { total_mark } else { total_set };
+
+    let pool_stake = pool_stake.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Pool {} not found in stake snapshot. Is the pool registered and has delegated stake?",
+            pool_id_hex
+        )
+    })?;
+
+    Ok(PoolStakeInfo {
+        pool_stake,
+        total_active_stake,
+    })
+}
+
+// ── Task 4: Genesis Reader Helper ───────────────────────────────────────────
+
+/// Parameters extracted from the Shelley genesis file needed for leadership schedule.
+#[allow(dead_code)]
+struct ShelleyGenesisParams {
+    active_slots_coeff: f64,
+    epoch_length: u64,
+    slot_length: u64,
+    system_start_unix: u64,
+}
+
+/// Read the shelley genesis file and extract timing parameters.
+#[allow(dead_code)]
+fn read_shelley_genesis(path: &std::path::Path) -> Result<ShelleyGenesisParams> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Cannot read genesis file '{}': {e}", path.display()))?;
+    let genesis: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid genesis JSON: {e}"))?;
+
+    let active_slots_coeff = genesis["activeSlotsCoeff"]
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("Missing activeSlotsCoeff in genesis"))?;
+
+    let epoch_length = genesis["epochLength"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("Missing epochLength in genesis"))?;
+
+    let slot_length = genesis["slotLength"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("Missing slotLength in genesis"))?;
+
+    let system_start_str = genesis["systemStart"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing systemStart in genesis"))?;
+
+    let system_start_unix = parse_iso8601_to_unix(system_start_str)
+        .ok_or_else(|| anyhow::anyhow!("Cannot parse systemStart: {system_start_str}"))?;
+
+    Ok(ShelleyGenesisParams {
+        active_slots_coeff,
+        epoch_length,
+        slot_length,
+        system_start_unix,
+    })
+}
+
+// ── Task 5: Pool ID from Cold Key ───────────────────────────────────────────
+
+/// Derive pool ID (hex) from a cold verification key file.
+///
+/// The key file is a Cardano text envelope with `cborHex` containing a CBOR-wrapped
+/// Ed25519 public key (32 bytes). The pool ID is Blake2b-224 of the raw key bytes.
+#[allow(dead_code)]
+fn pool_id_from_cold_vkey(path: &std::path::Path) -> Result<String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Cannot read cold key file '{}': {e}", path.display()))?;
+    let env: serde_json::Value = serde_json::from_str(&content)?;
+    let cbor_hex = env["cborHex"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing cborHex in cold verification key file"))?;
+    let cbor_bytes = hex::decode(cbor_hex)?;
+
+    // Strip CBOR wrapper (5820 prefix for 32-byte bytestring)
+    let key_bytes = if cbor_bytes.len() > 2 && cbor_bytes[0] == 0x58 && cbor_bytes[1] == 0x20 {
+        &cbor_bytes[2..]
+    } else if cbor_bytes.len() > 1 && (cbor_bytes[0] & 0xe0) == 0x40 {
+        &cbor_bytes[1..]
+    } else {
+        &cbor_bytes
+    };
+
+    if key_bytes.len() != 32 {
+        anyhow::bail!(
+            "Cold verification key must be 32 bytes, got {}",
+            key_bytes.len()
+        );
+    }
+
+    // Pool ID = Blake2b-224(vkey)
+    use blake2::digest::{consts::U28, Digest};
+    type Blake2b224 = blake2::Blake2b<U28>;
+    let hash = Blake2b224::digest(key_bytes);
+    Ok(hex::encode(hash))
 }
 
 /// Parse and print a UTxO query response in the cardano-cli tabular format.
@@ -1874,95 +2159,8 @@ impl QueryCmd {
 
                 Ok(())
             }
-            QuerySubcommand::LeadershipSchedule {
-                vrf_signing_key_file,
-                epoch_nonce,
-                epoch_start_slot,
-                epoch_length,
-                relative_stake,
-                active_slot_coeff,
-            } => {
-                // Load VRF signing key
-                let vrf_content = std::fs::read_to_string(&vrf_signing_key_file)?;
-                let vrf_env: serde_json::Value = serde_json::from_str(&vrf_content)?;
-                let vrf_cbor_hex = vrf_env["cborHex"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing cborHex in VRF skey file"))?;
-                let vrf_cbor = hex::decode(vrf_cbor_hex)?;
-                // Strip CBOR wrapper
-                let vrf_key_bytes = if vrf_cbor.len() > 2 && vrf_cbor[0] == 0x58 {
-                    &vrf_cbor[2..]
-                } else if vrf_cbor.len() > 1 && (vrf_cbor[0] & 0xe0) == 0x40 {
-                    &vrf_cbor[1..]
-                } else {
-                    &vrf_cbor
-                };
-                if vrf_key_bytes.len() != 32 {
-                    anyhow::bail!(
-                        "VRF secret key must be 32 bytes, got {}",
-                        vrf_key_bytes.len()
-                    );
-                }
-                let mut vrf_skey = [0u8; 32];
-                vrf_skey.copy_from_slice(vrf_key_bytes);
-
-                // Parse epoch nonce
-                let nonce = dugite_primitives::hash::Hash32::from_hex(&epoch_nonce)
-                    .map_err(|e| anyhow::anyhow!("Invalid epoch nonce hex: {e}"))?;
-
-                println!(
-                    "Computing leader schedule for epoch starting at slot {epoch_start_slot}..."
-                );
-                println!("Epoch length: {epoch_length} slots");
-                println!("Relative stake: {relative_stake:.6}");
-                println!("Active slot coefficient: {active_slot_coeff}");
-                println!();
-
-                // Convert the f64 inputs to exact rationals so that
-                // compute_leader_schedule can use fully precise fixed-point
-                // arithmetic, matching Haskell's checkLeaderNatValue.
-                //
-                // For the active-slot coefficient we prefer the canonical
-                // fraction (e.g. 0.05 → 1/20).  For relative stake we scale
-                // by a large denominator so that sub-percent precision is
-                // preserved (e.g. 0.003456 → 3456/1_000_000).
-                let (f_num, f_den) = f64_to_rational_approx(active_slot_coeff);
-                // sigma = relative_stake expressed as a rational with
-                // denominator 1_000_000 (gives 6 decimal places of precision).
-                let sigma_den = 1_000_000u64;
-                let sigma_num = (relative_stake * sigma_den as f64).round() as u64;
-
-                let schedule = dugite_consensus::compute_leader_schedule(
-                    &vrf_skey,
-                    &nonce,
-                    epoch_start_slot,
-                    epoch_length,
-                    sigma_num,
-                    sigma_den,
-                    f_num,
-                    f_den,
-                );
-
-                if schedule.is_empty() {
-                    println!("No leader slots found for this epoch.");
-                } else {
-                    println!("{:<12} VRF Output (first 16 bytes)", "SlotNo");
-                    println!("{}", "-".repeat(50));
-                    for leader in &schedule {
-                        println!(
-                            "{:<12} {}",
-                            leader.slot.0,
-                            hex::encode(&leader.vrf_output[..16])
-                        );
-                    }
-                    println!("\nTotal leader slots: {}", schedule.len());
-                    println!(
-                        "Expected: ~{:.0} (f={active_slot_coeff}, stake={relative_stake:.6})",
-                        epoch_length as f64
-                            * (1.0 - (1.0 - active_slot_coeff).powf(relative_stake))
-                    );
-                }
-                Ok(())
+            QuerySubcommand::LeadershipSchedule { .. } => {
+                anyhow::bail!("Not yet implemented");
             }
             QuerySubcommand::SlotNumber {
                 utc_time,
@@ -2382,5 +2580,85 @@ mod tests {
         // is 1.5 slot-lengths past zero should yield slot 1 (not 2).
         let slot = compute_slot(0, 0, 0, 2_000, 3); // target = 3s, slot_length = 2s
         assert_eq!(slot, 1, "floor(3000ms / 2000ms) = 1");
+    }
+
+    // ── Task 2: Protocol State CBOR Parser ──────────────────────────────────
+
+    #[test]
+    fn test_parse_protocol_state_nonces() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).ok(); // MsgResult
+        enc.u32(6).ok();
+        enc.array(2).ok(); // HFC wrapper
+        enc.u64(1).ok();
+        enc.array(2).ok(); // Versioned
+        enc.u8(0).ok();
+        enc.array(7).ok(); // PraosState
+        // [0] lastSlot = Origin
+        enc.array(1).ok();
+        enc.u8(0).ok();
+        // [1] ocertCounters = empty map
+        enc.map(0).ok();
+        // [2] evolvingNonce = NeutralNonce
+        enc.array(1).ok();
+        enc.u8(0).ok();
+        // [3] candidateNonce = Nonce(0xBB * 32)
+        enc.array(2).ok();
+        enc.u8(1).ok();
+        enc.bytes(&[0xBB; 32]).ok();
+        // [4] epochNonce = Nonce(0xAA * 32)
+        enc.array(2).ok();
+        enc.u8(1).ok();
+        enc.bytes(&[0xAA; 32]).ok();
+        // [5] labNonce = NeutralNonce
+        enc.array(1).ok();
+        enc.u8(0).ok();
+        // [6] lastEpochBlockNonce = NeutralNonce
+        enc.array(1).ok();
+        enc.u8(0).ok();
+
+        let nonces = parse_protocol_state_nonces(&buf).unwrap();
+        assert_eq!(nonces.epoch_nonce, [0xAA; 32]);
+        assert_eq!(nonces.candidate_nonce, [0xBB; 32]);
+    }
+
+    // ── Task 3: Stake Snapshot Parser ───────────────────────────────────────
+
+    #[test]
+    fn test_parse_stake_for_pool() {
+        let pool_id = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef01";
+        let pool_bytes = hex::decode(pool_id).unwrap();
+
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).ok(); // MsgResult
+        enc.u32(6).ok();
+        enc.array(2).ok(); // HFC
+        enc.u64(1).ok();
+        enc.array(4).ok(); // stake snapshot
+
+        // pool map with 1 entry
+        enc.map(1).ok();
+        enc.bytes(&pool_bytes).ok();
+        enc.array(3).ok();
+        enc.u64(5000_000_000).ok(); // mark
+        enc.u64(4000_000_000).ok(); // set
+        enc.u64(3000_000_000).ok(); // go
+
+        // totals
+        enc.u64(100_000_000_000).ok(); // mark_total
+        enc.u64(90_000_000_000).ok(); // set_total
+        enc.u64(80_000_000_000).ok(); // go_total
+
+        // --current (use set)
+        let info = parse_stake_for_pool(&buf, pool_id, false).unwrap();
+        assert_eq!(info.pool_stake, 4_000_000_000);
+        assert_eq!(info.total_active_stake, 90_000_000_000);
+
+        // --next (use mark)
+        let info = parse_stake_for_pool(&buf, pool_id, true).unwrap();
+        assert_eq!(info.pool_stake, 5_000_000_000);
+        assert_eq!(info.total_active_stake, 100_000_000_000);
     }
 }
