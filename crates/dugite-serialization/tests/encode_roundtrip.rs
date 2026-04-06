@@ -183,7 +183,10 @@ fn value_multi_asset_is_array2() {
     let name = AssetName(b"DUST".to_vec());
 
     let mut v1 = Value::lovelace(3_000_000);
-    v1.multi_asset.entry(policy).or_default().insert(name.clone(), 100);
+    v1.multi_asset
+        .entry(policy)
+        .or_default()
+        .insert(name.clone(), 100);
 
     let mut v2 = Value::lovelace(3_000_000);
     v2.multi_asset.entry(policy).or_default().insert(name, 100);
@@ -197,10 +200,7 @@ fn value_multi_asset_is_array2() {
         "multi-asset value must start with 0x82 (array of 2)"
     );
     // Encoding must be deterministic.
-    assert_eq!(
-        enc1, enc2,
-        "multi-asset encoding must be deterministic"
-    );
+    assert_eq!(enc1, enc2, "multi-asset encoding must be deterministic");
 }
 
 // ---------------------------------------------------------------------------
@@ -270,9 +270,7 @@ fn era_body_conway_uses_tag258() {
     // The map header is at [0], key 0 is at [1], tag bytes follow.
     // Just check that the bytes 0xd9 0x01 0x02 appear somewhere in the body.
     let tag258_pattern: &[u8] = &[0xd9, 0x01, 0x02];
-    let found = encoded
-        .windows(3)
-        .any(|w| w == tag258_pattern);
+    let found = encoded.windows(3).any(|w| w == tag258_pattern);
     assert!(
         found,
         "Conway body must contain tag 258 (0xd9 0x01 0x02) for inputs set"
@@ -293,9 +291,7 @@ fn era_body_babbage_no_tag258() {
     // The Babbage body is the first element of the array(4).
     // Confirm the tag 258 bytes do NOT appear anywhere in the full tx encoding.
     let tag258_pattern: &[u8] = &[0xd9, 0x01, 0x02];
-    let found = encoded
-        .windows(3)
-        .any(|w| w == tag258_pattern);
+    let found = encoded.windows(3).any(|w| w == tag258_pattern);
     assert!(
         !found,
         "Babbage transaction must NOT contain tag 258 (0xd9 0x01 0x02)"
@@ -338,18 +334,16 @@ fn era_body_conway_longer_than_babbage() {
 #[test]
 fn era_certs_conway_uses_tag258() {
     let mut body = body_for_era(Era::Conway);
-    body.certificates.push(Certificate::StakeRegistration(
-        Credential::VerificationKey(Hash28::from_bytes([1u8; 28])),
-    ));
+    body.certificates
+        .push(Certificate::StakeRegistration(Credential::VerificationKey(
+            Hash28::from_bytes([1u8; 28]),
+        )));
 
     let encoded = encode_transaction_body(&body);
 
     // Tag 258 must appear for the certificates set.
     let tag258_pattern: &[u8] = &[0xd9, 0x01, 0x02];
-    let count = encoded
-        .windows(3)
-        .filter(|w| *w == tag258_pattern)
-        .count();
+    let count = encoded.windows(3).filter(|w| *w == tag258_pattern).count();
 
     // At minimum two occurrences: one for inputs, one for certificates.
     assert!(
@@ -372,7 +366,10 @@ fn witness_conway_redeemers_map() {
     // In Conway the value after key 5 (0x05) is a map (major type 5, 0xa0-0xbf).
     // Find the first 0x05 after the map header byte.
     let key5_pos = encoded.iter().position(|&b| b == 0x05);
-    assert!(key5_pos.is_some(), "Witness set must contain key 5 for redeemers");
+    assert!(
+        key5_pos.is_some(),
+        "Witness set must contain key 5 for redeemers"
+    );
     let after_key5 = key5_pos.unwrap() + 1;
     assert!(
         after_key5 < encoded.len(),
@@ -401,7 +398,10 @@ fn witness_babbage_redeemers_array() {
     // The transaction is array(4).  The second element is the witness set.
     // Rather than parsing the full CBOR, find key 0x05 and check the byte after it.
     let key5_pos = encoded.iter().position(|&b| b == 0x05);
-    assert!(key5_pos.is_some(), "Transaction must contain key 5 for redeemers");
+    assert!(
+        key5_pos.is_some(),
+        "Transaction must contain key 5 for redeemers"
+    );
     let after_key5 = key5_pos.unwrap() + 1;
     assert!(
         after_key5 < encoded.len(),
@@ -424,10 +424,7 @@ fn full_tx_is_array4() {
     let tx = tx_for_era(Era::Conway);
     let encoded = encode_transaction(&tx);
 
-    assert!(
-        !encoded.is_empty(),
-        "Encoded transaction must not be empty"
-    );
+    assert!(!encoded.is_empty(), "Encoded transaction must not be empty");
     // First byte must be 0x84 = array(4).
     assert_eq!(
         encoded[0], 0x84,
@@ -479,10 +476,7 @@ fn block_body_hash_changes_with_aux_data() {
     tx_with_aux.auxiliary_data = Some(AuxiliaryData {
         metadata: {
             let mut m = BTreeMap::new();
-            m.insert(
-                1u64,
-                TransactionMetadatum::Text("hello".to_string()),
-            );
+            m.insert(1u64, TransactionMetadatum::Text("hello".to_string()));
             m
         },
         native_scripts: vec![],

@@ -238,14 +238,19 @@ pub(crate) fn encode_cost_models(cm: &CostModels) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dugite_primitives::transaction::{CostModels, ExUnitPrices, ExUnits, ProtocolParamUpdate, Rational};
+    use dugite_primitives::transaction::{
+        CostModels, ExUnitPrices, ExUnits, ProtocolParamUpdate, Rational,
+    };
     use dugite_primitives::value::Lovelace;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
     /// Build a Rational from numerator/denominator.
     fn rat(n: u64, d: u64) -> Rational {
-        Rational { numerator: n, denominator: d }
+        Rational {
+            numerator: n,
+            denominator: d,
+        }
     }
 
     // ── empty map ────────────────────────────────────────────────────────────
@@ -371,7 +376,10 @@ mod tests {
     #[test]
     fn test_ex_units_key_17_plain_uints() {
         let ppu = ProtocolParamUpdate {
-            max_tx_ex_units: Some(ExUnits { mem: 14_000_000, steps: 10_000_000_000 }),
+            max_tx_ex_units: Some(ExUnits {
+                mem: 14_000_000,
+                steps: 10_000_000_000,
+            }),
             ..Default::default()
         };
         let encoded = encode_protocol_param_update(&ppu);
@@ -452,12 +460,12 @@ mod tests {
     #[test]
     fn test_conway_governance_fields() {
         let ppu = ProtocolParamUpdate {
-            min_committee_size: Some(5),         // key 24
-            committee_term_limit: Some(146),     // key 25
-            gov_action_lifetime: Some(6),        // key 26
-            gov_action_deposit: Some(Lovelace(100_000_000_000)),  // key 27
-            drep_deposit: Some(Lovelace(500_000_000)),            // key 28
-            drep_activity: Some(20),             // key 29
+            min_committee_size: Some(5),                         // key 24
+            committee_term_limit: Some(146),                     // key 25
+            gov_action_lifetime: Some(6),                        // key 26
+            gov_action_deposit: Some(Lovelace(100_000_000_000)), // key 27
+            drep_deposit: Some(Lovelace(500_000_000)),           // key 28
+            drep_activity: Some(20),                             // key 29
             min_fee_ref_script_cost_per_byte: Some(15), // key 30 — encoded as rational 15/1
             ..Default::default()
         };
@@ -499,7 +507,10 @@ mod tests {
         assert_eq!(encoded[pos + 1], 0x1b, "key 27 value");
         pos += 2;
         // 100_000_000_000 is a 5-byte uint (> 4294967296), encoded as 0x1b + 8 bytes
-        assert_eq!(encoded[pos], 0x1b, "gov_action_deposit should be 8-byte uint");
+        assert_eq!(
+            encoded[pos], 0x1b,
+            "gov_action_deposit should be 8-byte uint"
+        );
         pos += 9; // 1 prefix + 8 bytes
 
         // key 28 = 0x18 0x1c  (drep_deposit)
@@ -533,10 +544,10 @@ mod tests {
     #[test]
     fn test_keys_are_in_ascending_order() {
         let ppu = ProtocolParamUpdate {
-            min_fee_a: Some(44),              // key 0
-            a0: Some(rat(3, 10)),             // key 9
+            min_fee_a: Some(44),                                 // key 0
+            a0: Some(rat(3, 10)),                                // key 9
             max_tx_ex_units: Some(ExUnits { mem: 1, steps: 2 }), // key 17
-            min_committee_size: Some(3),      // key 24
+            min_committee_size: Some(3),                         // key 24
             ..Default::default()
         };
         let encoded = encode_protocol_param_update(&ppu);
@@ -641,7 +652,10 @@ mod tests {
         // -1 = 0x20  (CBOR: major type 1, additional info 0)
         assert_eq!(encoded[3], 0x20, "-1 should encode as 0x20");
         // -100: encode_int(-100) = 0x38 0x63
-        assert_eq!(encoded[4], 0x38, "-100 should use 1-byte negative encoding prefix");
+        assert_eq!(
+            encoded[4], 0x38,
+            "-100 should use 1-byte negative encoding prefix"
+        );
         assert_eq!(encoded[5], 0x63, "-100 value byte (99 = 0x63)");
         // 0 = 0x00
         assert_eq!(encoded[6], 0x00, "0 should encode as 0x00");

@@ -240,7 +240,9 @@ pub fn compute_block_body_hash(transactions: &[Transaction]) -> Hash32 {
 mod tests {
     use super::*;
     use crate::cbor::encode_array_header;
-    use dugite_primitives::block::{Block, BlockHeader, OperationalCert, ProtocolVersion, VrfOutput};
+    use dugite_primitives::block::{
+        Block, BlockHeader, OperationalCert, ProtocolVersion, VrfOutput,
+    };
     use dugite_primitives::era::Era;
     use dugite_primitives::hash::Hash32;
     use dugite_primitives::time::{BlockNo, SlotNo};

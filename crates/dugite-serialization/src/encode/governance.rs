@@ -223,8 +223,8 @@ mod tests {
     use dugite_primitives::credentials::Credential;
     use dugite_primitives::hash::{Hash28, Hash32};
     use dugite_primitives::transaction::{
-        Anchor, Constitution, GovAction, GovActionId, ProtocolParamUpdate, ProposalProcedure, Vote,
-        VotingProcedure, Voter,
+        Anchor, Constitution, GovAction, GovActionId, ProposalProcedure, ProtocolParamUpdate, Vote,
+        Voter, VotingProcedure,
     };
     use dugite_primitives::value::Lovelace;
 
@@ -378,7 +378,7 @@ mod tests {
         let encoded = encode_gov_action_id(&id);
 
         assert_eq!(encoded[0], 0x82); // array(2)
-        // tx hash: 0x58 0x20 followed by 32 bytes
+                                      // tx hash: 0x58 0x20 followed by 32 bytes
         assert_eq!(encoded[1], 0x58);
         assert_eq!(encoded[2], 0x20);
         assert_eq!(&encoded[3..35], &[0xCCu8; 32]);
@@ -443,7 +443,7 @@ mod tests {
 
         assert_eq!(encoded[0], 0x82); // array(2)
         assert_eq!(encoded[1], 0x01); // Yes = 1
-        // Anchor starts at [2]: array(2) header
+                                      // Anchor starts at [2]: array(2) header
         assert_eq!(encoded[2], 0x82);
         // Encoded length must be more than 3 (there's an anchor)
         assert!(encoded.len() > 3);
@@ -495,7 +495,7 @@ mod tests {
         let encoded = encode_proposal_procedure(&pp);
 
         assert_eq!(encoded[0], 0x84); // array(4)
-        // Deposit 500_000_000 = 0x1DCD6500 — encodes as 0x1a 0x1d 0xcd 0x65 0x00
+                                      // Deposit 500_000_000 = 0x1DCD6500 — encodes as 0x1a 0x1d 0xcd 0x65 0x00
         assert_eq!(encoded[1], 0x1a);
         // return_addr bstr starts after deposit (5 bytes)
         // gov_action and anchor follow
@@ -554,7 +554,7 @@ mod tests {
         assert_eq!(encoded[0], 0x83); // array(3)
         assert_eq!(encoded[1], 0x02); // tag 2
         assert_eq!(encoded[2], 0xa1); // map(1) — one withdrawal
-        // Withdrawal key: bstr(2) = 0x42 0xe1 0x02
+                                      // Withdrawal key: bstr(2) = 0x42 0xe1 0x02
         assert_eq!(encoded[3], 0x42);
         assert_eq!(encoded[4], 0xe1);
         assert_eq!(encoded[5], 0x02);
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(encoded[2], 0xf6); // null (no prev_action_id)
         assert_eq!(encoded[3], 0x80); // array(0) — no members removed
         assert_eq!(encoded[4], 0xa0); // map(0) — no members added
-        // Rational: CBOR tag 30 = 0xd8 0x1e, then array(2) [2, 3]
+                                      // Rational: CBOR tag 30 = 0xd8 0x1e, then array(2) [2, 3]
         assert_eq!(encoded[5], 0xd8);
         assert_eq!(encoded[6], 0x1e);
         assert_eq!(encoded[7], 0x82);
@@ -620,9 +620,9 @@ mod tests {
         assert_eq!(encoded[0], 0x83); // array(3)
         assert_eq!(encoded[1], 0x05); // tag 5
         assert_eq!(encoded[2], 0xf6); // null (no prev_action_id)
-        // Constitution: array(2) [anchor, null]
+                                      // Constitution: array(2) [anchor, null]
         assert_eq!(encoded[3], 0x82); // array(2)
-        // anchor follows (array(2) with url and data_hash)
+                                      // anchor follows (array(2) with url and data_hash)
         assert_eq!(encoded[4], 0x82);
         // script_hash: null at the end
         let last = *encoded.last().unwrap();
@@ -643,9 +643,9 @@ mod tests {
 
         assert_eq!(encoded[0], 0x83); // array(3)
         assert_eq!(encoded[1], 0x05); // tag 5
-        // Script hash bstr(28) should be last two fields
+                                      // Script hash bstr(28) should be last two fields
         assert_eq!(encoded[2], 0xf6); // null (no prev_action_id)
-        // script_hash presence: last 30 bytes should be 0x58 0x1c <28 bytes>
+                                      // script_hash presence: last 30 bytes should be 0x58 0x1c <28 bytes>
         let sh_start = encoded.len() - 30;
         assert_eq!(encoded[sh_start], 0x58);
         assert_eq!(encoded[sh_start + 1], 28);

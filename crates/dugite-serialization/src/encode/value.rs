@@ -212,7 +212,10 @@ mod tests {
 
         // quantity -500:  -(500) - 1 = 499 = 0x01F3 → 0x39 0x01 0xf3
         let qty_offset = 32 + 1 + 4; // map_header(1) + bytestr_header(1) + "burn"(4)
-        assert_eq!(enc[qty_offset], 0x39, "negative qty must use 2-byte CBOR negative");
+        assert_eq!(
+            enc[qty_offset], 0x39,
+            "negative qty must use 2-byte CBOR negative"
+        );
         assert_eq!(enc[qty_offset + 1], 0x01);
         assert_eq!(enc[qty_offset + 2], 0xf3);
     }
@@ -230,7 +233,10 @@ mod tests {
         // quantity 42 → 0x18 0x2a  (one-byte uint)
         // offset: 0xa1 + policy(30) + 0xa1 + name_bytes(5 for "mint") = 37
         let qty_offset = 1 + 30 + 1 + 1 + 4;
-        assert_eq!(enc[qty_offset], 0x18, "positive qty 42 should use 0x18 prefix");
+        assert_eq!(
+            enc[qty_offset], 0x18,
+            "positive qty 42 should use 0x18 prefix"
+        );
         assert_eq!(enc[qty_offset + 1], 42);
     }
 
@@ -277,6 +283,10 @@ mod tests {
         //   0x41 0x58                   — bytes(1) "X"     2
         //   0x01                        — uint 1           1
         // Total: 1+5+1+30+1+2+1 = 41
-        assert_eq!(enc.len(), 41, "unexpected encoded length for single-asset value");
+        assert_eq!(
+            enc.len(),
+            41,
+            "unexpected encoded length for single-asset value"
+        );
     }
 }

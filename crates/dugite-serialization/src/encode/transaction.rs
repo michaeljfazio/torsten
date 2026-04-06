@@ -761,7 +761,10 @@ mod tests {
         };
         let encoded = encode_transaction_output(&output);
         // First byte: array(3) = 0x83
-        assert_eq!(encoded[0], 0x83, "legacy output with datum hash must be array(3)");
+        assert_eq!(
+            encoded[0], 0x83,
+            "legacy output with datum hash must be array(3)"
+        );
     }
 
     // ── encode_transaction_output (post-Alonzo) ──────────────────────────────
@@ -779,7 +782,10 @@ mod tests {
         };
         let encoded = encode_transaction_output(&output);
         // First byte: map(2) = 0xa2
-        assert_eq!(encoded[0], 0xa2, "post-Alonzo minimal output must be map(2)");
+        assert_eq!(
+            encoded[0], 0xa2,
+            "post-Alonzo minimal output must be map(2)"
+        );
         // Key 0 must immediately follow
         assert_eq!(encoded[1], 0x00, "first map key must be 0 (address)");
     }
@@ -820,7 +826,10 @@ mod tests {
         assert_eq!(encoded[0], 0xa3, "output with inline datum must be map(3)");
         // Scan for key 2
         let key2_pos = encoded.iter().position(|&b| b == 0x02);
-        assert!(key2_pos.is_some(), "map must contain key 2 for datum_option");
+        assert!(
+            key2_pos.is_some(),
+            "map must contain key 2 for datum_option"
+        );
     }
 
     /// Post-Alonzo output with inline datum uses raw_cbor when provided.
@@ -883,7 +892,10 @@ mod tests {
         };
         let encoded = encode_transaction_output(&output);
         // map(4) = 0xa4
-        assert_eq!(encoded[0], 0xa4, "output with datum + script_ref must be map(4)");
+        assert_eq!(
+            encoded[0], 0xa4,
+            "output with datum + script_ref must be map(4)"
+        );
     }
 
     // ── era-specific set encoding ────────────────────────────────────────────
@@ -1132,7 +1144,10 @@ mod tests {
         // tag(259) = 0xd9 0x01 0x03
         assert_eq!(encoded[0], 0xd9, "aux with scripts: tag byte 1 (0xd9)");
         assert_eq!(encoded[1], 0x01, "aux with scripts: tag byte 2 (0x01)");
-        assert_eq!(encoded[2], 0x03, "aux with scripts: tag byte 3 (0x03 = 259)");
+        assert_eq!(
+            encoded[2], 0x03,
+            "aux with scripts: tag byte 3 (0x03 = 259)"
+        );
     }
 
     // ── empty witness set ────────────────────────────────────────────────────
@@ -1142,7 +1157,11 @@ mod tests {
     fn test_empty_witness_set() {
         let ws = empty_witness_set();
         let encoded = encode_witness_set(&ws);
-        assert_eq!(encoded, vec![0xa0], "empty witness set must be map(0) = 0xa0");
+        assert_eq!(
+            encoded,
+            vec![0xa0],
+            "empty witness set must be map(0) = 0xa0"
+        );
     }
 
     // ── witness set with vkeys ───────────────────────────────────────────────
@@ -1178,7 +1197,11 @@ mod tests {
     fn test_compute_transaction_hash_non_zero() {
         let body = minimal_body();
         let h = compute_transaction_hash(&body);
-        assert_ne!(h, Hash32::ZERO, "transaction hash of real body must be non-zero");
+        assert_ne!(
+            h,
+            Hash32::ZERO,
+            "transaction hash of real body must be non-zero"
+        );
     }
 
     /// Two different bodies must produce different hashes
