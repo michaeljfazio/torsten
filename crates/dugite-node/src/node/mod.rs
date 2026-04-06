@@ -3967,15 +3967,11 @@ impl Node {
             max_block_ex_mem,
             max_block_ex_steps,
         );
-        // Use the node's software capability version, NOT the on-chain ledger PParams.
-        // This matches Haskell's `cardanoProtocolVersion` — a compiled-in constant that
-        // signals "my software supports up to this version" for upgrade readiness voting.
-        let (pv_major, pv_minor) = dugite_consensus::NODE_PROTOCOL_VERSION;
         let config = crate::forge::BlockProducerConfig {
-            protocol_version: dugite_primitives::block::ProtocolVersion {
-                major: pv_major,
-                minor: pv_minor,
-            },
+            // Node software capability version from config, NOT the on-chain ledger version.
+            // Matches cardano-node's cardanoProtocolVersion (hardcoded per software release).
+            // Respects ExperimentalHardForksEnabled: false→10,8  true→11,0
+            protocol_version: self.config.node_protocol_version(),
             _max_block_body_size: max_block_body_size,
             _max_txs_per_block: 500,
             era: current_era,
