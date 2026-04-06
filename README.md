@@ -1,5 +1,7 @@
 # Dugite
 
+Named after the [dugite](https://en.wikipedia.org/wiki/Dugite) (*Pseudonaja affinis*), a highly venomous brown snake indigenous to Perth, Western Australia — where the project's main author is from. Dugites are fast, resilient, and quietly formidable; traits shared by this node. They're also responsible for the loss of more than a few beloved family pets over the years.
+
 A Cardano node implementation written in Rust, aiming for 100% compatibility with [cardano-node](https://github.com/IntersectMBO/cardano-node).
 
 Built by [Sandstone Pool](https://www.sandstone.io/)
