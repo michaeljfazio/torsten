@@ -3720,8 +3720,12 @@ mod tests {
         assert!((praos.active_slot_coeff - 0.05).abs() < f64::EPSILON);
 
         // Create with custom coefficient
-        let praos_custom =
-            OuroborosPraos::with_params(0.1, 2160, dugite_primitives::time::mainnet_epoch_length(), 10);
+        let praos_custom = OuroborosPraos::with_params(
+            0.1,
+            2160,
+            dugite_primitives::time::mainnet_epoch_length(),
+            10,
+        );
         assert!((praos_custom.active_slot_coeff - 0.1).abs() < f64::EPSILON);
     }
 

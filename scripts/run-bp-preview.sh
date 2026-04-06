@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 BIN=./target/release/dugite-node
-KEY_DIR=./keys/preview-test/pool
+KEY_DIR=./keys
 
 if [[ ! -x "$BIN" ]]; then
     echo "Binary not found. Building..."

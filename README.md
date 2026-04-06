@@ -233,7 +233,7 @@ Dugite can function as a **testnet relay node** with the following capabilities:
 
 ### Block Producer
 
-The block production pipeline is **actively soak-tested** on the Cardano preview testnet via **Sandstone Pool [SAND]** (pool ID `6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856`):
+The block production pipeline is **actively soak-tested** on the Cardano preview testnet via **Sandstone Pool [SAND]** (pool ID `ff9f5e5a5102c86fca0de6300b322b555172dd206f4771e5297527d5`):
 
 - VRF proof generation and slot leader election (exact 34-digit fixed-point arithmetic matching Haskell)
 - KES key loading, evolution, and block signing (Sum6Kes)
@@ -349,11 +349,13 @@ Dugite is actively soak-tested on the **Cardano preview testnet** via **Sandston
 
 | Field | Value |
 |-------|-------|
-| Pool ID | `6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856` |
+| Pool ID | `ff9f5e5a5102c86fca0de6300b322b555172dd206f4771e5297527d5` |
+| Bech32 | `pool1l704ukj3qtyxljsduccqkv3t24gh9hfqdarhreffw5na2uknf5k` |
 | Ticker | SAND |
 | Homepage | [https://sandstone.io](https://sandstone.io) |
-| Margin | 0% |
-| Fixed cost | 170 ADA |
+| Pledge | 1,000 ADA |
+| Margin | 5% |
+| Fixed cost | 340 ADA |
 | Network | Preview (magic=2) |
 
 The soak test script (`scripts/soak-test.sh`) automates:

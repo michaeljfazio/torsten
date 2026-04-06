@@ -13,19 +13,47 @@
 - TPraos→Praos translation: `ouroboros-consensus-protocol/src/.../Protocol/Praos.hs` (TranslateProto instance, line 755)
 - ProtocolInfo construction: `ouroboros-consensus-cardano/src/shelley/Ouroboros/Consensus/Shelley/Node/TPraos.hs`
 
-## PraosState (8 fields, Babbage/Conway)
+## PraosState — Version History (CRITICAL FOR CBOR ENCODING)
+
+### Version on main branch (unreleased as of 2026-04-06)
+8 fields, `encodeListLen 8` (array(8)).  Added `praosStatePreviousEpochNonce` for Peras in commit
+`5598d9fbbb67` (2025-10-29, "Store previous epoch nonce in PraosState").
+
+### Version in released ouroboros-consensus-protocol-0.13.0.0 (shipped with cardano-node 10.6.2 / 10.7.0)
+7 fields, `encodeListLen 7` (array(7)).  NO `praosStatePreviousEpochNonce` field.
+
+**cardano-cli 10.15 uses the released 7-field / array(7) encoding.
+Sending array(8) causes the client to reject DebugChainDepState responses.**
+
 ```haskell
+-- Released 0.13.0.0 (cardano-node 10.6.2):
 data PraosState = PraosState
   { praosStateLastSlot              :: !(WithOrigin SlotNo)
   , praosStateOCertCounters         :: !(Map (KeyHash BlockIssuer) Word64)
   , praosStateEvolvingNonce         :: !Nonce    -- eta_v, updated every block, never reset
   , praosStateCandidateNonce        :: !Nonce    -- eta_c, frozen 4k/f before epoch end
   , praosStateEpochNonce            :: !Nonce    -- eta_0, recomputed at epoch boundary
-  , praosStatePreviousEpochNonce    :: !Nonce    -- old epoch nonce (for Peras)
+  -- NO previousEpochNonce here
   , praosStateLabNonce              :: !Nonce    -- hash of parent block of last applied block
   , praosStateLastEpochBlockNonce   :: !Nonce    -- labNonce snapshot at epoch boundary
   }
+
+-- main branch (unreleased, for Peras):
+data PraosState = PraosState
+  { praosStateLastSlot              :: !(WithOrigin SlotNo)
+  , praosStateOCertCounters         :: !(Map (KeyHash BlockIssuer) Word64)
+  , praosStateEvolvingNonce         :: !Nonce
+  , praosStateCandidateNonce        :: !Nonce
+  , praosStateEpochNonce            :: !Nonce
+  , praosStatePreviousEpochNonce    :: !Nonce    -- added for Peras
+  , praosStateLabNonce              :: !Nonce
+  , praosStateLastEpochBlockNonce   :: !Nonce
+  }
 ```
+
+Field order in the released 7-field array(7):
+  [0] lastSlot, [1] ocertCounters, [2] evolvingNonce, [3] candidateNonce,
+  [4] epochNonce, [5] labNonce, [6] lastEpochBlockNonce
 
 ## TPraos ChainDepState (Shelley through Alonzo)
 ```haskell

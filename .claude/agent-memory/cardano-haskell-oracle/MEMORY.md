@@ -1,5 +1,8 @@
 # Cardano Haskell Oracle - Agent Memory
 
+## ExtLedgerState Snapshot Format
+- [ext-ledger-state-snapshot-format.md](ext-ledger-state-snapshot-format.md) — Complete CBOR encoding of state file: snapshot wrapper array(2)[1,...], ExtLedgerState array(2), HeaderState array(2)[withOrigin,telescope], PraosState 8-field array, ShelleyLedgerState 4-field array, Nonce encoding, telescope lengths
+
 ## GDD — Genesis Density Disconnector
 - [gdd-genesis-density-disconnector.md](gdd-genesis-density-disconnector.md) — Complete GDD algorithm: genesis window=3k/f slots, integer density bounds (lower/upper), 4 disconnection guards, 1s rate limit, LoE enforcement in ChainSel (+k blocks), GSM state gating (only runs in Syncing)
 
@@ -146,6 +149,9 @@
 - plutus: 999 UPLC conformance tests (program + expected result + budget)
 - ouroboros-network: CDDL specs for all 10 mini-protocols
 
+## Block Header Protocol Version (cardanoProtocolVersion)
+- [block-header-protocol-version.md](block-header-protocol-version.md) — Hardcoded in Cardano.hs; per-release values (10.1.4=10,2 / 10.2-10.6.0=10,3 / 10.5.3-4=10,6 / 10.6.1-3=10,7 / 10.7.0+=10,8); ExperimentalHardForksEnabled flips to 11,0; full forge call chain; ObsoleteNode check; distinction from on-chain PParams.protocolVersion
+
 ## BlockFetch / ChainSync Wire Format
 - [blockfetch-hfc-wire-format.md](blockfetch-hfc-wire-format.md) — MsgBlock=tag(24) bstr(stored_cbor), NOT array[hfc_index,tag24(body)]; ChainSync headers use different encodeNS path
 
@@ -154,6 +160,12 @@
 
 ## Conway Pointer Stake Exclusion
 - [conway-instant-stake-ptr-exclusion.md](conway-instant-stake-ptr-exclusion.md) — ConwayInstantStake has NO sisPtrStake; addConwayInstantStake drops StakeRefPtr via _other; sisPtrStake discarded at HFC deserialization; SNAP rule unchanged
+
+## ExtLedgerState Disk Snapshot CBOR Format
+- [ledger-snapshot-cbor-format.md](ledger-snapshot-cbor-format.md) — Complete wire format: outer array(2)[uint8(1), ExtLedgerState], HFC telescope structure, ShelleyLedgerState v2 array(4), NewEpochState array(7), tvar file format, TxIn MemPack encoding, meta JSON, V1 vs V2 backends
+
+## Mithril Snapshot & Ledger Initialization
+- [mithril-snapshot-ledger-init.md](mithril-snapshot-ledger-init.md) — Two-archive system (immutables vs ancillary), ledger snapshot dir layout, initialize() replay logic, tickThenReapply vs tickThenApply, protocol params source, snapshot policy, Dugite gap (no ancillary download)
 
 ## Ledger Types, Crypto, and Wire Format
 - See [cardano-ledger-types-wire-format.md](cardano-ledger-types-wire-format.md) — COMPLETE reference: all hash types (ADDRHASH=28B/Blake2b-224, HASH=32B/Blake2b-256), key types (Ed25519 VKey, VRF, KES), address binary format (header byte truth table), MaryValue CBOR (uint vs array(2)), script prefix tags (0x00-0x04), Datum/BinaryData (tag24), PParams array(31) positional index table, PParamsUpdate sparse map (keys 0-33), PoolVotingThresholds array(5), DRepVotingThresholds array(10), Rational tag(30), ShelleyGenesis/AlonzoGenesis/ConwayGenesis structures, Withdrawals map encoding, Credential array(2) encoding

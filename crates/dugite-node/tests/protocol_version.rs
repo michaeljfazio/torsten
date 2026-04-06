@@ -61,7 +61,10 @@ fn default_block_producer_config_matches_cardano_node() {
     let config = BlockProducerConfig::default();
     assert_eq!(
         config.protocol_version,
-        ProtocolVersion { major: 10, minor: 8 },
+        ProtocolVersion {
+            major: 10,
+            minor: 8
+        },
         "Default BlockProducerConfig should match cardano-node 10.7.x (ProtVer 10,8)"
     );
 }
@@ -70,7 +73,10 @@ fn default_block_producer_config_matches_cardano_node() {
 #[test]
 fn block_producer_config_accepts_experimental_version() {
     let config = BlockProducerConfig {
-        protocol_version: ProtocolVersion { major: 11, minor: 0 },
+        protocol_version: ProtocolVersion {
+            major: 11,
+            minor: 0,
+        },
         ..Default::default()
     };
     assert_eq!(config.protocol_version.major, 11);
@@ -91,7 +97,13 @@ fn config_to_block_producer_config_end_to_end() {
         protocol_version: node_config.node_protocol_version(),
         ..Default::default()
     };
-    assert_eq!(bp_config.protocol_version, ProtocolVersion { major: 10, minor: 8 });
+    assert_eq!(
+        bp_config.protocol_version,
+        ProtocolVersion {
+            major: 10,
+            minor: 8
+        }
+    );
 
     // Experimental mode
     let node_config: NodeConfig =
@@ -100,5 +112,11 @@ fn config_to_block_producer_config_end_to_end() {
         protocol_version: node_config.node_protocol_version(),
         ..Default::default()
     };
-    assert_eq!(bp_config.protocol_version, ProtocolVersion { major: 11, minor: 0 });
+    assert_eq!(
+        bp_config.protocol_version,
+        ProtocolVersion {
+            major: 11,
+            minor: 0
+        }
+    );
 }

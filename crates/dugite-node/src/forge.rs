@@ -238,7 +238,10 @@ impl Default for BlockProducerConfig {
             // Default: cardano-node 10.7.x (ExperimentalHardForksEnabled=false).
             // The actual forging path uses NodeConfig.node_protocol_version() which
             // respects the ExperimentalHardForksEnabled config flag.
-            protocol_version: ProtocolVersion { major: 10, minor: 8 },
+            protocol_version: ProtocolVersion {
+                major: 10,
+                minor: 8,
+            },
             _max_block_body_size: 90112,
             _max_txs_per_block: 500,
             era: Era::Conway,
