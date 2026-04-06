@@ -91,3 +91,113 @@ pub trait MempoolProvider: Send + Sync + 'static {
     /// Snapshot of current mempool state.
     fn snapshot(&self) -> MempoolSnapshot;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::Hash;
+
+    #[test]
+    fn test_mempool_add_error_display() {
+        let err = MempoolAddError("tx too large".to_string());
+        assert_eq!(err.to_string(), "tx too large");
+    }
+
+    #[test]
+    fn test_mempool_add_error_display_empty() {
+        let err = MempoolAddError(String::new());
+        assert_eq!(err.to_string(), "");
+    }
+
+    #[test]
+    fn test_mempool_snapshot_construction() {
+        let hashes = vec![Hash::from_bytes([0x01; 32]), Hash::from_bytes([0x02; 32])];
+        let snap = MempoolSnapshot {
+            tx_count: 2,
+            total_bytes: 1024,
+            tx_hashes: hashes.clone(),
+        };
+        assert_eq!(snap.tx_count, 2);
+        assert_eq!(snap.total_bytes, 1024);
+        assert_eq!(snap.tx_hashes.len(), 2);
+    }
+
+    #[test]
+    fn test_mempool_snapshot_empty() {
+        let snap = MempoolSnapshot {
+            tx_count: 0,
+            total_bytes: 0,
+            tx_hashes: vec![],
+        };
+        assert_eq!(snap.tx_count, 0);
+        assert!(snap.tx_hashes.is_empty());
+    }
+
+    // Test the default is_empty() implementation via a mock
+    struct MockMempool {
+        count: usize,
+    }
+
+    impl MempoolProvider for MockMempool {
+        fn add_tx(
+            &self,
+            _: TransactionHash,
+            _: Transaction,
+            _: usize,
+        ) -> Result<MempoolAddResult, MempoolAddError> {
+            Ok(MempoolAddResult::Added)
+        }
+        fn add_tx_with_fee(
+            &self,
+            _: TransactionHash,
+            _: Transaction,
+            _: usize,
+            _: Lovelace,
+        ) -> Result<MempoolAddResult, MempoolAddError> {
+            Ok(MempoolAddResult::Added)
+        }
+        fn contains(&self, _: &TransactionHash) -> bool {
+            false
+        }
+        fn get_tx(&self, _: &TransactionHash) -> Option<Transaction> {
+            None
+        }
+        fn get_tx_size(&self, _: &TransactionHash) -> Option<usize> {
+            None
+        }
+        fn get_tx_cbor(&self, _: &TransactionHash) -> Option<Vec<u8>> {
+            None
+        }
+        fn tx_hashes_ordered(&self) -> Vec<TransactionHash> {
+            vec![]
+        }
+        fn len(&self) -> usize {
+            self.count
+        }
+        fn total_bytes(&self) -> usize {
+            0
+        }
+        fn capacity(&self) -> usize {
+            100
+        }
+        fn snapshot(&self) -> MempoolSnapshot {
+            MempoolSnapshot {
+                tx_count: self.count,
+                total_bytes: 0,
+                tx_hashes: vec![],
+            }
+        }
+    }
+
+    #[test]
+    fn test_mempool_provider_is_empty_true() {
+        let mp = MockMempool { count: 0 };
+        assert!(mp.is_empty());
+    }
+
+    #[test]
+    fn test_mempool_provider_is_empty_false() {
+        let mp = MockMempool { count: 5 };
+        assert!(!mp.is_empty());
+    }
+}

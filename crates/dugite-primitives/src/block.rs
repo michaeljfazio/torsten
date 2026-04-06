@@ -203,3 +203,287 @@ impl std::fmt::Display for Tip {
         write!(f, "{} (block {})", self.point, self.block_number)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::Hash;
+    use crate::time::{BlockNo, SlotNo};
+
+    fn test_block_hash() -> BlockHeaderHash {
+        Hash::from_bytes([0xab; 32])
+    }
+
+    fn test_block_hash_2() -> BlockHeaderHash {
+        Hash::from_bytes([0xcd; 32])
+    }
+
+    /// Helper: build a minimal BlockHeader for testing Block accessors.
+    fn test_header(slot: u64, block_number: u64) -> BlockHeader {
+        BlockHeader {
+            header_hash: test_block_hash(),
+            prev_hash: test_block_hash_2(),
+            issuer_vkey: vec![],
+            vrf_vkey: vec![],
+            vrf_result: VrfOutput {
+                output: vec![],
+                proof: vec![],
+            },
+            block_number: BlockNo(block_number),
+            slot: SlotNo(slot),
+            epoch_nonce: Hash::from_bytes([0; 32]),
+            body_size: 0,
+            body_hash: Hash::from_bytes([0; 32]),
+            operational_cert: OperationalCert {
+                hot_vkey: vec![],
+                sequence_number: 0,
+                kes_period: 0,
+                sigma: vec![],
+            },
+            protocol_version: ProtocolVersion { major: 9, minor: 0 },
+            kes_signature: vec![],
+            nonce_vrf_output: vec![],
+            nonce_vrf_proof: vec![],
+        }
+    }
+
+    fn test_block(slot: u64, block_number: u64, num_txs: usize) -> Block {
+        Block {
+            header: test_header(slot, block_number),
+            transactions: (0..num_txs)
+                .map(|_| Transaction::empty_with_hash(Hash::from_bytes([0; 32])))
+                .collect(),
+            era: Era::Conway,
+            raw_cbor: None,
+        }
+    }
+
+    // ========== Point ==========
+
+    #[test]
+    fn test_point_origin_slot_is_none() {
+        assert_eq!(Point::Origin.slot(), None);
+    }
+
+    #[test]
+    fn test_point_origin_hash_is_none() {
+        assert_eq!(Point::Origin.hash(), None);
+    }
+
+    #[test]
+    fn test_point_specific_slot() {
+        let p = Point::Specific(SlotNo(42), test_block_hash());
+        assert_eq!(p.slot(), Some(SlotNo(42)));
+    }
+
+    #[test]
+    fn test_point_specific_hash() {
+        let h = test_block_hash();
+        let p = Point::Specific(SlotNo(0), h);
+        assert_eq!(p.hash(), Some(&test_block_hash()));
+    }
+
+    #[test]
+    fn test_point_display_origin() {
+        assert_eq!(Point::Origin.to_string(), "origin");
+    }
+
+    #[test]
+    fn test_point_display_specific() {
+        let p = Point::Specific(SlotNo(100), test_block_hash());
+        let s = p.to_string();
+        // SlotNo displays as "slot:100"
+        assert!(s.starts_with("slot:100@"));
+        assert!(s.contains("abababab"));
+    }
+
+    #[test]
+    fn test_point_ord_origin_less_than_specific() {
+        let specific = Point::Specific(SlotNo(0), test_block_hash());
+        assert!(Point::Origin < specific);
+    }
+
+    #[test]
+    fn test_point_ord_origin_equal_origin() {
+        assert_eq!(Point::Origin.cmp(&Point::Origin), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn test_point_ord_specific_greater_than_origin() {
+        let specific = Point::Specific(SlotNo(0), test_block_hash());
+        assert!(specific > Point::Origin);
+    }
+
+    #[test]
+    fn test_point_ord_specific_by_slot() {
+        let p1 = Point::Specific(SlotNo(10), test_block_hash());
+        let p2 = Point::Specific(SlotNo(20), test_block_hash_2());
+        assert!(p1 < p2);
+    }
+
+    #[test]
+    fn test_point_ord_same_slot_is_equal() {
+        // Ord compares by slot only, ignoring hash
+        let p1 = Point::Specific(SlotNo(10), test_block_hash());
+        let p2 = Point::Specific(SlotNo(10), test_block_hash_2());
+        assert_eq!(p1.cmp(&p2), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn test_point_serde_roundtrip_origin() {
+        let p = Point::Origin;
+        let json = serde_json::to_string(&p).unwrap();
+        let p2: Point = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, p2);
+    }
+
+    #[test]
+    fn test_point_serde_roundtrip_specific() {
+        let p = Point::Specific(SlotNo(999), test_block_hash());
+        let json = serde_json::to_string(&p).unwrap();
+        let p2: Point = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, p2);
+    }
+
+    // ========== ProtocolVersion::era() ==========
+
+    #[test]
+    fn test_protocol_version_era_byron() {
+        assert_eq!(ProtocolVersion { major: 0, minor: 0 }.era(), Era::Byron);
+        assert_eq!(ProtocolVersion { major: 1, minor: 0 }.era(), Era::Byron);
+    }
+
+    #[test]
+    fn test_protocol_version_era_shelley() {
+        assert_eq!(ProtocolVersion { major: 2, minor: 0 }.era(), Era::Shelley);
+    }
+
+    #[test]
+    fn test_protocol_version_era_allegra() {
+        assert_eq!(ProtocolVersion { major: 3, minor: 0 }.era(), Era::Allegra);
+    }
+
+    #[test]
+    fn test_protocol_version_era_mary() {
+        assert_eq!(ProtocolVersion { major: 4, minor: 0 }.era(), Era::Mary);
+    }
+
+    #[test]
+    fn test_protocol_version_era_alonzo() {
+        assert_eq!(ProtocolVersion { major: 5, minor: 0 }.era(), Era::Alonzo);
+        assert_eq!(ProtocolVersion { major: 6, minor: 0 }.era(), Era::Alonzo);
+    }
+
+    #[test]
+    fn test_protocol_version_era_babbage() {
+        assert_eq!(ProtocolVersion { major: 7, minor: 0 }.era(), Era::Babbage);
+        assert_eq!(ProtocolVersion { major: 8, minor: 0 }.era(), Era::Babbage);
+    }
+
+    #[test]
+    fn test_protocol_version_era_conway() {
+        assert_eq!(ProtocolVersion { major: 9, minor: 0 }.era(), Era::Conway);
+        assert_eq!(
+            ProtocolVersion {
+                major: 10,
+                minor: 0
+            }
+            .era(),
+            Era::Conway
+        );
+        assert_eq!(
+            ProtocolVersion {
+                major: 100,
+                minor: 0
+            }
+            .era(),
+            Era::Conway
+        );
+    }
+
+    // ========== Block accessors ==========
+
+    #[test]
+    fn test_block_hash_accessor() {
+        let block = test_block(100, 5, 0);
+        assert_eq!(block.hash(), &test_block_hash());
+    }
+
+    #[test]
+    fn test_block_slot() {
+        let block = test_block(42, 5, 0);
+        assert_eq!(block.slot(), SlotNo(42));
+    }
+
+    #[test]
+    fn test_block_number() {
+        let block = test_block(0, 99, 0);
+        assert_eq!(block.block_number(), BlockNo(99));
+    }
+
+    #[test]
+    fn test_block_prev_hash() {
+        let block = test_block(0, 0, 0);
+        assert_eq!(block.prev_hash(), &test_block_hash_2());
+    }
+
+    #[test]
+    fn test_block_tx_count() {
+        assert_eq!(test_block(0, 0, 0).tx_count(), 0);
+        assert_eq!(test_block(0, 0, 3).tx_count(), 3);
+    }
+
+    #[test]
+    fn test_block_point() {
+        let block = test_block(42, 5, 0);
+        assert_eq!(
+            block.point(),
+            Point::Specific(SlotNo(42), test_block_hash())
+        );
+    }
+
+    #[test]
+    fn test_block_tip() {
+        let block = test_block(42, 5, 0);
+        let tip = block.tip();
+        assert_eq!(tip.point, Point::Specific(SlotNo(42), test_block_hash()));
+        assert_eq!(tip.block_number, BlockNo(5));
+    }
+
+    // ========== Tip ==========
+
+    #[test]
+    fn test_tip_origin() {
+        let tip = Tip::origin();
+        assert_eq!(tip.point, Point::Origin);
+        assert_eq!(tip.block_number, BlockNo(0));
+    }
+
+    #[test]
+    fn test_tip_display_origin() {
+        let tip = Tip::origin();
+        assert_eq!(tip.to_string(), "origin (block block:0)");
+    }
+
+    #[test]
+    fn test_tip_display_specific() {
+        let tip = Tip {
+            point: Point::Specific(SlotNo(100), test_block_hash()),
+            block_number: BlockNo(50),
+        };
+        let s = tip.to_string();
+        assert!(s.starts_with("slot:100@"));
+        assert!(s.ends_with("(block block:50)"));
+    }
+
+    #[test]
+    fn test_tip_serde_roundtrip() {
+        let tip = Tip {
+            point: Point::Specific(SlotNo(100), test_block_hash()),
+            block_number: BlockNo(50),
+        };
+        let json = serde_json::to_string(&tip).unwrap();
+        let tip2: Tip = serde_json::from_str(&json).unwrap();
+        assert_eq!(tip, tip2);
+    }
+}

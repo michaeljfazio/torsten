@@ -774,3 +774,339 @@ pub enum TransactionMetadatum {
     Bytes(Vec<u8>),
     Text(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::Hash;
+
+    fn test_tx_hash() -> TransactionHash {
+        Hash::from_bytes([0xab; 32])
+    }
+
+    // ========== TransactionInput::Display ==========
+
+    #[test]
+    fn test_transaction_input_display() {
+        let input = TransactionInput {
+            transaction_id: test_tx_hash(),
+            index: 3,
+        };
+        let s = input.to_string();
+        // Format: "{tx_id}#{index}"
+        assert!(s.ends_with("#3"));
+        assert!(s.contains("abababab"));
+    }
+
+    #[test]
+    fn test_transaction_input_display_index_zero() {
+        let input = TransactionInput {
+            transaction_id: test_tx_hash(),
+            index: 0,
+        };
+        assert!(input.to_string().ends_with("#0"));
+    }
+
+    #[test]
+    fn test_transaction_input_serde_roundtrip() {
+        let input = TransactionInput {
+            transaction_id: test_tx_hash(),
+            index: 42,
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let input2: TransactionInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(input, input2);
+    }
+
+    #[test]
+    fn test_transaction_input_ord() {
+        let i1 = TransactionInput {
+            transaction_id: Hash::from_bytes([0x00; 32]),
+            index: 0,
+        };
+        let i2 = TransactionInput {
+            transaction_id: Hash::from_bytes([0x00; 32]),
+            index: 1,
+        };
+        let i3 = TransactionInput {
+            transaction_id: Hash::from_bytes([0xff; 32]),
+            index: 0,
+        };
+        assert!(i1 < i2); // same tx_id, different index
+        assert!(i1 < i3); // different tx_id
+    }
+
+    // ========== Rational ==========
+
+    #[test]
+    fn test_rational_default() {
+        let r = Rational::default();
+        assert_eq!(r.numerator, 0);
+        assert_eq!(r.denominator, 1);
+    }
+
+    #[test]
+    fn test_rational_as_f64_normal() {
+        let r = Rational {
+            numerator: 1,
+            denominator: 2,
+        };
+        assert!((r.as_f64() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_rational_as_f64_zero_denominator() {
+        let r = Rational {
+            numerator: 1,
+            denominator: 0,
+        };
+        assert_eq!(r.as_f64(), 0.0);
+    }
+
+    #[test]
+    fn test_rational_as_f64_zero_numerator() {
+        let r = Rational {
+            numerator: 0,
+            denominator: 100,
+        };
+        assert_eq!(r.as_f64(), 0.0);
+    }
+
+    #[test]
+    fn test_rational_is_zero() {
+        assert!(Rational {
+            numerator: 0,
+            denominator: 1
+        }
+        .is_zero());
+        assert!(Rational {
+            numerator: 0,
+            denominator: 0
+        }
+        .is_zero());
+        assert!(!Rational {
+            numerator: 1,
+            denominator: 1
+        }
+        .is_zero());
+    }
+
+    #[test]
+    fn test_rational_is_met_by_basic() {
+        // Threshold: 2/3. Value: 3/4. 3/4 >= 2/3 → true
+        let threshold = Rational {
+            numerator: 2,
+            denominator: 3,
+        };
+        assert!(threshold.is_met_by(3, 4));
+    }
+
+    #[test]
+    fn test_rational_is_met_by_exact_equality() {
+        // 2/3 >= 2/3 → true
+        let threshold = Rational {
+            numerator: 2,
+            denominator: 3,
+        };
+        assert!(threshold.is_met_by(2, 3));
+    }
+
+    #[test]
+    fn test_rational_is_met_by_below_threshold() {
+        // Threshold: 2/3. Value: 1/2. 1/2 < 2/3 → false
+        let threshold = Rational {
+            numerator: 2,
+            denominator: 3,
+        };
+        assert!(!threshold.is_met_by(1, 2));
+    }
+
+    #[test]
+    fn test_rational_is_met_by_zero_threshold_denominator() {
+        let threshold = Rational {
+            numerator: 1,
+            denominator: 0,
+        };
+        assert!(!threshold.is_met_by(1, 1));
+    }
+
+    #[test]
+    fn test_rational_is_met_by_zero_value_denominator() {
+        let threshold = Rational {
+            numerator: 1,
+            denominator: 2,
+        };
+        assert!(!threshold.is_met_by(1, 0));
+    }
+
+    #[test]
+    fn test_rational_is_met_by_large_values() {
+        // Use values near u64::MAX to exercise u128 cross-multiplication
+        let threshold = Rational {
+            numerator: u64::MAX,
+            denominator: u64::MAX,
+        };
+        // u64::MAX/u64::MAX == 1/1, and u64::MAX/u64::MAX >= 1/1 → true
+        assert!(threshold.is_met_by(u64::MAX, u64::MAX));
+        // 1/2 < 1/1 → false
+        assert!(!threshold.is_met_by(1, 2));
+    }
+
+    #[test]
+    fn test_rational_ge() {
+        let a = Rational {
+            numerator: 3,
+            denominator: 4,
+        };
+        let b = Rational {
+            numerator: 2,
+            denominator: 3,
+        };
+        assert!(a.ge(&b)); // 3/4 >= 2/3
+        assert!(!b.gt(&a)); // 2/3 is not > 3/4
+    }
+
+    #[test]
+    fn test_rational_ge_equal() {
+        let a = Rational {
+            numerator: 1,
+            denominator: 2,
+        };
+        let b = Rational {
+            numerator: 2,
+            denominator: 4,
+        };
+        assert!(a.ge(&b)); // 1/2 >= 2/4 (equal)
+        assert!(b.ge(&a));
+    }
+
+    #[test]
+    fn test_rational_gt() {
+        let a = Rational {
+            numerator: 3,
+            denominator: 4,
+        };
+        let b = Rational {
+            numerator: 2,
+            denominator: 3,
+        };
+        assert!(a.gt(&b)); // 3/4 > 2/3
+        assert!(!b.gt(&a));
+    }
+
+    #[test]
+    fn test_rational_gt_equal_is_false() {
+        let a = Rational {
+            numerator: 1,
+            denominator: 2,
+        };
+        let b = Rational {
+            numerator: 1,
+            denominator: 2,
+        };
+        assert!(!a.gt(&b)); // 1/2 is not > 1/2
+    }
+
+    #[test]
+    fn test_rational_ge_gt_zero_denominator() {
+        let a = Rational {
+            numerator: 1,
+            denominator: 0,
+        };
+        let b = Rational {
+            numerator: 1,
+            denominator: 2,
+        };
+        assert!(!a.ge(&b));
+        assert!(!a.gt(&b));
+        assert!(!b.ge(&a));
+        assert!(!b.gt(&a));
+    }
+
+    // ========== CostModels::to_cbor ==========
+
+    #[test]
+    fn test_cost_models_to_cbor_all_none() {
+        let cm = CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: None,
+        };
+        assert!(cm.to_cbor().is_none());
+    }
+
+    #[test]
+    fn test_cost_models_to_cbor_v1_only() {
+        let cm = CostModels {
+            plutus_v1: Some(vec![1, 2, 3]),
+            plutus_v2: None,
+            plutus_v3: None,
+        };
+        let cbor = cm.to_cbor().expect("should produce CBOR");
+        // Decode and verify: should be a map with key 0
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 1);
+        assert_eq!(dec.u32().unwrap(), 0); // key for v1
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 3);
+        assert_eq!(dec.i64().unwrap(), 1);
+        assert_eq!(dec.i64().unwrap(), 2);
+        assert_eq!(dec.i64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_cost_models_to_cbor_all_versions() {
+        let cm = CostModels {
+            plutus_v1: Some(vec![10]),
+            plutus_v2: Some(vec![20]),
+            plutus_v3: Some(vec![30]),
+        };
+        let cbor = cm.to_cbor().expect("should produce CBOR");
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 3);
+    }
+
+    #[test]
+    fn test_cost_models_to_cbor_v3_only() {
+        let cm = CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: Some(vec![-1, 0, 100]),
+        };
+        let cbor = cm.to_cbor().expect("should produce CBOR");
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 1);
+        assert_eq!(dec.u32().unwrap(), 2); // key for v3
+    }
+
+    // ========== Transaction::empty_with_hash ==========
+
+    #[test]
+    fn test_empty_with_hash() {
+        let hash = test_tx_hash();
+        let tx = Transaction::empty_with_hash(hash);
+        assert_eq!(tx.hash, test_tx_hash());
+        assert_eq!(tx.era, Era::Conway);
+        assert!(tx.is_valid);
+        assert_eq!(tx.body.fee, Lovelace(0));
+        assert!(tx.body.inputs.is_empty());
+        assert!(tx.body.outputs.is_empty());
+        assert!(tx.body.certificates.is_empty());
+        assert!(tx.body.withdrawals.is_empty());
+        assert!(tx.body.mint.is_empty());
+        assert!(tx.body.collateral.is_empty());
+        assert!(tx.body.required_signers.is_empty());
+        assert!(tx.body.reference_inputs.is_empty());
+        assert!(tx.body.voting_procedures.is_empty());
+        assert!(tx.body.proposal_procedures.is_empty());
+        assert!(tx.auxiliary_data.is_none());
+        assert!(tx.raw_cbor.is_none());
+        assert!(tx.raw_body_cbor.is_none());
+        assert!(tx.raw_witness_cbor.is_none());
+        assert!(tx.witness_set.vkey_witnesses.is_empty());
+        assert!(tx.witness_set.redeemers.is_empty());
+    }
+}
