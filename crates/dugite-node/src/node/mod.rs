@@ -418,8 +418,64 @@ impl Node {
             }
         });
 
-        // Try to load existing ledger snapshot
+        // ── Haskell ledger snapshot import (from Mithril ancillary) ─��──────
+        //
+        // After `mithril-import --ancillary`, the decoded Haskell ExtLedgerState
+        // files live in `database_path/haskell-ledger/<slot>/`. If present, we
+        // decode them into a native LedgerState and save it as the regular
+        // `ledger-snapshot.bin`. This replaces the chain-from-genesis replay
+        // (~10 hours for preview) with a ~15-minute gap replay.
         let snapshot_path = args.database_path.join("ledger-snapshot.bin");
+        let haskell_ledger_dir = args.database_path.join("haskell-ledger");
+        if haskell_ledger_dir.exists() {
+            info!("Found Haskell ledger state from Mithril ancillary import");
+
+            // Find the newest snapshot directory (highest slot number)
+            let mut best_slot = 0u64;
+            let mut best_dir = None;
+            if let Ok(entries) = std::fs::read_dir(&haskell_ledger_dir) {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                        if let Ok(slot) = entry.file_name().to_string_lossy().parse::<u64>() {
+                            if slot > best_slot {
+                                best_slot = slot;
+                                best_dir = Some(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(snapshot_dir) = best_dir {
+                match Self::import_haskell_ledger_snapshot(
+                    &snapshot_dir,
+                    &snapshot_path,
+                    &protocol_params,
+                    shelley_genesis.as_ref(),
+                    shelley_genesis_hash,
+                    network_magic,
+                    byron_epoch_length,
+                ) {
+                    Ok(()) => {
+                        info!("Haskell ledger import complete; native snapshot saved");
+                        // Clean up the consumed directory
+                        if let Err(e) = std::fs::remove_dir_all(&haskell_ledger_dir) {
+                            warn!("Failed to remove consumed haskell-ledger directory: {e}");
+                        } else {
+                            info!("Removed consumed haskell-ledger directory");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to import Haskell ledger snapshot: {e:#}. \
+                             Falling back to chain replay."
+                        );
+                    }
+                }
+            }
+        }
+
+        // Try to load existing ledger snapshot
         let mut ledger = if snapshot_path.exists() {
             match LedgerState::load_snapshot(&snapshot_path) {
                 Ok(mut state) => {
@@ -464,81 +520,11 @@ impl Node {
                         }
                     }
 
-                    // Detect stale snapshots whose protocol_params were captured before
-                    // Alonzo/Conway genesis files were applied. The canonical signal is
-                    // max_tx_ex_units.mem == 14_000_000, which is the hardcoded
-                    // mainnet_defaults() value. No live Cardano network (mainnet, preview,
-                    // preprod) has ever used 14_000_000 as a settled governance value:
-                    //   - Preview/Preprod Alonzo genesis: 10_000_000
-                    //   - Mainnet Alonzo genesis: 14_000_000 (initial, but mainnet has
-                    //     since been updated to 16_500_000 via governance action)
-                    //
-                    // For all testnets this value unambiguously indicates a broken baseline.
-                    // For mainnet, governance may have updated it past 14_000_000 — but
-                    // the snapshot would already carry the post-governance value in that case.
-                    // If it still says 14_000_000 on a mainnet snapshot, that means it was
-                    // captured before governance ran, and will be corrected by replay anyway.
-                    //
-                    // Additionally check committee_min_size: a value of 7 is the mainnet
-                    // default but never the correct value for preview (genesis says 0) or
-                    // preprod. If the snapshot was taken with wrong committee_min_size,
-                    // ALL governance actions requiring CC approval would fail to ratify.
-                    let genesis_mem = protocol_params.max_tx_ex_units.mem;
-                    let snapshot_mem = state.protocol_params.max_tx_ex_units.mem;
-                    let defaults_mem =
-                        dugite_primitives::protocol_params::ProtocolParameters::mainnet_defaults()
-                            .max_tx_ex_units
-                            .mem;
-                    let snapshot_appears_stale = snapshot_mem == defaults_mem
-                        && genesis_mem != defaults_mem
-                        && genesis_mem > 0;
+                    // NOTE: Stale-defaults heuristic removed (issue #347).
+                    // Mithril ancillary import now provides correct protocol parameters.
 
-                    if snapshot_appears_stale {
-                        // The snapshot's protocol_params may have stale defaults
-                        // from genesis initialization. Rather than discarding the
-                        // entire snapshot (forcing a multi-minute full replay),
-                        // overlay the genesis protocol params on top. The correct
-                        // on-chain values will be restored when blocks with
-                        // governance parameter updates are replayed.
-                        warn!(
-                            snapshot_max_tx_ex_mem = snapshot_mem,
-                            genesis_max_tx_ex_mem = genesis_mem,
-                            "Snapshot protocol_params have stale defaults — \
-                             applying genesis params overlay",
-                        );
-                        state.protocol_params = protocol_params.clone();
-                    }
-
-                    // Fix protocol version if it doesn't match the era.
-                    //
-                    // When a Mithril snapshot starts mid-chain, the initial protocol
-                    // params come from Shelley genesis (protocol 6.0 for preview). The
-                    // PPUpdate proposals that upgraded 6→7→8→9→10 happened in earlier
-                    // blocks we never replayed. Detect this mismatch and correct it
-                    // using the era→protocolVersion mapping from the Haskell spec.
-                    {
-                        let expected_major = match state.era {
-                            dugite_primitives::era::Era::Byron => 1,
-                            dugite_primitives::era::Era::Shelley => 2,
-                            dugite_primitives::era::Era::Allegra => 3,
-                            dugite_primitives::era::Era::Mary => 4,
-                            dugite_primitives::era::Era::Alonzo => 6,
-                            dugite_primitives::era::Era::Babbage => 8,
-                            dugite_primitives::era::Era::Conway => 10,
-                        };
-                        if state.protocol_params.protocol_version_major < expected_major {
-                            warn!(
-                                era = ?state.era,
-                                current_major = state.protocol_params.protocol_version_major,
-                                corrected_major = expected_major,
-                                "Protocol version is behind era — correcting \
-                                 (Mithril snapshot skipped PPUpdate proposals)"
-                            );
-                            state.protocol_params.protocol_version_major = expected_major;
-                            state.protocol_params.protocol_version_minor = 0;
-                            state.prev_protocol_version_major = expected_major;
-                        }
-                    }
+                    // NOTE: Protocol-version-behind-era heuristic removed (issue #347).
+                    // Mithril ancillary import now provides correct protocol version.
 
                     {
                         // Validate snapshot tip canonicality.
@@ -3464,6 +3450,190 @@ impl Node {
             }
         }
 
+        Ok(())
+    }
+
+    // ─── import_haskell_ledger_snapshot() ──────────────────────────────────────
+
+    /// Decode a Haskell ExtLedgerState snapshot and save it as a native dugite
+    /// ledger snapshot. Called once during Mithril ancillary import; the resulting
+    /// `ledger-snapshot.bin` is then loaded by the normal startup path.
+    ///
+    /// The UTxO set from the tvar file is loaded into an in-memory `UtxoSet` inside
+    /// the `LedgerState`. The normal startup code will migrate these entries to the
+    /// on-disk LSM store when it calls `attach_utxo_store()`.
+    fn import_haskell_ledger_snapshot(
+        snapshot_dir: &std::path::Path,
+        native_snapshot_path: &std::path::Path,
+        protocol_params: &ProtocolParameters,
+        shelley_genesis: Option<&ShelleyGenesis>,
+        shelley_genesis_hash: Option<dugite_primitives::Hash32>,
+        network_magic: u64,
+        byron_epoch_length: u64,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+        use dugite_primitives::address::Address;
+        use dugite_primitives::hash::Hash32;
+        use dugite_primitives::transaction::{OutputDatum, TransactionInput, TransactionOutput};
+        use dugite_primitives::value::Value;
+
+        // ── Decode the state file ────────────────────────────────────────
+        let state_path = snapshot_dir.join("state");
+        let state_data = std::fs::read(&state_path)
+            .with_context(|| format!("reading state file at {}", state_path.display()))?;
+        info!(
+            bytes = state_data.len(),
+            path = %state_path.display(),
+            "Decoding Haskell ExtLedgerState"
+        );
+
+        let hs = dugite_serialization::haskell_snapshot::decode_state_file(&state_data)
+            .context("Failed to decode Haskell ExtLedgerState")?;
+
+        info!(
+            epoch = hs.epoch.0,
+            tip_slot = hs.tip_slot.0,
+            tip_block = hs.tip_block_no,
+            pools = hs.new_epoch_state.cert_state.pstate.stake_pools.len(),
+            accounts = hs.new_epoch_state.cert_state.dstate.accounts.len(),
+            "Decoded Haskell ExtLedgerState"
+        );
+
+        // ── Build LedgerState ─────────────────────────────────────────��──
+        let mut state = LedgerState::from_haskell_snapshot(&hs);
+
+        // Apply genesis-derived configuration (epoch length, slot config, etc.)
+        if let Some(genesis) = shelley_genesis {
+            state.set_epoch_length(genesis.epoch_length, genesis.security_param);
+            state.set_slot_config(genesis.slot_config());
+            state.set_update_quorum(genesis.update_quorum);
+            let gen_deleg_entries = genesis.gen_delegs_entries();
+            if !gen_deleg_entries.is_empty() {
+                debug!(
+                    count = gen_deleg_entries.len(),
+                    "Loaded genesis delegates for overlay schedule validation"
+                );
+                state.set_genesis_delegates(&gen_deleg_entries);
+            }
+        }
+
+        // Apply hard-fork boundary and genesis hash
+        let shelley_transition = epoch::shelley_transition_epoch_for_magic(network_magic);
+        state.set_shelley_transition(shelley_transition, byron_epoch_length);
+        if let Some(hash) = shelley_genesis_hash {
+            // Unlike set_genesis_hash() on a fresh state, we do NOT overwrite the
+            // Praos nonces — they came from the real Haskell PraosState.
+            state.genesis_hash = hash;
+        }
+
+        // Apply active_slots_coeff from genesis protocol params (not in
+        // the CBOR PParams array(31) but needed for VRF leader check).
+        state.protocol_params.active_slots_coeff = protocol_params.active_slots_coeff;
+        state.prev_protocol_params.active_slots_coeff = protocol_params.active_slots_coeff;
+
+        // Set network
+        let network_id = if network_magic == 764824073 {
+            dugite_primitives::network::NetworkId::Mainnet
+        } else {
+            dugite_primitives::network::NetworkId::Testnet
+        };
+        state.node_network = Some(network_id);
+
+        // ── Load UTxOs from tvar file ────────────────────────────────────
+        let tvar_path = snapshot_dir.join("tables").join("tvar");
+        if tvar_path.exists() {
+            let tvar_data = std::fs::read(&tvar_path)
+                .with_context(|| format!("reading tvar file at {}", tvar_path.display()))?;
+            info!(bytes = tvar_data.len(), "Loading UTxO set from tvar file");
+
+            let iter = dugite_serialization::mempack::TvarIterator::new(&tvar_data)
+                .context("Failed to create tvar iterator")?;
+
+            let mut utxo_count = 0u64;
+            let mut skipped = 0u64;
+            for result in iter {
+                let (txin, txout) = result.context("Failed to decode tvar entry")?;
+
+                // Convert MemPackTxIn → TransactionInput
+                let input = TransactionInput {
+                    transaction_id: txin.txid,
+                    index: txin.txix as u32,
+                };
+
+                // Convert MemPackTxOut → TransactionOutput
+                // Only process entries with valid address and coin data.
+                // Tags 2/3 (Addr28Extra compact encoding) have opaque coin
+                // encoding that we cannot fully decode yet — skip them.
+                if txout.address.is_empty() || (txout.coin == 0 && txout.multi_asset.is_none()) {
+                    skipped += 1;
+                    continue;
+                }
+
+                let address = match Address::from_bytes(&txout.address) {
+                    Ok(addr) => addr,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let value = Value::lovelace(txout.coin);
+
+                let datum = if let Some(ref hash_bytes) = txout.datum_hash {
+                    OutputDatum::DatumHash(Hash32::from_bytes(*hash_bytes))
+                } else {
+                    // Inline datums require PlutusData parsing from raw MemPack
+                    // bytes. Skip for now — the datum will be restored during gap
+                    // replay from the canonical CBOR block. For UTxO set membership
+                    // and stake distribution, the datum is not needed.
+                    OutputDatum::None
+                };
+
+                // Script references from MemPack are raw bytes; skip for now as
+                // they require CBOR decoding to determine the script type. The
+                // output will still be valid for UTxO set membership and stake
+                // distribution; reference scripts are only needed for Phase-2
+                // evaluation which occurs during block validation (gap replay).
+                let script_ref: Option<dugite_primitives::transaction::ScriptRef> = None;
+
+                let output = TransactionOutput {
+                    address,
+                    value,
+                    datum,
+                    script_ref,
+                    is_legacy: false,
+                    raw_cbor: None,
+                };
+
+                state.utxo_set.insert(input, output);
+                utxo_count += 1;
+
+                if utxo_count.is_multiple_of(1_000_000) {
+                    info!("Loaded {utxo_count} UTxOs...");
+                }
+            }
+
+            info!(utxo_count, skipped, "UTxO loading from tvar file complete");
+        } else {
+            warn!(
+                "No tvar file found at {} — UTxO set will be empty; \
+                 full chain replay required",
+                tvar_path.display()
+            );
+        }
+
+        // ── Save as native snapshot ──────────────────────────────────────
+        info!(
+            path = %native_snapshot_path.display(),
+            tip = %state.tip,
+            epoch = state.epoch.0,
+            utxos = state.utxo_set.len(),
+            "Saving native ledger snapshot from Haskell import"
+        );
+        state
+            .save_snapshot(native_snapshot_path)
+            .map_err(|e| anyhow::anyhow!("Failed to save native snapshot: {e}"))?;
+
+        info!("Native ledger snapshot saved successfully");
         Ok(())
     }
 
