@@ -1,6 +1,8 @@
 use super::cbor_utils::*;
+use super::certstate::decode_certstate;
 use super::pparams::decode_pparams;
 use super::praos::decode_praos_state;
+use super::snapshots::decode_snapshots;
 use dugite_primitives::hash::Hash32;
 use dugite_primitives::time::SlotNo;
 
@@ -228,10 +230,7 @@ fn test_skip_map() {
 #[test]
 fn test_skip_tagged_value() {
     // tag(30) array(2) [1, 2]  = rational 1/2
-    assert_eq!(
-        skip_cbor_value(&[0xd8, 0x1e, 0x82, 0x01, 0x02]).unwrap(),
-        5
-    );
+    assert_eq!(skip_cbor_value(&[0xd8, 0x1e, 0x82, 0x01, 0x02]).unwrap(), 5);
 }
 
 // ── decode_null ───────────────────────────────────────────────────────────────
@@ -371,9 +370,18 @@ fn test_decode_pparams_preview_epoch_1259() {
     assert_eq!(pp.ada_per_utxo_byte.0, 4310, "adaPerUTxOByte");
 
     // ── cost models present ──────────────────────────────────────────────────
-    assert!(pp.cost_models.plutus_v1.is_some(), "PlutusV1 cost model missing");
-    assert!(pp.cost_models.plutus_v2.is_some(), "PlutusV2 cost model missing");
-    assert!(pp.cost_models.plutus_v3.is_some(), "PlutusV3 cost model missing");
+    assert!(
+        pp.cost_models.plutus_v1.is_some(),
+        "PlutusV1 cost model missing"
+    );
+    assert!(
+        pp.cost_models.plutus_v2.is_some(),
+        "PlutusV2 cost model missing"
+    );
+    assert!(
+        pp.cost_models.plutus_v3.is_some(),
+        "PlutusV3 cost model missing"
+    );
     // Spot-check entry counts (matches cardano-node 10.x Conway cost models)
     assert_eq!(
         pp.cost_models.plutus_v1.as_ref().unwrap().len(),
@@ -395,23 +403,28 @@ fn test_decode_pparams_preview_epoch_1259() {
     // mem_price = 577/10000, step_price = 721/10000000
     assert_eq!(pp.execution_costs.mem_price.numerator, 577, "mem_price.num");
     assert_eq!(
-        pp.execution_costs.mem_price.denominator, 10000, "mem_price.den"
+        pp.execution_costs.mem_price.denominator, 10000,
+        "mem_price.den"
     );
     assert_eq!(
-        pp.execution_costs.step_price.numerator, 721, "step_price.num"
+        pp.execution_costs.step_price.numerator, 721,
+        "step_price.num"
     );
     assert_eq!(
-        pp.execution_costs.step_price.denominator, 10_000_000, "step_price.den"
+        pp.execution_costs.step_price.denominator, 10_000_000,
+        "step_price.den"
     );
 
     // ── execution unit limits ────────────────────────────────────────────────
     assert_eq!(pp.max_tx_ex_units.mem, 16_500_000, "maxTxExUnits.mem");
     assert_eq!(
-        pp.max_tx_ex_units.steps, 10_000_000_000, "maxTxExUnits.steps"
+        pp.max_tx_ex_units.steps, 10_000_000_000,
+        "maxTxExUnits.steps"
     );
     assert_eq!(pp.max_block_ex_units.mem, 72_000_000, "maxBlockExUnits.mem");
     assert_eq!(
-        pp.max_block_ex_units.steps, 20_000_000_000, "maxBlockExUnits.steps"
+        pp.max_block_ex_units.steps, 20_000_000_000,
+        "maxBlockExUnits.steps"
     );
 
     // ── collateral ───────────────────────────────────────────────────────────
@@ -443,9 +456,13 @@ fn test_decode_pparams_preview_epoch_1259() {
         pp.pvt_motion_no_confidence.denominator, 100,
         "pvtMotionNoConfidence.den"
     );
-    assert_eq!(pp.pvt_committee_normal.numerator, 51, "pvtCommitteeNormal.num");
     assert_eq!(
-        pp.pvt_committee_normal.denominator, 100, "pvtCommitteeNormal.den"
+        pp.pvt_committee_normal.numerator, 51,
+        "pvtCommitteeNormal.num"
+    );
+    assert_eq!(
+        pp.pvt_committee_normal.denominator, 100,
+        "pvtCommitteeNormal.den"
     );
     assert_eq!(
         pp.pvt_committee_no_confidence.numerator, 51,
@@ -458,23 +475,22 @@ fn test_decode_pparams_preview_epoch_1259() {
     assert_eq!(pp.pvt_hard_fork.numerator, 51, "pvtHardFork.num");
     assert_eq!(pp.pvt_hard_fork.denominator, 100, "pvtHardFork.den");
     assert_eq!(
-        pp.pvt_pp_security_group.numerator, 51, "pvtPPSecurityGroup.num"
+        pp.pvt_pp_security_group.numerator, 51,
+        "pvtPPSecurityGroup.num"
     );
     assert_eq!(
-        pp.pvt_pp_security_group.denominator, 100, "pvtPPSecurityGroup.den"
+        pp.pvt_pp_security_group.denominator, 100,
+        "pvtPPSecurityGroup.den"
     );
 
     // ── DRep voting thresholds ────────────────────────────────────────────────
     // dvtMotionNoConfidence = 67/100
-    assert_eq!(
-        pp.dvt_no_confidence.numerator, 67, "dvtNoConfidence.num"
-    );
-    assert_eq!(
-        pp.dvt_no_confidence.denominator, 100, "dvtNoConfidence.den"
-    );
+    assert_eq!(pp.dvt_no_confidence.numerator, 67, "dvtNoConfidence.num");
+    assert_eq!(pp.dvt_no_confidence.denominator, 100, "dvtNoConfidence.den");
     // dvtCommitteeNormal = 67/100
     assert_eq!(
-        pp.dvt_committee_normal.numerator, 67, "dvtCommitteeNormal.num"
+        pp.dvt_committee_normal.numerator, 67,
+        "dvtCommitteeNormal.num"
     );
     // dvtCommitteeNoConfidence = 3/5
     assert_eq!(
@@ -486,31 +502,31 @@ fn test_decode_pparams_preview_epoch_1259() {
         "dvtCommitteeNoConfidence.den"
     );
     // dvtUpdateToConstitution (→ dvt_constitution) = 3/4
-    assert_eq!(
-        pp.dvt_constitution.numerator, 3, "dvtConstitution.num"
-    );
-    assert_eq!(
-        pp.dvt_constitution.denominator, 4, "dvtConstitution.den"
-    );
+    assert_eq!(pp.dvt_constitution.numerator, 3, "dvtConstitution.num");
+    assert_eq!(pp.dvt_constitution.denominator, 4, "dvtConstitution.den");
     // dvtHardForkInitiation = 3/5
     assert_eq!(pp.dvt_hard_fork.numerator, 3, "dvtHardFork.num");
     assert_eq!(pp.dvt_hard_fork.denominator, 5, "dvtHardFork.den");
     // dvtPPNetworkGroup = 67/100
     assert_eq!(
-        pp.dvt_pp_network_group.numerator, 67, "dvtPPNetworkGroup.num"
+        pp.dvt_pp_network_group.numerator, 67,
+        "dvtPPNetworkGroup.num"
     );
     assert_eq!(
-        pp.dvt_pp_network_group.denominator, 100, "dvtPPNetworkGroup.den"
+        pp.dvt_pp_network_group.denominator, 100,
+        "dvtPPNetworkGroup.den"
     );
     // dvtPPGovGroup = 3/4
     assert_eq!(pp.dvt_pp_gov_group.numerator, 3, "dvtPPGovGroup.num");
     assert_eq!(pp.dvt_pp_gov_group.denominator, 4, "dvtPPGovGroup.den");
     // dvtTreasuryWithdrawal = 67/100
     assert_eq!(
-        pp.dvt_treasury_withdrawal.numerator, 67, "dvtTreasuryWithdrawal.num"
+        pp.dvt_treasury_withdrawal.numerator, 67,
+        "dvtTreasuryWithdrawal.num"
     );
     assert_eq!(
-        pp.dvt_treasury_withdrawal.denominator, 100, "dvtTreasuryWithdrawal.den"
+        pp.dvt_treasury_withdrawal.denominator, 100,
+        "dvtTreasuryWithdrawal.den"
     );
 }
 
@@ -532,7 +548,11 @@ fn test_decode_praos_state() {
     assert_eq!(praos.last_slot, Some(SlotNo(108_794_365)), "lastSlot");
 
     // The preview testnet has ~456 registered pools at epoch 1259.
-    assert_eq!(praos.opcert_counters.len(), 456, "oCertCounters entry count");
+    assert_eq!(
+        praos.opcert_counters.len(),
+        456,
+        "oCertCounters entry count"
+    );
 
     // All nonces must be non-zero: the entire point of this decoder is to fix
     // the bug where nonces were being silently zeroed out.
@@ -546,11 +566,7 @@ fn test_decode_praos_state() {
         Hash32::ZERO,
         "epochNonce must not be zero"
     );
-    assert_ne!(
-        praos.lab_nonce,
-        Hash32::ZERO,
-        "labNonce must not be zero"
-    );
+    assert_ne!(praos.lab_nonce, Hash32::ZERO, "labNonce must not be zero");
     assert_ne!(
         praos.last_epoch_block_nonce,
         Hash32::ZERO,
@@ -563,5 +579,169 @@ fn test_decode_praos_state() {
         hex::encode(praos.epoch_nonce.as_bytes()),
         "f778d4bbcfb2ff332d5eadc6726a8fe9148669832d50d995605ffa3870aa7b29",
         "epochNonce hex"
+    );
+}
+
+// ── decode_certstate ──────────────────────────────────────────────────────────
+
+/// Round-trip test against the real preview testnet CertState captured at
+/// epoch 1259.  Verifies VState (DReps, committee), PState (pools), and
+/// DState (accounts, genesis delegates) against known on-chain data.
+#[test]
+fn test_decode_certstate() {
+    let data = include_bytes!("../../test_fixtures/preview_certstate_e1259.cbor");
+    let (cert, consumed) = decode_certstate(data).unwrap();
+    assert_eq!(consumed, data.len(), "not all bytes consumed");
+
+    // ── VState ──────────────────────────────────────────────────────────────
+    assert!(
+        cert.vstate.dreps.len() > 8000,
+        "expected >8000 DReps, got {}",
+        cert.vstate.dreps.len()
+    );
+    assert_eq!(
+        cert.vstate.committee_state.len(),
+        8,
+        "committee members count"
+    );
+    assert_eq!(cert.vstate.dormant_epochs, 0, "dormantEpochs");
+
+    // ── PState ──────────────────────────────────────────────────────────────
+    assert!(
+        cert.pstate.stake_pools.len() > 600,
+        "expected >600 pools, got {}",
+        cert.pstate.stake_pools.len()
+    );
+
+    // Verify SAND pool (our test pool) exists with known parameters.
+    let sand_pool_id = dugite_primitives::hash::Hash28::from_hex(
+        "6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856",
+    )
+    .unwrap();
+    let sand = cert
+        .pstate
+        .stake_pools
+        .get(&sand_pool_id)
+        .expect("SAND pool not found in PState");
+    assert_eq!(sand.pledge, 1_000_000_000, "SAND pledge (1000 ADA)");
+    assert_eq!(sand.cost, 170_000_000, "SAND cost (170 ADA)");
+    assert_eq!(sand.deposit, 500_000_000, "SAND deposit (500 ADA)");
+
+    // ── DState ──────────────────────────────────────────────────────────────
+    assert!(
+        cert.dstate.accounts.len() > 30000,
+        "expected >30000 accounts, got {}",
+        cert.dstate.accounts.len()
+    );
+    assert_eq!(
+        cert.dstate.genesis_delegates.len(),
+        7,
+        "genesis delegates count"
+    );
+}
+
+// ── decode_snapshots ──────────────────────────────────────────────────────────
+
+/// Round-trip test against the real preview testnet SnapShots captured at
+/// epoch 1259.  The fixture is in old format (array(3) per snapshot).
+///
+/// Expected sizes are cross-checked against Koios on-chain data for the
+/// preview testnet at epoch 1259:
+/// - ~9626 stakers in the mark snapshot
+/// - ~10247 delegations in the mark snapshot
+/// - ~664 pools in the mark snapshot
+#[test]
+fn test_decode_snapshots() {
+    let data = include_bytes!("../../test_fixtures/preview_snapshots_e1259.cbor");
+    let (snaps, consumed) = decode_snapshots(data).unwrap();
+
+    // Every byte in the fixture must be consumed — the file contains exactly
+    // one SnapShots value.
+    assert_eq!(consumed, data.len(), "not all bytes consumed");
+
+    // ── mark snapshot ────────────────────────────────────────────────────────
+    // The mark snapshot is taken at the start of the epoch and has the most
+    // recent stake picture; it is used to elect slot leaders.
+    assert!(
+        snaps.mark.stake.len() > 9000,
+        "mark stake too small: {} entries",
+        snaps.mark.stake.len()
+    );
+    assert!(
+        snaps.mark.delegations.len() > 10000,
+        "mark delegations too small: {} entries",
+        snaps.mark.delegations.len()
+    );
+    assert!(
+        snaps.mark.pool_params.len() > 600,
+        "mark pool_params too small: {} entries",
+        snaps.mark.pool_params.len()
+    );
+
+    // ── set snapshot ─────────────────────────────────────────────────────────
+    // The set snapshot is taken one epoch earlier than mark and is used to
+    // compute rewards for the current epoch.
+    assert!(
+        snaps.set.stake.len() > 9000,
+        "set stake too small: {} entries",
+        snaps.set.stake.len()
+    );
+    assert!(
+        snaps.set.delegations.len() > 10000,
+        "set delegations too small: {} entries",
+        snaps.set.delegations.len()
+    );
+    assert!(
+        snaps.set.pool_params.len() > 600,
+        "set pool_params too small: {} entries",
+        snaps.set.pool_params.len()
+    );
+
+    // ── go snapshot ──────────────────────────────────────────────────────────
+    // The go snapshot is two epochs earlier and is the one actually used to
+    // distribute rewards (mark/set/go shift each epoch boundary).
+    assert!(
+        snaps.go.stake.len() > 9000,
+        "go stake too small: {} entries",
+        snaps.go.stake.len()
+    );
+    assert!(
+        snaps.go.delegations.len() > 10000,
+        "go delegations too small: {} entries",
+        snaps.go.delegations.len()
+    );
+    assert!(
+        snaps.go.pool_params.len() > 600,
+        "go pool_params too small: {} entries",
+        snaps.go.pool_params.len()
+    );
+
+    // ── fee ──────────────────────────────────────────────────────────────────
+    // The accumulated fee pot must be non-zero on a live testnet.
+    assert!(
+        snaps.fee > 0,
+        "fee must be non-zero; got {}",
+        snaps.fee
+    );
+
+    // ── spot-check SAND pool in mark snapshot ─────────────────────────────────
+    // Verify that the SAND pool (our test pool) appears in the mark snapshot
+    // with the expected pledge and cost from epoch 1259.
+    let sand_pool_id = dugite_primitives::hash::Hash28::from_hex(
+        "6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856",
+    )
+    .unwrap();
+    let sand = snaps
+        .mark
+        .pool_params
+        .get(&sand_pool_id)
+        .expect("SAND pool not found in mark snapshot pool_params");
+    assert_eq!(sand.pledge, 1_000_000_000, "SAND pledge (1000 ADA)");
+    assert_eq!(sand.cost, 170_000_000, "SAND cost (170 ADA)");
+    // VRF hash must be 32 bytes (not 28) — guard against wrong field offset.
+    assert_eq!(
+        sand.vrf_hash.as_bytes().len(),
+        32,
+        "SAND vrf_hash must be 32 bytes"
     );
 }
