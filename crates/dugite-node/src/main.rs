@@ -1,7 +1,7 @@
-mod config;
-mod disk_monitor;
-// forge is declared in lib.rs and re-used here via the crate root
+// config and forge are declared in lib.rs and re-used here via the crate root
+use dugite_node::config;
 use dugite_node::forge;
+mod disk_monitor;
 mod genesis;
 mod gsm;
 mod logging;

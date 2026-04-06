@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use dugite_primitives::block::ProtocolVersion;
 use dugite_primitives::network::NetworkId;
 use dugite_storage::StorageConfigJson;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -188,6 +189,18 @@ pub struct NodeConfig {
     /// governor.  Default: 5 failures.
     #[serde(default = "default_error_demotion_threshold")]
     pub error_demotion_threshold: u32,
+
+    /// Enable experimental hard fork transitions (default: false).
+    ///
+    /// When true, the node signals `ProtVer 11 0` in forged block headers,
+    /// advertising readiness for the next major protocol version (Dijkstra era).
+    /// When false (default), the node signals `ProtVer 10 8` — the maximum
+    /// Conway-era protocol version supported by this software release.
+    ///
+    /// Matches cardano-node's `ExperimentalHardForksEnabled` config field.
+    /// Must remain false on mainnet unless instructed otherwise.
+    #[serde(default)]
+    pub experimental_hard_forks_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -305,6 +318,38 @@ where
 }
 
 impl NodeConfig {
+    /// Returns the protocol version this node should stamp on forged block headers.
+    ///
+    /// This is a **software capability signal**, not the on-chain protocol version.
+    /// It tells the network the maximum protocol version this node supports.
+    ///
+    /// Matches cardano-node's `cardanoProtocolVersion` in `Cardano.Node.Protocol.Cardano.hs`:
+    /// - `ExperimentalHardForksEnabled = false` → `ProtVer 10 8`
+    /// - `ExperimentalHardForksEnabled = true`  → `ProtVer 11 0`
+    pub fn node_protocol_version(&self) -> ProtocolVersion {
+        if self.experimental_hard_forks_enabled {
+            ProtocolVersion {
+                major: 11,
+                minor: 0,
+            }
+        } else {
+            ProtocolVersion {
+                major: 10,
+                minor: 8,
+            }
+        }
+    }
+
+    /// Returns the maximum major protocol version this node can validate.
+    ///
+    /// Derived from the node protocol version's major component.
+    /// Used by the Praos consensus layer for the obsolete-node envelope check:
+    /// if the on-chain ledger protocol version exceeds this, the node rejects
+    /// all block headers (forcing an upgrade).
+    pub fn max_major_protocol_version(&self) -> u64 {
+        self.node_protocol_version().major
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         if path.exists() {
             let content = std::fs::read_to_string(path)
@@ -419,6 +464,7 @@ impl Default for NodeConfig {
             churn_interval_sync_secs: default_churn_interval_sync_secs(),
             stall_demotion_cycles: default_stall_demotion_cycles(),
             error_demotion_threshold: default_error_demotion_threshold(),
+            experimental_hard_forks_enabled: false,
         }
     }
 }
