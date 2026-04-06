@@ -629,3 +629,566 @@ pub fn compute_transaction_hash(body: &TransactionBody) -> Hash32 {
     let body_cbor = encode_transaction_body(body);
     blake2b_256(&body_cbor)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dugite_primitives::{
+        address::{Address, EnterpriseAddress},
+        credentials::Credential,
+        hash::{Hash28, Hash32},
+        network::NetworkId,
+        time::SlotNo,
+        transaction::{
+            AuxiliaryData, ExUnits, NativeScript, OutputDatum, PlutusData, Redeemer, RedeemerTag,
+            ScriptRef, TransactionBody, TransactionInput, TransactionMetadatum, TransactionOutput,
+            TransactionWitnessSet, VKeyWitness,
+        },
+        value::{Lovelace, Value},
+    };
+    use std::collections::BTreeMap;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    /// A simple enterprise address on Testnet backed by an all-zero key hash.
+    fn test_address() -> Address {
+        Address::Enterprise(EnterpriseAddress {
+            network: NetworkId::Testnet,
+            payment: Credential::VerificationKey(Hash28::ZERO),
+        })
+    }
+
+    /// Build a minimal ADA-only Value.
+    fn ada(lovelace: u64) -> Value {
+        Value {
+            coin: Lovelace(lovelace),
+            multi_asset: BTreeMap::new(),
+        }
+    }
+
+    /// A single dummy TransactionInput used wherever a body needs at least one input.
+    fn dummy_input() -> TransactionInput {
+        TransactionInput {
+            transaction_id: Hash32::ZERO,
+            index: 0,
+        }
+    }
+
+    /// Build the minimal TransactionBody (inputs, outputs, fee).
+    fn minimal_body() -> TransactionBody {
+        TransactionBody {
+            inputs: vec![dummy_input()],
+            outputs: vec![TransactionOutput {
+                address: test_address(),
+                value: ada(1_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            }],
+            fee: Lovelace(170_000),
+            ttl: None,
+            certificates: vec![],
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures: BTreeMap::new(),
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: None,
+        }
+    }
+
+    /// An empty witness set.
+    fn empty_witness_set() -> TransactionWitnessSet {
+        TransactionWitnessSet {
+            vkey_witnesses: vec![],
+            native_scripts: vec![],
+            bootstrap_witnesses: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            plutus_data: vec![],
+            redeemers: vec![],
+            raw_redeemers_cbor: None,
+            raw_plutus_data_cbor: None,
+            pallas_script_data_hash: None,
+        }
+    }
+
+    // ── encode_transaction_output (legacy) ───────────────────────────────────
+
+    /// Legacy ADA-only output: array(2) [address_bytes, coin]
+    #[test]
+    fn test_legacy_output_ada_only() {
+        let output = TransactionOutput {
+            address: test_address(),
+            value: ada(2_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: true,
+            raw_cbor: None,
+        };
+        let encoded = encode_transaction_output(&output);
+        // First byte: array(2) = 0x82
+        assert_eq!(encoded[0], 0x82, "legacy ADA-only must be array(2)");
+        // Total length: 1 (array hdr) + len(addr bytes) + len(value)
+        // address bytes for enterprise testnet + zero key = 29 bytes → encode_bytes starts 0x58, 29
+        assert_eq!(encoded[1], 0x58, "address bytes length-prefix");
+        assert_eq!(encoded[2], 29, "enterprise address is 29 bytes");
+    }
+
+    /// Legacy output with datum hash: array(3) [address, value, datum_hash]
+    #[test]
+    fn test_legacy_output_with_datum_hash() {
+        let h = Hash32::from_bytes([0xab; 32]);
+        let output = TransactionOutput {
+            address: test_address(),
+            value: ada(1_000_000),
+            datum: OutputDatum::DatumHash(h),
+            script_ref: None,
+            is_legacy: true,
+            raw_cbor: None,
+        };
+        let encoded = encode_transaction_output(&output);
+        // First byte: array(3) = 0x83
+        assert_eq!(encoded[0], 0x83, "legacy output with datum hash must be array(3)");
+    }
+
+    // ── encode_transaction_output (post-Alonzo) ──────────────────────────────
+
+    /// Minimal post-Alonzo output: map(2) {0: address, 1: value}
+    #[test]
+    fn test_post_alonzo_output_minimal() {
+        let output = TransactionOutput {
+            address: test_address(),
+            value: ada(1_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        let encoded = encode_transaction_output(&output);
+        // First byte: map(2) = 0xa2
+        assert_eq!(encoded[0], 0xa2, "post-Alonzo minimal output must be map(2)");
+        // Key 0 must immediately follow
+        assert_eq!(encoded[1], 0x00, "first map key must be 0 (address)");
+    }
+
+    /// Post-Alonzo output with datum hash: map(3) with key 2 → [0, hash]
+    #[test]
+    fn test_post_alonzo_output_with_datum_hash() {
+        let h = Hash32::from_bytes([0xcd; 32]);
+        let output = TransactionOutput {
+            address: test_address(),
+            value: ada(500_000),
+            datum: OutputDatum::DatumHash(h),
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        let encoded = encode_transaction_output(&output);
+        // map(3) = 0xa3
+        assert_eq!(encoded[0], 0xa3, "output with datum hash must be map(3)");
+    }
+
+    /// Post-Alonzo output with inline datum: map(3) with key 2 → [1, tag(24)(bytes)]
+    #[test]
+    fn test_post_alonzo_output_with_inline_datum() {
+        let output = TransactionOutput {
+            address: test_address(),
+            value: ada(500_000),
+            datum: OutputDatum::InlineDatum {
+                data: PlutusData::Integer(42),
+                raw_cbor: None,
+            },
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        let encoded = encode_transaction_output(&output);
+        // map(3) = 0xa3
+        assert_eq!(encoded[0], 0xa3, "output with inline datum must be map(3)");
+        // Scan for key 2
+        let key2_pos = encoded.iter().position(|&b| b == 0x02);
+        assert!(key2_pos.is_some(), "map must contain key 2 for datum_option");
+    }
+
+    /// Post-Alonzo output with inline datum uses raw_cbor when provided.
+    #[test]
+    fn test_post_alonzo_output_inline_datum_uses_raw_cbor() {
+        // raw_cbor = CBOR for integer 99 = 0x18 0x63
+        let raw = vec![0x18u8, 0x63u8];
+        let output = TransactionOutput {
+            address: test_address(),
+            value: ada(500_000),
+            datum: OutputDatum::InlineDatum {
+                data: PlutusData::Integer(1), // ignored because raw_cbor is set
+                raw_cbor: Some(raw.clone()),
+            },
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        let encoded = encode_transaction_output(&output);
+        // The raw bytes 0x18 0x63 must appear inside the encoding (inside the tag(24) bstr)
+        let pos = encoded
+            .windows(2)
+            .position(|w| w == [0x18, 0x63])
+            .expect("raw_cbor bytes must appear in encoding");
+        let _ = pos; // just asserting presence
+    }
+
+    /// Post-Alonzo output with script_ref: map(3) with key 3
+    #[test]
+    fn test_post_alonzo_output_with_script_ref() {
+        let output = TransactionOutput {
+            address: test_address(),
+            value: ada(1_000_000),
+            datum: OutputDatum::None,
+            script_ref: Some(ScriptRef::PlutusV2(vec![0xde, 0xad])),
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        let encoded = encode_transaction_output(&output);
+        // map(3) = 0xa3
+        assert_eq!(encoded[0], 0xa3, "output with script_ref must be map(3)");
+        // key 3 must appear
+        assert!(
+            encoded.contains(&0x03),
+            "map must contain key 3 for script_ref"
+        );
+    }
+
+    /// Post-Alonzo output with datum hash AND script_ref: map(4)
+    #[test]
+    fn test_post_alonzo_output_with_all_optional_fields() {
+        let h = Hash32::from_bytes([0x01; 32]);
+        let output = TransactionOutput {
+            address: test_address(),
+            value: ada(1_000_000),
+            datum: OutputDatum::DatumHash(h),
+            script_ref: Some(ScriptRef::PlutusV2(vec![0x01, 0x02])),
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        let encoded = encode_transaction_output(&output);
+        // map(4) = 0xa4
+        assert_eq!(encoded[0], 0xa4, "output with datum + script_ref must be map(4)");
+    }
+
+    // ── era-specific set encoding ────────────────────────────────────────────
+
+    /// Conway body: inputs encoded with tag(258) prefix bytes 0xd9 0x01 0x02
+    #[test]
+    fn test_conway_inputs_use_tag_258() {
+        let body = minimal_body();
+        let encoded = encode_transaction_body_for_era(&body, Era::Conway);
+
+        // After map header (0xa3) and key 0 (0x00), we should see tag(258) = 0xd9 0x01 0x02
+        // Map header: 0xa3; key 0: 0x00 → positions 0, 1
+        // Then immediately: 0xd9, 0x01, 0x02
+        assert_eq!(encoded[0], 0xa3, "minimal body map(3)");
+        assert_eq!(encoded[1], 0x00, "key 0 = inputs");
+        assert_eq!(encoded[2], 0xd9, "tag prefix byte 1");
+        assert_eq!(encoded[3], 0x01, "tag prefix byte 2");
+        assert_eq!(encoded[4], 0x02, "tag prefix byte 3 — completes tag(258)");
+    }
+
+    /// Babbage body: inputs encoded as plain array (no tag 258)
+    #[test]
+    fn test_babbage_inputs_use_plain_array() {
+        let body = minimal_body();
+        let encoded = encode_transaction_body_for_era(&body, Era::Babbage);
+
+        // After map(3) = 0xa3 and key 0 = 0x00, the array header for 1 input = 0x81
+        assert_eq!(encoded[0], 0xa3, "minimal body map(3)");
+        assert_eq!(encoded[1], 0x00, "key 0 = inputs");
+        // No tag: next byte is array(1) = 0x81
+        assert_eq!(encoded[2], 0x81, "plain array(1) for Babbage inputs");
+    }
+
+    // ── witness set redeemer format ──────────────────────────────────────────
+
+    /// Conway witness set: redeemer at key 5 encoded as map (0xa1 for single redeemer)
+    #[test]
+    fn test_conway_witness_redeemers_map_format() {
+        let mut ws = empty_witness_set();
+        ws.redeemers.push(Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(1),
+            ex_units: ExUnits {
+                mem: 1000,
+                steps: 2000,
+            },
+        });
+        let encoded = encode_witness_set_for_era(&ws, Era::Conway);
+        // map(1) = 0xa1
+        assert_eq!(encoded[0], 0xa1, "witness set with redeemers only: map(1)");
+        // key 5 = 0x05
+        assert_eq!(encoded[1], 0x05, "redeemer key must be 5");
+        // Conway map: map(1) = 0xa1 for one redeemer
+        assert_eq!(encoded[2], 0xa1, "Conway redeemers encoded as map(1)");
+    }
+
+    /// Babbage witness set: redeemer at key 5 encoded as array (0x81 for single redeemer)
+    #[test]
+    fn test_babbage_witness_redeemers_array_format() {
+        let mut ws = empty_witness_set();
+        ws.redeemers.push(Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(1),
+            ex_units: ExUnits {
+                mem: 1000,
+                steps: 2000,
+            },
+        });
+        let encoded = encode_witness_set_for_era(&ws, Era::Babbage);
+        // map(1) = 0xa1
+        assert_eq!(encoded[0], 0xa1, "witness set with redeemers only: map(1)");
+        assert_eq!(encoded[1], 0x05, "redeemer key must be 5");
+        // Babbage array: array(1) = 0x81 for one redeemer
+        assert_eq!(encoded[2], 0x81, "Babbage redeemers encoded as array(1)");
+    }
+
+    // ── transaction body ─────────────────────────────────────────────────────
+
+    /// Minimal body has exactly 3 keys (0, 1, 2) → map(3)
+    #[test]
+    fn test_transaction_body_minimal_map3() {
+        let body = minimal_body();
+        let encoded = encode_transaction_body(&body);
+        // map(3) = 0xa3
+        assert_eq!(encoded[0], 0xa3, "minimal body must be map(3)");
+    }
+
+    /// Body with TTL gains key 3 → map(4)
+    #[test]
+    fn test_transaction_body_with_ttl() {
+        let mut body = minimal_body();
+        body.ttl = Some(SlotNo(999_999));
+        let encoded = encode_transaction_body(&body);
+        // map(4) = 0xa4
+        assert_eq!(encoded[0], 0xa4, "body with TTL must be map(4)");
+    }
+
+    /// Body with validity_interval_start gains key 8 → map(4)
+    #[test]
+    fn test_transaction_body_with_validity_start() {
+        let mut body = minimal_body();
+        body.validity_interval_start = Some(SlotNo(100));
+        let encoded = encode_transaction_body(&body);
+        assert_eq!(encoded[0], 0xa4, "body with validity start must be map(4)");
+    }
+
+    // ── full transaction encoding ────────────────────────────────────────────
+
+    /// Full transaction: array(4) = 0x84
+    #[test]
+    fn test_encode_transaction_array4() {
+        let body = minimal_body();
+        let tx = dugite_primitives::transaction::Transaction {
+            hash: Hash32::ZERO,
+            era: Era::Conway,
+            body,
+            witness_set: empty_witness_set(),
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        };
+        let encoded = encode_transaction(&tx);
+        // array(4) = 0x84
+        assert_eq!(encoded[0], 0x84, "transaction must be array(4)");
+    }
+
+    /// is_valid=false encodes as CBOR false (0xf4)
+    #[test]
+    fn test_encode_transaction_is_valid_false() {
+        let body = minimal_body();
+        let tx = dugite_primitives::transaction::Transaction {
+            hash: Hash32::ZERO,
+            era: Era::Conway,
+            body,
+            witness_set: empty_witness_set(),
+            is_valid: false,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        };
+        let encoded = encode_transaction(&tx);
+        // Scan for 0xf4 (CBOR false) — it should appear as the 3rd element
+        assert!(
+            encoded.contains(&0xf4),
+            "is_valid=false must encode as CBOR false (0xf4)"
+        );
+        // Verify 0xf5 (true) is NOT present
+        assert!(
+            !encoded.contains(&0xf5),
+            "is_valid=false must not contain CBOR true (0xf5)"
+        );
+    }
+
+    /// is_valid=true encodes as CBOR true (0xf5)
+    #[test]
+    fn test_encode_transaction_is_valid_true() {
+        let body = minimal_body();
+        let tx = dugite_primitives::transaction::Transaction {
+            hash: Hash32::ZERO,
+            era: Era::Conway,
+            body,
+            witness_set: empty_witness_set(),
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        };
+        let encoded = encode_transaction(&tx);
+        assert!(
+            encoded.contains(&0xf5),
+            "is_valid=true must encode as CBOR true (0xf5)"
+        );
+    }
+
+    /// Transaction without auxiliary data: last element is CBOR null (0xf6)
+    #[test]
+    fn test_encode_transaction_no_aux_data_null() {
+        let body = minimal_body();
+        let tx = dugite_primitives::transaction::Transaction {
+            hash: Hash32::ZERO,
+            era: Era::Conway,
+            body,
+            witness_set: empty_witness_set(),
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        };
+        let encoded = encode_transaction(&tx);
+        // Last byte must be 0xf6 (null)
+        assert_eq!(
+            *encoded.last().unwrap(),
+            0xf6,
+            "no auxiliary data must produce trailing null (0xf6)"
+        );
+    }
+
+    // ── auxiliary data ───────────────────────────────────────────────────────
+
+    /// Simple auxiliary data (metadata only, no scripts): plain metadata map — no tag
+    #[test]
+    fn test_aux_data_metadata_only_no_tag() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert(674_u64, TransactionMetadatum::Text("msg".to_string()));
+        let aux = AuxiliaryData {
+            metadata,
+            native_scripts: vec![],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            raw_cbor: None,
+        };
+        let encoded = encode_auxiliary_data(&aux);
+        // Simple metadata: map(1). No tag 259 prefix.
+        // 0xd9 would be a 2-byte tag prefix — must NOT appear as first byte
+        assert_ne!(
+            encoded[0], 0xd9,
+            "metadata-only aux data must not use tag 259 prefix"
+        );
+        // Must be a map header (major type 5 = 0xa0-0xbf)
+        assert!(
+            encoded[0] & 0xe0 == 0xa0,
+            "metadata-only aux data must start with a map header"
+        );
+    }
+
+    /// Auxiliary data with native scripts: tag(259) = 0xd9 0x01 0x03
+    #[test]
+    fn test_aux_data_with_scripts_uses_tag_259() {
+        let aux = AuxiliaryData {
+            metadata: BTreeMap::new(),
+            native_scripts: vec![NativeScript::InvalidBefore(SlotNo(100))],
+            plutus_v1_scripts: vec![],
+            plutus_v2_scripts: vec![],
+            plutus_v3_scripts: vec![],
+            raw_cbor: None,
+        };
+        let encoded = encode_auxiliary_data(&aux);
+        // tag(259) = 0xd9 0x01 0x03
+        assert_eq!(encoded[0], 0xd9, "aux with scripts: tag byte 1 (0xd9)");
+        assert_eq!(encoded[1], 0x01, "aux with scripts: tag byte 2 (0x01)");
+        assert_eq!(encoded[2], 0x03, "aux with scripts: tag byte 3 (0x03 = 259)");
+    }
+
+    // ── empty witness set ────────────────────────────────────────────────────
+
+    /// Empty witness set: map(0) = 0xa0
+    #[test]
+    fn test_empty_witness_set() {
+        let ws = empty_witness_set();
+        let encoded = encode_witness_set(&ws);
+        assert_eq!(encoded, vec![0xa0], "empty witness set must be map(0) = 0xa0");
+    }
+
+    // ── witness set with vkeys ───────────────────────────────────────────────
+
+    /// Witness set with one vkey: map(1) with key 0
+    #[test]
+    fn test_witness_set_with_vkeys_map1_key0() {
+        let mut ws = empty_witness_set();
+        ws.vkey_witnesses.push(VKeyWitness {
+            vkey: vec![0u8; 32],
+            signature: vec![0u8; 64],
+        });
+        let encoded = encode_witness_set(&ws);
+        // map(1) = 0xa1
+        assert_eq!(encoded[0], 0xa1, "witness set with vkeys must be map(1)");
+        // key 0 for vkey_witnesses
+        assert_eq!(encoded[1], 0x00, "vkey_witnesses map key must be 0");
+    }
+
+    // ── compute_transaction_hash ─────────────────────────────────────────────
+
+    /// Hash must be deterministic (same body → same hash)
+    #[test]
+    fn test_compute_transaction_hash_deterministic() {
+        let body = minimal_body();
+        let h1 = compute_transaction_hash(&body);
+        let h2 = compute_transaction_hash(&body);
+        assert_eq!(h1, h2, "transaction hash must be deterministic");
+    }
+
+    /// Hash must be non-zero for a non-empty body
+    #[test]
+    fn test_compute_transaction_hash_non_zero() {
+        let body = minimal_body();
+        let h = compute_transaction_hash(&body);
+        assert_ne!(h, Hash32::ZERO, "transaction hash of real body must be non-zero");
+    }
+
+    /// Two different bodies must produce different hashes
+    #[test]
+    fn test_compute_transaction_hash_differs_for_different_bodies() {
+        let body1 = minimal_body();
+        let mut body2 = minimal_body();
+        body2.fee = Lovelace(999_999);
+        let h1 = compute_transaction_hash(&body1);
+        let h2 = compute_transaction_hash(&body2);
+        assert_ne!(h1, h2, "different bodies must produce different hashes");
+    }
+}
