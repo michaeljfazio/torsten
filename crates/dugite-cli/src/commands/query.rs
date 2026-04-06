@@ -637,6 +637,67 @@ fn pool_id_from_cold_vkey(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(hash))
 }
 
+// ── Task 6: Slot-to-UTC helper ──────────────────────────────────────────────
+
+/// Returns true for leap years using the Gregorian calendar rule.
+fn is_leap_year(y: u64) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
+/// Convert a Cardano slot number to a UTC timestamp string ("YYYY-MM-DDThh:mm:ssZ").
+///
+/// `system_start_unix` is the Unix timestamp (seconds since 1970) of slot 0.
+/// `slot_length` is the duration of each slot in seconds (usually 1 for mainnet/testnet).
+#[allow(dead_code)]
+fn slot_to_utc(slot: u64, system_start_unix: u64, slot_length: u64) -> String {
+    let unix_secs = system_start_unix + slot * slot_length;
+    let secs_per_day = 86_400u64;
+    let days = unix_secs / secs_per_day;
+    let day_secs = unix_secs % secs_per_day;
+    let hours = day_secs / 3600;
+    let minutes = (day_secs % 3600) / 60;
+    let seconds = day_secs % 60;
+
+    // Walk forward from 1970 to find the calendar year.
+    let mut y = 1970i64;
+    let mut remaining = days;
+    loop {
+        let year_days: u64 = if is_leap_year(y as u64) { 366 } else { 365 };
+        if remaining < year_days {
+            break;
+        }
+        remaining -= year_days;
+        y += 1;
+    }
+
+    // Find month and day within the year.
+    let leap = is_leap_year(y as u64);
+    let month_days: [u64; 12] = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut m = 0usize;
+    for (i, &md) in month_days.iter().enumerate() {
+        if remaining < md {
+            m = i;
+            break;
+        }
+        remaining -= md;
+    }
+    let d = remaining + 1;
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        m + 1,
+        d,
+        hours,
+        minutes,
+        seconds
+    )
+}
+
 /// Parse and print a UTxO query response in the cardano-cli tabular format.
 ///
 /// The `raw` bytes are a full LocalStateQuery MsgResult payload:
@@ -2159,8 +2220,178 @@ impl QueryCmd {
 
                 Ok(())
             }
-            QuerySubcommand::LeadershipSchedule { .. } => {
-                anyhow::bail!("Not yet implemented");
+            QuerySubcommand::LeadershipSchedule {
+                socket_path,
+                mainnet,
+                testnet_magic,
+                genesis,
+                stake_pool_id,
+                cold_verification_key_file,
+                vrf_signing_key_file,
+                current,
+                next,
+                output_json: _,
+                output_text,
+                out_file,
+            } => {
+                // Resolve network magic: --mainnet wins, otherwise use --testnet-magic.
+                let testnet_magic = if mainnet {
+                    Some(764_824_073)
+                } else {
+                    testnet_magic
+                };
+
+                // Allow CARDANO_NODE_SOCKET_PATH to override the default socket path.
+                let socket_path = if socket_path == std::path::Path::new("node.sock") {
+                    if let Ok(env_sock) = std::env::var("CARDANO_NODE_SOCKET_PATH") {
+                        PathBuf::from(env_sock)
+                    } else {
+                        socket_path
+                    }
+                } else {
+                    socket_path
+                };
+
+                // When neither flag is supplied, default to --current behaviour.
+                let use_next = next && !current;
+
+                // Resolve pool ID from explicit hex or from the cold verification key.
+                let pool_id_hex = if let Some(ref id) = stake_pool_id {
+                    id.to_lowercase()
+                } else if let Some(ref path) = cold_verification_key_file {
+                    pool_id_from_cold_vkey(path)?
+                } else {
+                    anyhow::bail!(
+                        "Either --stake-pool-id or --cold-verification-key-file is required"
+                    );
+                };
+
+                // Load and decode the VRF signing key (Cardano text-envelope format).
+                // The `cborHex` field contains a CBOR-wrapped 32- or 64-byte secret key.
+                // We strip the CBOR wrapper and use the first 32 bytes as the VRF seed.
+                let vrf_content = std::fs::read_to_string(&vrf_signing_key_file)?;
+                let vrf_env: serde_json::Value = serde_json::from_str(&vrf_content)?;
+                let vrf_cbor_hex = vrf_env["cborHex"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Missing cborHex in VRF skey file"))?;
+                let vrf_cbor = hex::decode(vrf_cbor_hex)?;
+                // Strip the one- or two-byte CBOR bytestring header.
+                let vrf_key_bytes = if vrf_cbor.len() > 2 && vrf_cbor[0] == 0x58 {
+                    &vrf_cbor[2..]
+                } else if vrf_cbor.len() > 1 && (vrf_cbor[0] & 0xe0) == 0x40 {
+                    &vrf_cbor[1..]
+                } else {
+                    &vrf_cbor
+                };
+                let vrf_seed = match vrf_key_bytes.len() {
+                    32 => vrf_key_bytes,
+                    64 => &vrf_key_bytes[..32],
+                    n => anyhow::bail!("VRF secret key must be 32 or 64 bytes, got {n}"),
+                };
+                let mut vrf_skey = [0u8; 32];
+                vrf_skey.copy_from_slice(vrf_seed);
+
+                // Read timing parameters from the Shelley genesis file.
+                let gp = read_shelley_genesis(&genesis)?;
+
+                // Connect to the node socket and acquire a ledger state snapshot.
+                let mut client = connect_and_acquire(&socket_path, testnet_magic).await?;
+
+                // Query the current chain tip to determine the current epoch boundaries.
+                let tip = client
+                    .query_tip()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query tip: {e}"))?;
+
+                // Slot within the current epoch and the absolute slot at epoch start.
+                let slot_in_epoch = tip.slot % gp.epoch_length;
+                let current_epoch_start = tip.slot - slot_in_epoch;
+                let epoch_start_slot = if use_next {
+                    current_epoch_start + gp.epoch_length
+                } else {
+                    current_epoch_start
+                };
+
+                // Query the raw protocol state to extract epoch/candidate nonces.
+                let proto_raw = client
+                    .query_protocol_state()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query protocol state: {e}"))?;
+                let nonces = parse_protocol_state_nonces(&proto_raw)?;
+
+                // For --current use the epoch nonce; for --next use the candidate nonce
+                // (which becomes the epoch nonce at the next epoch boundary).
+                let epoch_nonce_bytes = if use_next {
+                    nonces.candidate_nonce
+                } else {
+                    nonces.epoch_nonce
+                };
+                let epoch_nonce = dugite_primitives::Hash(epoch_nonce_bytes);
+
+                // Query the stake snapshot for pool/total active stake figures.
+                let stake_raw = client
+                    .query_stake_snapshot()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query stake snapshot: {e}"))?;
+
+                release_and_done(&mut client).await;
+
+                // use_next=true → use the "mark" snapshot; false → "set" snapshot.
+                let stake = parse_stake_for_pool(&stake_raw, &pool_id_hex, use_next)?;
+
+                // Convert the floating-point active-slots coefficient to an exact rational.
+                let (f_num, f_den) = f64_to_rational_approx(gp.active_slots_coeff);
+
+                // Compute the full leadership schedule for the epoch.
+                let schedule = dugite_consensus::compute_leader_schedule(
+                    &vrf_skey,
+                    &epoch_nonce,
+                    epoch_start_slot,
+                    gp.epoch_length,
+                    stake.pool_stake,
+                    stake.total_active_stake,
+                    f_num,
+                    f_den,
+                );
+
+                // Build JSON entries matching cardano-cli's output format.
+                let json_entries: Vec<serde_json::Value> = schedule
+                    .iter()
+                    .map(|s| {
+                        let time =
+                            slot_to_utc(s.slot.0, gp.system_start_unix, gp.slot_length);
+                        serde_json::json!({
+                            "slotNumber": s.slot.0,
+                            "slotTime": time,
+                        })
+                    })
+                    .collect();
+
+                // Render as human-readable text table or JSON (default).
+                let output = if output_text {
+                    let mut lines = Vec::new();
+                    lines.push(format!("{:<15} {}", "SlotNo", "UTC Time"));
+                    lines.push("-".repeat(50));
+                    for entry in &json_entries {
+                        lines.push(format!(
+                            "{:<15} {}",
+                            entry["slotNumber"],
+                            entry["slotTime"].as_str().unwrap_or("")
+                        ));
+                    }
+                    lines.join("\n")
+                } else {
+                    serde_json::to_string_pretty(&json_entries)?
+                };
+
+                if let Some(ref path) = out_file {
+                    std::fs::write(path, &output)?;
+                    eprintln!("Leadership schedule written to: {}", path.display());
+                } else {
+                    println!("{output}");
+                }
+
+                Ok(())
             }
             QuerySubcommand::SlotNumber {
                 utc_time,
@@ -2582,6 +2813,16 @@ mod tests {
         assert_eq!(slot, 1, "floor(3000ms / 2000ms) = 1");
     }
 
+    // ── Task 6: slot_to_utc ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_slot_to_utc() {
+        // Preview systemStart = 2022-10-25T00:00:00Z = Unix 1666656000, 1s slots.
+        assert_eq!(slot_to_utc(0, 1666656000, 1), "2022-10-25T00:00:00Z");
+        assert_eq!(slot_to_utc(86400, 1666656000, 1), "2022-10-26T00:00:00Z");
+        assert_eq!(slot_to_utc(3600, 1666656000, 1), "2022-10-25T01:00:00Z");
+    }
+
     // ── Task 2: Protocol State CBOR Parser ──────────────────────────────────
 
     #[test]
@@ -2642,9 +2883,9 @@ mod tests {
         enc.map(1).ok();
         enc.bytes(&pool_bytes).ok();
         enc.array(3).ok();
-        enc.u64(5000_000_000).ok(); // mark
-        enc.u64(4000_000_000).ok(); // set
-        enc.u64(3000_000_000).ok(); // go
+        enc.u64(5_000_000_000).ok(); // mark
+        enc.u64(4_000_000_000).ok(); // set
+        enc.u64(3_000_000_000).ok(); // go
 
         // totals
         enc.u64(100_000_000_000).ok(); // mark_total
