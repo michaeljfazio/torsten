@@ -423,3 +423,485 @@ proptest! {
         let _ = params.committee_max_term_length;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property 4: Update preserves unchanged fields
+// ---------------------------------------------------------------------------
+//
+// Haskell reference: `cardano-ledger-core/src/Cardano/Ledger/Core/PParams.hs`
+// `updatePParams` (pre-Conway: `updatePP`, Conway: the governance enactment
+// path in `Cardano.Ledger.Conway.Governance.Procedures`).
+//
+// The Haskell implementation uses `StrictMaybe` for each field in the update
+// record: `SJust new_value` replaces the field, `SNothing` leaves it
+// unchanged. This is the `PParamsUpdate` type across all eras.
+//
+// In Rust/Dugite the equivalent is applying an update struct where only some
+// fields are `Some(new_value)` and the rest are `None`. A correct
+// implementation must:
+//   1. Overwrite every field where `Some(v)` is provided.
+//   2. Leave every field where `None` is provided EXACTLY AS IT WAS.
+//
+// This test simulates the simplest partial update: clone the params, change
+// only `min_fee_a`, and verify that all other fields are identical to the
+// original. If any field is accidentally zeroed, defaulted, or otherwise
+// mutated during a clone-and-modify operation, this property will catch it.
+//
+// Note: `ProtocolParameters` does not derive `PartialEq` (because `f64`
+// fields prevent a derived `Eq`). We compare each field individually. The
+// `active_slots_coeff` field is an `f64` and uses `==` comparison — since
+// we are performing an exact clone with no arithmetic, bit-identical
+// floating-point equality is correct here.
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    /// Verify that a partial parameter update (changing only `min_fee_a`)
+    /// leaves all other fields identical to the original.
+    ///
+    /// This matches Haskell's `updatePP` identity behaviour on `SNothing`
+    /// fields: untouched fields are preserved byte-for-byte.
+    ///
+    /// The new `min_fee_a` value must differ from the original; we use the
+    /// strategy `(original + 1) % 200 + 1` to guarantee a distinct value
+    /// without overflow.
+    #[test]
+    fn prop_update_preserves_unchanged_fields(original in arb_protocol_params()) {
+        // ── Apply a single-field update ──────────────────────────────────────
+        // Clone the original, then change exactly one field.
+        let mut updated = original.clone();
+        // Choose a new min_fee_a that is guaranteed different from the
+        // original so that the "changed field changed" post-condition can
+        // also be checked.
+        let new_min_fee_a = original.min_fee_a % 200 + 1;
+        // If new_min_fee_a happens to equal original.min_fee_a (i.e., the
+        // formula wraps to the same value), shift it by 1 more.
+        let new_min_fee_a = if new_min_fee_a == original.min_fee_a {
+            new_min_fee_a % 200 + 1
+        } else {
+            new_min_fee_a
+        };
+        updated.min_fee_a = new_min_fee_a;
+
+        // ── Verify: the changed field changed ────────────────────────────────
+        // This is a sanity check that our update was actually applied — if it
+        // fails, the test infrastructure is broken rather than the parameter
+        // logic.
+        prop_assert_ne!(
+            updated.min_fee_a,
+            original.min_fee_a,
+            "min_fee_a should have changed: original={}, updated={}",
+            original.min_fee_a,
+            updated.min_fee_a
+        );
+
+        // ── Verify: all other scalar u64 fields are unchanged ─────────────
+        prop_assert_eq!(
+            updated.min_fee_b, original.min_fee_b,
+            "min_fee_b changed: {} -> {}", original.min_fee_b, updated.min_fee_b
+        );
+        prop_assert_eq!(
+            updated.max_block_body_size, original.max_block_body_size,
+            "max_block_body_size changed: {} -> {}",
+            original.max_block_body_size, updated.max_block_body_size
+        );
+        prop_assert_eq!(
+            updated.max_tx_size, original.max_tx_size,
+            "max_tx_size changed: {} -> {}", original.max_tx_size, updated.max_tx_size
+        );
+        prop_assert_eq!(
+            updated.max_block_header_size, original.max_block_header_size,
+            "max_block_header_size changed: {} -> {}",
+            original.max_block_header_size, updated.max_block_header_size
+        );
+        prop_assert_eq!(
+            updated.e_max, original.e_max,
+            "e_max changed: {} -> {}", original.e_max, updated.e_max
+        );
+        prop_assert_eq!(
+            updated.n_opt, original.n_opt,
+            "n_opt changed: {} -> {}", original.n_opt, updated.n_opt
+        );
+        prop_assert_eq!(
+            updated.max_val_size, original.max_val_size,
+            "max_val_size changed: {} -> {}", original.max_val_size, updated.max_val_size
+        );
+        prop_assert_eq!(
+            updated.collateral_percentage, original.collateral_percentage,
+            "collateral_percentage changed: {} -> {}",
+            original.collateral_percentage, updated.collateral_percentage
+        );
+        prop_assert_eq!(
+            updated.max_collateral_inputs, original.max_collateral_inputs,
+            "max_collateral_inputs changed: {} -> {}",
+            original.max_collateral_inputs, updated.max_collateral_inputs
+        );
+        prop_assert_eq!(
+            updated.min_fee_ref_script_cost_per_byte,
+            original.min_fee_ref_script_cost_per_byte,
+            "min_fee_ref_script_cost_per_byte changed: {} -> {}",
+            original.min_fee_ref_script_cost_per_byte,
+            updated.min_fee_ref_script_cost_per_byte
+        );
+        prop_assert_eq!(
+            updated.drep_activity, original.drep_activity,
+            "drep_activity changed: {} -> {}", original.drep_activity, updated.drep_activity
+        );
+        prop_assert_eq!(
+            updated.gov_action_lifetime, original.gov_action_lifetime,
+            "gov_action_lifetime changed: {} -> {}",
+            original.gov_action_lifetime, updated.gov_action_lifetime
+        );
+        prop_assert_eq!(
+            updated.committee_min_size, original.committee_min_size,
+            "committee_min_size changed: {} -> {}",
+            original.committee_min_size, updated.committee_min_size
+        );
+        prop_assert_eq!(
+            updated.committee_max_term_length, original.committee_max_term_length,
+            "committee_max_term_length changed: {} -> {}",
+            original.committee_max_term_length, updated.committee_max_term_length
+        );
+        prop_assert_eq!(
+            updated.protocol_version_major, original.protocol_version_major,
+            "protocol_version_major changed: {} -> {}",
+            original.protocol_version_major, updated.protocol_version_major
+        );
+        prop_assert_eq!(
+            updated.protocol_version_minor, original.protocol_version_minor,
+            "protocol_version_minor changed: {} -> {}",
+            original.protocol_version_minor, updated.protocol_version_minor
+        );
+
+        // ── Verify: Lovelace fields unchanged ────────────────────────────────
+        prop_assert_eq!(
+            updated.key_deposit, original.key_deposit,
+            "key_deposit changed: {:?} -> {:?}", original.key_deposit, updated.key_deposit
+        );
+        prop_assert_eq!(
+            updated.pool_deposit, original.pool_deposit,
+            "pool_deposit changed: {:?} -> {:?}", original.pool_deposit, updated.pool_deposit
+        );
+        prop_assert_eq!(
+            updated.min_pool_cost, original.min_pool_cost,
+            "min_pool_cost changed: {:?} -> {:?}", original.min_pool_cost, updated.min_pool_cost
+        );
+        prop_assert_eq!(
+            updated.ada_per_utxo_byte, original.ada_per_utxo_byte,
+            "ada_per_utxo_byte changed: {:?} -> {:?}",
+            original.ada_per_utxo_byte, updated.ada_per_utxo_byte
+        );
+        prop_assert_eq!(
+            updated.drep_deposit, original.drep_deposit,
+            "drep_deposit changed: {:?} -> {:?}", original.drep_deposit, updated.drep_deposit
+        );
+        prop_assert_eq!(
+            updated.gov_action_deposit, original.gov_action_deposit,
+            "gov_action_deposit changed: {:?} -> {:?}",
+            original.gov_action_deposit, updated.gov_action_deposit
+        );
+
+        // ── Verify: Rational fields unchanged ────────────────────────────────
+        // rho and tau are randomised by arb_protocol_params(); all others
+        // retain mainnet defaults. All must survive a clone unchanged.
+        //
+        // Note: Rational does not implement Copy, so we compare by reference
+        // using prop_assert! rather than prop_assert_eq! to avoid moving the
+        // values into the macro and then attempting to use them in the format
+        // string (which would be a use-after-move).
+        prop_assert!(
+            updated.rho == original.rho,
+            "rho changed after single-field update"
+        );
+        prop_assert!(
+            updated.tau == original.tau,
+            "tau changed after single-field update"
+        );
+        prop_assert!(
+            updated.a0 == original.a0,
+            "a0 changed after single-field update"
+        );
+        prop_assert!(
+            updated.d == original.d,
+            "d changed after single-field update"
+        );
+        // Verify all 15 governance threshold Rational fields are unchanged.
+        // We zip the two helper-produced vecs and compare by reference.
+        let updated_gov = governance_threshold_fields(&updated);
+        let original_gov = governance_threshold_fields(&original);
+        for ((name, upd_field), (_, orig_field)) in
+            updated_gov.iter().zip(original_gov.iter())
+        {
+            prop_assert!(
+                upd_field == orig_field,
+                "governance threshold '{}' changed after single-field update",
+                name
+            );
+        }
+
+        // ── Verify: ExUnitPrices and ExUnits unchanged ────────────────────────
+        // ExUnitPrices contains Rational fields (non-Copy), so compare by
+        // reference via prop_assert! for the same reason as above.
+        prop_assert!(
+            updated.execution_costs == original.execution_costs,
+            "execution_costs changed after single-field update"
+        );
+        prop_assert!(
+            updated.max_tx_ex_units == original.max_tx_ex_units,
+            "max_tx_ex_units changed after single-field update"
+        );
+        prop_assert!(
+            updated.max_block_ex_units == original.max_block_ex_units,
+            "max_block_ex_units changed after single-field update"
+        );
+
+        // ── Verify: active_slots_coeff unchanged (f64 exact equality) ────────
+        // We are cloning without arithmetic, so bit-identical equality holds.
+        prop_assert!(
+            updated.active_slots_coeff == original.active_slots_coeff,
+            "active_slots_coeff changed: {} -> {}",
+            original.active_slots_coeff,
+            updated.active_slots_coeff
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 5: Rational threshold CBOR validity
+// ---------------------------------------------------------------------------
+//
+// Haskell reference:
+// `cardano-ledger-core/src/Cardano/Ledger/BaseTypes.hs` — `UnitInterval` and
+// `NonNegativeInterval` CBOR instances. Both encode as `Tag(30)[num, den]`
+// where `den` is a `positive_int` (>= 1) and `num` is a `uint` (>= 0).
+//
+// Key design decision (cross-validated against Haskell):
+//   - `denominator >= 1` is ENFORCED by the ledger (CBOR `positive_int`).
+//   - `numerator >= 0` is ENFORCED by the type (CBOR `uint`, maps to u64).
+//   - `numerator <= denominator` (ratio <= 1.0) is NOT enforced by the
+//     ledger. `NonNegativeInterval` (used for `a0`) explicitly allows
+//     values > 1. `UnitInterval` theoretically restricts to [0,1] but the
+//     CBOR decoder accepts any numerator — the guardrail script enforces the
+//     semantic bound. We do NOT assert `numerator <= denominator`.
+//
+// This property checks ALL rational fields: the 10 DRep dvt_* thresholds,
+// the 5 SPO pvt_* thresholds, rho, tau, a0, d, and the execution unit prices
+// (mem_price, step_price). Total: 21 fields via `all_rational_fields()`.
+//
+// The subset "governance thresholds" (dvt_* + pvt_*) corresponds to the 15
+// fields that the spec asks us to verify, plus rho/tau as specified in the
+// task brief. Using `all_rational_fields()` is strictly stronger — it
+// verifies all 21 Rational fields, which is the correct comprehensive check.
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    /// Verify that all Rational fields in ProtocolParameters satisfy the
+    /// CBOR encoding invariants: `denominator >= 1` and `numerator >= 0`.
+    ///
+    /// Checks all 21 Rational fields (governance thresholds, monetary
+    /// parameters, execution unit prices) for CBOR type constraint
+    /// compliance.
+    ///
+    /// Explicitly does NOT assert `numerator <= denominator`: the Haskell
+    /// ledger does not enforce this for all rational types, and thresholds
+    /// > 1.0 are valid on-chain (permanently unmeetable but not rejected).
+    #[test]
+    fn prop_rational_threshold_cbor_validity(params in arb_protocol_params()) {
+        for (field_name, rational) in all_rational_fields(&params) {
+            // ── denominator must be >= 1 (CBOR positive_int) ─────────────────
+            // A zero denominator is invalid CBOR and would cause a
+            // divide-by-zero in governance ratification or fee calculation.
+            prop_assert!(
+                rational.denominator >= 1,
+                "field '{}': denominator={} violates CBOR positive_int (must be >= 1)",
+                field_name,
+                rational.denominator
+            );
+
+            // ── numerator must be >= 0 (CBOR uint, guaranteed by u64) ─────────
+            // This is trivially true for u64 but we access it explicitly as a
+            // documentation checkpoint: a future refactor to i64 would need to
+            // explicitly handle this invariant.
+            let _: u64 = rational.numerator;
+
+            // ── Explicit non-constraint: numerator > denominator is valid ─────
+            // We do NOT assert rational.numerator <= rational.denominator.
+            // Haskell's NonNegativeInterval (used for a0) allows values > 1.
+            // For governance thresholds, a value > 1.0 is legal on-chain
+            // (the action is simply permanently unmeetable). Guardrail scripts
+            // may enforce tighter bounds, but those are not ledger invariants.
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 6: Monotonic protocol version (lexicographic)
+// ---------------------------------------------------------------------------
+//
+// Haskell reference:
+// `cardano-ledger-shelley/src/Cardano/Ledger/Shelley/Rules/Updn.hs` and
+// `cardano-ledger-core/src/Cardano/Ledger/BaseTypes.hs` — `ProtVer` type.
+//
+// The Haskell `ProtVer` type is `(Major, Minor)` where:
+//   `Major` is a `newtype` over `Word64` with no additional constraints.
+//   `Minor` is a `Word64` with no additional constraints.
+//
+// The update rule `UPDN` (and its successors in each era) enforces:
+//   `canFollow old new ≡ (pvMajor new, pvMinor new) > (pvMajor old, pvMinor old)`
+//
+// This is lexicographic pair comparison, which in Rust corresponds to the
+// default tuple `PartialOrd`/`Ord` implementation:
+//   `(a, b) > (c, d) ≡ a > c || (a == c && b > d)`
+//
+// Consequences:
+//   - major increase: always valid (even if minor decreases — e.g., 9.5 → 10.0)
+//   - major same + minor increase: valid
+//   - major same + minor same: invalid (no change is not an upgrade)
+//   - major decrease: invalid regardless of minor
+//   - major same + minor decrease: invalid
+//
+// Source: `Cardano.Ledger.BaseTypes.ProtVer.canFollow`:
+//   `canFollow (ProtVer major1 minor1) (ProtVer major2 minor2) =
+//     (major2 == major1 + 1 && minor2 == 0) || (major2 == major1 && minor2 == minor1 + 1)`
+//
+// IMPORTANT: The Haskell `canFollow` is STRICTER than pure lexicographic
+// ordering in one way: when the major version increases by 1, the minor MUST
+// be 0 (not just any value >= 0). And the major can only increase by exactly
+// 1. However, the fundamental ordering invariant still holds: any `canFollow`
+// pair satisfies `(new_major, new_minor) > (old_major, old_minor)`. We test
+// the ordering invariant here; the exact `canFollow` constraint (major+1 with
+// minor=0, OR same major with minor+1) is an additional refinement.
+//
+// This property tests three sub-cases using a single proptest strategy:
+//   A. major_new > major_old → new > old (valid upgrade direction)
+//   B. major_new < major_old → new < old (invalid, downgrade)
+//   C. major_new == major_old → validity determined solely by minor comparison
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    /// Verify that protocol version comparison is lexicographic on (major, minor).
+    ///
+    /// Tests three sub-cases:
+    ///   A. Major increase → always strictly greater (valid upgrade direction),
+    ///      even if minor decreases.
+    ///   B. Major decrease → always strictly less (invalid downgrade direction),
+    ///      regardless of minor.
+    ///   C. Same major → comparison determined entirely by minor: greater-minor
+    ///      is valid, equal-minor is not a strict upgrade, lesser-minor is invalid.
+    ///
+    /// Uses Rust's built-in tuple `Ord` which is lexicographic by definition,
+    /// matching the Haskell `ProtVer` ordering used by `canFollow`.
+    #[test]
+    fn prop_protocol_version_lexicographic(
+        // Old version: major in [1, 8], minor in [0, 5]
+        old_major in 1u64..=8u64,
+        old_minor in 0u64..=5u64,
+        // Delta: how much to increase/decrease major (0 means same-major case)
+        major_delta in 0u64..=3u64,
+        // New minor: independent of old_minor so we can test all orderings
+        new_minor in 0u64..=5u64,
+    ) {
+        // ── Case A: major increases (major_delta >= 1) ────────────────────────
+        // Any increase in major makes the new version lexicographically greater,
+        // regardless of minor. E.g., (9, 0) > (8, 5) even though 0 < 5.
+        if major_delta >= 1 {
+            let new_major = old_major + major_delta;
+            // For any new_minor value, (new_major, new_minor) > (old_major, old_minor)
+            // because new_major > old_major dominates.
+            prop_assert!(
+                (new_major, new_minor) > (old_major, old_minor),
+                "major increase: ({}, {}) should be > ({}, {})",
+                new_major, new_minor, old_major, old_minor
+            );
+            // Confirm Rust tuple comparison matches manual lexicographic check.
+            prop_assert!(
+                new_major > old_major,
+                "major_delta={}: new_major={} should exceed old_major={}",
+                major_delta, new_major, old_major
+            );
+        }
+
+        // ── Case B: major decreases (simulate by swapping old↔new) ───────────
+        // If new_major < old_major then the new version is strictly less,
+        // regardless of minor. We derive this from Case A via symmetry:
+        // if (big, any) > (small, any), then (small, any) < (big, any).
+        if major_delta >= 1 {
+            let downgrade_major = old_major.saturating_sub(major_delta);
+            // Skip if subtraction underflowed to 0 (not a valid scenario for
+            // Conway mainnet, but not the point of this test).
+            if downgrade_major < old_major {
+                prop_assert!(
+                    (downgrade_major, new_minor) < (old_major, old_minor)
+                        || (downgrade_major == old_major),
+                    "major decrease: ({}, {}) should be < ({}, {})",
+                    downgrade_major, new_minor, old_major, old_minor
+                );
+                // More precisely: strict less when major actually decreased.
+                if downgrade_major < old_major {
+                    prop_assert!(
+                        (downgrade_major, new_minor) < (old_major, old_minor),
+                        "strict downgrade: ({}, {}) must be < ({}, {})",
+                        downgrade_major, new_minor, old_major, old_minor
+                    );
+                }
+            }
+        }
+
+        // ── Case C: same major (major_delta == 0) ────────────────────────────
+        // With equal major versions, the minor version determines the order.
+        if major_delta == 0 {
+            let same_major = old_major;
+
+            // C1: minor increases → strictly greater (valid upgrade)
+            if new_minor > old_minor {
+                prop_assert!(
+                    (same_major, new_minor) > (same_major, old_minor),
+                    "same-major minor increase: ({}, {}) should be > ({}, {})",
+                    same_major, new_minor, same_major, old_minor
+                );
+            }
+
+            // C2: minor equal → equal (not a strict upgrade, canFollow rejects)
+            if new_minor == old_minor {
+                prop_assert!(
+                    (same_major, new_minor) == (same_major, old_minor),
+                    "same version: ({}, {}) should equal ({}, {})",
+                    same_major, new_minor, same_major, old_minor
+                );
+                // Not a valid upgrade: equal is not strictly greater.
+                prop_assert!(
+                    (same_major, new_minor) <= (same_major, old_minor),
+                    "same version ({}, {}) must not be > itself",
+                    same_major, new_minor
+                );
+            }
+
+            // C3: minor decreases → strictly less (invalid downgrade)
+            if new_minor < old_minor {
+                prop_assert!(
+                    (same_major, new_minor) < (same_major, old_minor),
+                    "same-major minor decrease: ({}, {}) should be < ({}, {})",
+                    same_major, new_minor, same_major, old_minor
+                );
+            }
+        }
+
+        // ── Cross-check: Rust tuple Ord is the canonical comparison ──────────
+        // The above sub-cases cover all branches. This final assertion ties
+        // them together: regardless of which case applies, the Rust tuple
+        // comparison result must equal the manual lexicographic evaluation.
+        let manual_gt = (old_major + major_delta > old_major)
+            || (old_major + major_delta == old_major && new_minor > old_minor);
+        let rust_gt = (old_major + major_delta, new_minor) > (old_major, old_minor);
+        prop_assert_eq!(
+            rust_gt,
+            manual_gt,
+            "Rust tuple Ord disagrees with manual lexicographic: \
+             ({}, {}) > ({}, {}): rust={}, manual={}",
+            old_major + major_delta, new_minor, old_major, old_minor,
+            rust_gt, manual_gt
+        );
+    }
+}

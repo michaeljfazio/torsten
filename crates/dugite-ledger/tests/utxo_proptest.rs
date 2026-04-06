@@ -1,4 +1,4 @@
-//! Property-based tests for UTxO invariants (Properties 1–5).
+//! Property-based tests for UTxO invariants (Properties 1–10).
 //!
 //! Each property is cross-validated against the Haskell cardano-ledger rules.
 //! All properties use 256 test cases.
@@ -61,6 +61,70 @@
 //!
 //! This matches Haskell's `forgetUpTo` semantics in the `Ouroboros.Consensus`
 //! volatile DB implementation.
+//!
+//! ## Property 6 — DiffSeq rollback consistency
+//!
+//! Apply N blocks (each consuming one input and producing one new output),
+//! then rollback M of them via `DiffSeq::rollback`.  After unapplying the
+//! returned diffs (delete inserts, re-insert deletes), the UTxO set must
+//! match the state after applying only the first N-M blocks — not a snapshot,
+//! but the exact live state.
+//!
+//! Haskell's `rewindTableKeySets` applies the inverse of each diff in reverse
+//! chronological order.  Because each diff is a bijection (inserts and deletes
+//! are disjoint), the undo is exact: no approximation or partial application.
+//!
+//! ## Property 7 — Input consumption is atomic
+//!
+//! After applying a sequence of transactions to the UTxO set (including an
+//! intra-block chained spend where Tx2 consumes an output created by Tx1),
+//! every consumed input is absent from the set and every produced output is
+//! present.  No partial application can occur.
+//!
+//! Haskell's UTXOS rule applies the entire block atomically: all inputs are
+//! removed and all outputs are inserted in one ledger state transition.  If
+//! any input is missing the block is rejected outright; no partial state is
+//! written.
+//!
+//! ## Property 8 — Duplicate input rejection
+//!
+//! A transaction that lists the same `TransactionInput` twice must be rejected
+//! by `validate_transaction` before touching the UTxO set.
+//!
+//! In Conway, Haskell catches this at deserialization via `OSet` (which
+//! deduplicates and sorts inputs).  Dugite enforces it as Phase-1 validation
+//! rule `DuplicateInput`, producing the same observable behaviour: submission
+//! of a duplicate-input transaction is rejected.
+//!
+//! ## Property 9 — Deposit pot invariant
+//!
+//! For any well-formed `LedgerState`:
+//!
+//! ```text
+//! total_stake_key_deposits + Σ(pool_deposits.values())
+//!   == key_deposit * n_registered_creds + pool_deposit * n_registered_pools
+//! ```
+//!
+//! The `arb_ledger_state` generator enforces this by construction.  This test
+//! verifies that the identity survives the generator unscathed — it catches any
+//! future generator regression that would produce an inconsistent deposit pot.
+//!
+//! Haskell's `totalObligation` function computes the same sum over
+//! `certState.staking.deposits` (key deposits) and `certState.pool.poolDeposits`
+//! (pool deposits).  The invariant must hold at every ledger state checkpoint.
+//!
+//! ## Property 10 — Collateral UTxO invariant
+//!
+//! For `is_valid = false` transactions, the Cardano ledger (Alonzo onwards):
+//!   - Removes all collateral inputs from the UTxO set.
+//!   - If `collateral_return` is present, adds it as a new UTxO entry.
+//!   - Leaves all regular spending inputs untouched in the UTxO set.
+//!   - Does NOT add any of the transaction's regular outputs.
+//!
+//! This is Haskell's `UTXOS` rule `isValid = false` branch:
+//! `utxo' = (utxo ∖ collateral(tx)) ∪ collRet(tx)`.
+//! The test simulates this logic at the UTxO-set level and asserts each
+//! invariant holds after the invalid-transaction processing.
 
 #[path = "strategies.rs"]
 mod strategies;
