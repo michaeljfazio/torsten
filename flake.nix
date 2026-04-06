@@ -19,13 +19,12 @@
     nixpkgs,
     ...
   } @ inputs: let
-    inherit ((import ./flake/lib.nix {inherit inputs;}).flake.lib) recursiveImports;
+    inherit ((import ./nix/lib.nix {inherit inputs;}).flake.lib) recursiveImports;
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       imports =
         recursiveImports [
-          ./flake
-          ./per-system
+          ./nix
         ]
         ++ [
           inputs.treefmt-nix.flakeModule
