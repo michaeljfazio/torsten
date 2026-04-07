@@ -8,7 +8,8 @@
 //! Run:  cargo bench -p dugite-primitives
 //! HTML: target/criterion/report/index.html
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use dugite_primitives::hash::{blake2b_224, blake2b_256};
 
 fn bench_blake2b_256(c: &mut Criterion) {

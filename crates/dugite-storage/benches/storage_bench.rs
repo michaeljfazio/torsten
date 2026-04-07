@@ -11,7 +11,8 @@
 //! Run:  cargo bench -p dugite-storage
 //! HTML: target/criterion/report/index.html
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use std::hint::black_box;
 use dugite_primitives::hash::Hash32;
 use dugite_primitives::time::{BlockNo, SlotNo};
 

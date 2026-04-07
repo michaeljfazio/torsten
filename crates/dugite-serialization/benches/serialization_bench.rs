@@ -8,7 +8,8 @@
 //! Run:  cargo bench -p dugite-serialization
 //! HTML: target/criterion/report/index.html
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 use dugite_primitives::address::{Address, EnterpriseAddress};
 use dugite_primitives::block::{BlockHeader, OperationalCert, ProtocolVersion, VrfOutput};
 use dugite_primitives::credentials::Credential;

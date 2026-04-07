@@ -7,7 +7,8 @@
 //! Run:  cargo bench -p dugite-crypto
 //! HTML: target/criterion/report/index.html
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use dugite_crypto::keys::PaymentSigningKey;
 use dugite_crypto::vrf::verify_vrf_proof;
 use dugite_primitives::hash::blake2b_224;
