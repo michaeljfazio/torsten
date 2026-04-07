@@ -2539,7 +2539,7 @@ impl Node {
                     // Compute governor actions based on current peer state.
                     let actions = {
                         let pm = peer_manager.read().await;
-                        governor.compute_actions(&pm.inner)
+                        governor.compute_actions(&pm.inner, &[])
                     };
 
                     if !actions.is_empty() {
