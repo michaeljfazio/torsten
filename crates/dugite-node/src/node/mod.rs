@@ -1786,13 +1786,24 @@ impl Node {
             }
 
             // Resolve local root group members for per-group valency registration.
-            // Each entry is (resolved_addrs_for_group, hot_valency, warm_valency).
-            // We collect these here (pre-lock) so that `add_local_root_group` can
-            // be called with already-resolved addresses while holding the PM lock.
-            let mut resolved_groups: Vec<(Vec<std::net::SocketAddr>, usize, usize)> = Vec::new();
+            // Each entry carries resolved addresses plus all topology metadata so
+            // `add_local_root_group` can be called with fully-populated info.
+            struct ResolvedGroup {
+                addrs: Vec<std::net::SocketAddr>,
+                hot_valency: usize,
+                warm_valency: usize,
+                diffusion_mode: Option<networking::DiffusionMode>,
+                behind_firewall: bool,
+                advertise: bool,
+            }
+            let mut resolved_groups: Vec<ResolvedGroup> = Vec::new();
             for group in &self.topology.local_roots {
                 let hot_val = usize::from(group.effective_hot_valency());
                 let warm_val = usize::from(group.effective_warm_valency());
+                let diffusion_mode = group.diffusion_mode.as_deref().map(|s| match s {
+                    "InitiatorOnly" => networking::DiffusionMode::InitiatorOnly,
+                    _ => networking::DiffusionMode::InitiatorAndResponder,
+                });
                 let mut group_addrs = Vec::new();
                 for ap in &group.access_points {
                     match tokio::net::lookup_host(format!("{}:{}", ap.address, ap.port)).await {
@@ -1811,7 +1822,14 @@ impl Node {
                     }
                 }
                 if !group_addrs.is_empty() {
-                    resolved_groups.push((group_addrs, hot_val, warm_val));
+                    resolved_groups.push(ResolvedGroup {
+                        addrs: group_addrs,
+                        hot_valency: hot_val,
+                        warm_valency: warm_val,
+                        diffusion_mode,
+                        behind_firewall: group.is_behind_firewall(),
+                        advertise: group.advertise,
+                    });
                 }
             }
 
@@ -1821,12 +1839,15 @@ impl Node {
             }
             // Register per-group valency targets.  This must happen AFTER
             // add_config_peer() calls so the peer table contains the members.
-            for (group_addrs, hot_val, warm_val) in resolved_groups {
+            for rg in resolved_groups {
                 pm.add_local_root_group(networking::LocalRootGroupInfo {
                     name: String::new(),
-                    addrs: group_addrs,
-                    hot_valency: hot_val,
-                    warm_valency: warm_val,
+                    addrs: rg.addrs,
+                    hot_valency: rg.hot_valency,
+                    warm_valency: rg.warm_valency,
+                    diffusion_mode: rg.diffusion_mode,
+                    behind_firewall: rg.behind_firewall,
+                    advertise: rg.advertise,
                 });
             }
             let stats = pm.stats();
@@ -2539,7 +2560,7 @@ impl Node {
                     // Compute governor actions based on current peer state.
                     let actions = {
                         let pm = peer_manager.read().await;
-                        governor.compute_actions(&pm.inner)
+                        governor.compute_actions(&pm.inner, &[])
                     };
 
                     if !actions.is_empty() {
