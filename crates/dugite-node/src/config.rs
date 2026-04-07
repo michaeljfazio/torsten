@@ -466,6 +466,105 @@ where
     deserializer.deserialize_any(ProtocolVisitor)
 }
 
+/// Validate peer selection target consistency for one target set.
+///
+/// Mirrors Haskell's `sanePeerSelectionTargets` from
+/// `Ouroboros.Network.PeerSelection.Governor.Types`.  The function is called
+/// for **both** the deadline and the Genesis sync target sets, unconditionally
+/// (i.e. without checking `ConsensusMode`).
+///
+/// The 14 predicates checked are:
+///
+/// Ordering invariants (cold ≥ warm ≥ hot):
+///   1.  active     <= established
+///   2.  established<= known
+///   3.  root       <= known
+///   4.  active_blp <= established_blp
+///   5.  established_blp <= known_blp
+///
+/// Upper-bound safety limits (prevent runaway resource usage):
+///   6.  active     <= 100
+///   7.  established <= 1000
+///   8.  known      <= 10000
+///   9.  active_blp <= 100
+///   10. established_blp <= 1000
+///   11. known_blp  <= 10000
+///
+/// (The ≥ 0 checks are implicit because all fields are `usize`.)
+///
+/// `label` is a short prefix used in the error message ("deadline" or "sync").
+#[allow(clippy::too_many_arguments)]
+fn sane_peer_selection_targets(
+    label: &str,
+    active: usize,
+    established: usize,
+    known: usize,
+    root: usize,
+    active_blp: usize,
+    established_blp: usize,
+    known_blp: usize,
+) -> Result<()> {
+    // ── Ordering invariants ───────────────────────────────────────────────────
+    if active > established {
+        anyhow::bail!("[{label}] active ({active}) must be <= established ({established})");
+    }
+    if established > known {
+        anyhow::bail!("[{label}] established ({established}) must be <= known ({known})");
+    }
+    if root > known {
+        anyhow::bail!("[{label}] root ({root}) must be <= known ({known})");
+    }
+    if active_blp > established_blp {
+        anyhow::bail!(
+            "[{label}] active_big_ledger_peers ({active_blp}) must be <= \
+             established_big_ledger_peers ({established_blp})"
+        );
+    }
+    if established_blp > known_blp {
+        anyhow::bail!(
+            "[{label}] established_big_ledger_peers ({established_blp}) must be <= \
+             known_big_ledger_peers ({known_blp})"
+        );
+    }
+
+    // ── Upper-bound safety limits ─────────────────────────────────────────────
+    const MAX_ACTIVE: usize = 100;
+    const MAX_ESTABLISHED: usize = 1000;
+    const MAX_KNOWN: usize = 10_000;
+
+    if active > MAX_ACTIVE {
+        anyhow::bail!("[{label}] active ({active}) exceeds maximum allowed ({MAX_ACTIVE})");
+    }
+    if established > MAX_ESTABLISHED {
+        anyhow::bail!(
+            "[{label}] established ({established}) exceeds maximum allowed ({MAX_ESTABLISHED})"
+        );
+    }
+    if known > MAX_KNOWN {
+        anyhow::bail!("[{label}] known ({known}) exceeds maximum allowed ({MAX_KNOWN})");
+    }
+    if active_blp > MAX_ACTIVE {
+        anyhow::bail!(
+            "[{label}] active_big_ledger_peers ({active_blp}) exceeds maximum allowed \
+             ({MAX_ACTIVE})"
+        );
+    }
+    if established_blp > MAX_ESTABLISHED {
+        anyhow::bail!(
+            "[{label}] established_big_ledger_peers ({established_blp}) exceeds maximum \
+             allowed ({MAX_ESTABLISHED})"
+        );
+    }
+    if known_blp > MAX_KNOWN {
+        anyhow::bail!(
+            "[{label}] known_big_ledger_peers ({known_blp}) exceeds maximum allowed \
+             ({MAX_KNOWN})"
+        );
+    }
+
+    Ok(())
+}
+
 impl NodeConfig {
     /// Returns the protocol version this node should stamp on forged block headers.
     ///
@@ -537,71 +636,34 @@ impl NodeConfig {
     /// `config_dir` is the directory containing the config file, used to resolve
     /// relative genesis file paths.
     pub fn validate(&self, config_dir: &Path) -> Result<()> {
-        // ── Peer target ordering ──────────────────────────────────────
-        // Haskell cardano-node validates at startup that:
-        //   known >= established >= active >= 0
-        // Violation causes a startup failure with explicit error message.
+        // ── Peer target sanity checks (Haskell: sanePeerSelectionTargets) ─────
+        //
+        // Haskell cardano-node calls `sanePeerSelectionTargets` at startup for
+        // BOTH the deadline targets and the Genesis sync targets, regardless of
+        // consensus mode.  Violation causes a startup failure.
+        //
+        // Reference: ouroboros-network/src/Ouroboros/Network/PeerSelection/Governor/Types.hs
+        sane_peer_selection_targets(
+            "deadline",
+            self.target_number_of_active_peers,
+            self.target_number_of_established_peers,
+            self.target_number_of_known_peers,
+            self.target_number_of_root_peers,
+            self.target_number_of_active_big_ledger_peers,
+            self.target_number_of_established_big_ledger_peers,
+            self.target_number_of_known_big_ledger_peers,
+        )?;
 
-        // Regular peer targets.
-        if self.target_number_of_known_peers < self.target_number_of_established_peers {
-            anyhow::bail!(
-                "TargetNumberOfKnownPeers ({}) must be >= TargetNumberOfEstablishedPeers ({})",
-                self.target_number_of_known_peers,
-                self.target_number_of_established_peers,
-            );
-        }
-        if self.target_number_of_established_peers < self.target_number_of_active_peers {
-            anyhow::bail!(
-                "TargetNumberOfEstablishedPeers ({}) must be >= TargetNumberOfActivePeers ({})",
-                self.target_number_of_established_peers,
-                self.target_number_of_active_peers,
-            );
-        }
-
-        // Big Ledger Peer targets.
-        if self.target_number_of_known_big_ledger_peers
-            < self.target_number_of_established_big_ledger_peers
-        {
-            anyhow::bail!(
-                "TargetNumberOfKnownBigLedgerPeers ({}) must be >= \
-                 TargetNumberOfEstablishedBigLedgerPeers ({})",
-                self.target_number_of_known_big_ledger_peers,
-                self.target_number_of_established_big_ledger_peers,
-            );
-        }
-        if self.target_number_of_established_big_ledger_peers
-            < self.target_number_of_active_big_ledger_peers
-        {
-            anyhow::bail!(
-                "TargetNumberOfEstablishedBigLedgerPeers ({}) must be >= \
-                 TargetNumberOfActiveBigLedgerPeers ({})",
-                self.target_number_of_established_big_ledger_peers,
-                self.target_number_of_active_big_ledger_peers,
-            );
-        }
-
-        // Sync targets (when Genesis mode is configured).
-        if self.consensus_mode == ConsensusMode::GenesisMode {
-            if self.sync_target_number_of_known_peers < self.sync_target_number_of_established_peers
-            {
-                anyhow::bail!(
-                    "SyncTargetNumberOfKnownPeers ({}) must be >= \
-                     SyncTargetNumberOfEstablishedPeers ({})",
-                    self.sync_target_number_of_known_peers,
-                    self.sync_target_number_of_established_peers,
-                );
-            }
-            if self.sync_target_number_of_established_peers
-                < self.sync_target_number_of_active_peers
-            {
-                anyhow::bail!(
-                    "SyncTargetNumberOfEstablishedPeers ({}) must be >= \
-                     SyncTargetNumberOfActivePeers ({})",
-                    self.sync_target_number_of_established_peers,
-                    self.sync_target_number_of_active_peers,
-                );
-            }
-        }
+        sane_peer_selection_targets(
+            "sync",
+            self.sync_target_number_of_active_peers,
+            self.sync_target_number_of_established_peers,
+            self.sync_target_number_of_known_peers,
+            self.sync_target_number_of_root_peers,
+            self.sync_target_number_of_active_big_ledger_peers,
+            self.sync_target_number_of_established_big_ledger_peers,
+            self.sync_target_number_of_known_big_ledger_peers,
+        )?;
 
         let genesis_files: &[(&str, &Option<String>, &Option<String>)] = &[
             ("Byron", &self.byron_genesis_file, &self.byron_genesis_hash),
@@ -1081,7 +1143,12 @@ mod tests {
             ..NodeConfig::default()
         };
         let err = config.validate(Path::new(".")).unwrap_err();
-        assert!(err.to_string().contains("TargetNumberOfKnownPeers"));
+        let msg = err.to_string();
+        // New format: "[deadline] established (20) must be <= known (10)"
+        assert!(
+            msg.contains("[deadline]") && msg.contains("established"),
+            "expected deadline/established in error, got: {msg}"
+        );
     }
 
     #[test]
@@ -1092,7 +1159,12 @@ mod tests {
             ..NodeConfig::default()
         };
         let err = config.validate(Path::new(".")).unwrap_err();
-        assert!(err.to_string().contains("TargetNumberOfEstablishedPeers"));
+        let msg = err.to_string();
+        // New format: "[deadline] active (10) must be <= established (5)"
+        assert!(
+            msg.contains("[deadline]") && msg.contains("active"),
+            "expected deadline/active in error, got: {msg}"
+        );
     }
 
     #[test]
@@ -1103,30 +1175,90 @@ mod tests {
             ..NodeConfig::default()
         };
         let err = config.validate(Path::new(".")).unwrap_err();
-        assert!(err.to_string().contains("BigLedgerPeers"));
+        let msg = err.to_string();
+        // New format: "[deadline] established_big_ledger_peers (10) must be <= known_big_ledger_peers (3)"
+        assert!(
+            msg.contains("[deadline]") && msg.contains("big_ledger_peers"),
+            "expected deadline/big_ledger_peers in error, got: {msg}"
+        );
     }
 
     #[test]
     fn test_validate_genesis_sync_targets() {
+        // Invalid sync targets (established > known) must fail regardless of ConsensusMode.
         let config = NodeConfig {
-            consensus_mode: ConsensusMode::GenesisMode,
             sync_target_number_of_known_peers: 5,
             sync_target_number_of_established_peers: 10,
             ..NodeConfig::default()
         };
         let err = config.validate(Path::new(".")).unwrap_err();
-        assert!(err.to_string().contains("SyncTargetNumberOfKnownPeers"));
+        assert!(
+            err.to_string().contains("[sync]"),
+            "expected [sync] label in error, got: {err}"
+        );
     }
 
     #[test]
-    fn test_validate_sync_targets_skipped_in_praos_mode() {
-        // Same invalid sync targets but in PraosMode — should pass.
+    fn test_validate_sync_targets_always_checked() {
+        // Invalid sync targets must fail in PraosMode too (Haskell validates both
+        // deadline and sync targets unconditionally, not just in GenesisMode).
         let config = NodeConfig {
             consensus_mode: ConsensusMode::PraosMode,
             sync_target_number_of_known_peers: 5,
             sync_target_number_of_established_peers: 10,
             ..NodeConfig::default()
         };
-        assert!(config.validate(Path::new(".")).is_ok());
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("[sync]"),
+            "expected [sync] label in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_root_exceeds_known_fails() {
+        // root > known violates the third ordering invariant.
+        let config = NodeConfig {
+            target_number_of_root_peers: 200,
+            target_number_of_known_peers: 150,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("root"),
+            "expected root in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_active_exceeds_100_fails() {
+        // active > 100 violates the upper-bound safety limit.
+        let config = NodeConfig {
+            target_number_of_active_peers: 101,
+            target_number_of_established_peers: 200,
+            target_number_of_known_peers: 500,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("active") && err.to_string().contains("100"),
+            "expected active/100 in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_blp_upper_bounds() {
+        // established_big_ledger_peers > 1000 violates the upper bound.
+        let config = NodeConfig {
+            target_number_of_active_big_ledger_peers: 5,
+            target_number_of_established_big_ledger_peers: 1001,
+            target_number_of_known_big_ledger_peers: 5000,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("big_ledger_peers") && err.to_string().contains("1000"),
+            "expected big_ledger_peers/1000 in error, got: {err}"
+        );
     }
 }
