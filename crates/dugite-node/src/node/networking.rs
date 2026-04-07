@@ -127,6 +127,12 @@ pub struct LocalRootGroupInfo {
     pub hot_valency: usize,
     /// Target number of warm peers in this group.
     pub warm_valency: usize,
+    /// Per-group diffusion mode override. None = use node-level default.
+    pub diffusion_mode: Option<DiffusionMode>,
+    /// Whether peers in this group are behind a firewall (inbound-only).
+    pub behind_firewall: bool,
+    /// Whether peers in this group can be shared via the peer sharing protocol.
+    pub advertise: bool,
 }
 
 // ─── Announcement Types ──────────────────────────────────────────────────────
@@ -641,6 +647,42 @@ impl NodePeerManager {
             .map(|(addr, _)| *addr)
     }
 
+    /// Get the effective diffusion mode for a specific peer.
+    ///
+    /// If the peer belongs to a local root group with an explicit diffusion mode,
+    /// that override is used. Otherwise, falls back to the node-level config.
+    #[allow(dead_code)] // will be used by P2P governor handshake logic
+    pub fn effective_diffusion_mode(&self, addr: &SocketAddr) -> DiffusionMode {
+        for group in &self.local_root_groups {
+            if group.addrs.contains(addr) {
+                if let Some(mode) = group.diffusion_mode {
+                    return mode;
+                }
+            }
+        }
+        self.config.diffusion_mode
+    }
+
+    /// Whether a peer is behind a firewall (should not initiate outbound connections).
+    #[allow(dead_code)] // will be used by P2P governor connection logic
+    pub fn is_behind_firewall(&self, addr: &SocketAddr) -> bool {
+        self.local_root_groups
+            .iter()
+            .any(|g| g.behind_firewall && g.addrs.contains(addr))
+    }
+
+    /// Whether a peer can be shared via the PeerSharing protocol.
+    /// Returns false for peers in local root groups with advertise=false.
+    #[allow(dead_code)] // will be used by PeerSharing protocol
+    pub fn is_advertisable(&self, addr: &SocketAddr) -> bool {
+        for group in &self.local_root_groups {
+            if group.addrs.contains(addr) {
+                return group.advertise;
+            }
+        }
+        true // non-topology peers are advertisable by default
+    }
+
     /// Summary statistics.
     pub fn stats(&self) -> PeerManagerStats {
         PeerManagerStats {
@@ -680,5 +722,93 @@ impl std::fmt::Display for PeerManagerStats {
             self.duplex,
             self.big_ledger,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_effective_diffusion_mode_per_group() {
+        let mut pm = NodePeerManager::new(PeerManagerConfig {
+            diffusion_mode: DiffusionMode::InitiatorAndResponder,
+            ..PeerManagerConfig::default()
+        });
+
+        let relay: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        let bp_relay: SocketAddr = "10.0.0.1:3001".parse().unwrap();
+        let unknown: SocketAddr = "8.8.8.8:3001".parse().unwrap();
+
+        pm.add_local_root_group(LocalRootGroupInfo {
+            name: "relays".into(),
+            addrs: vec![relay],
+            hot_valency: 1,
+            warm_valency: 1,
+            diffusion_mode: None,
+            behind_firewall: false,
+            advertise: true,
+        });
+        pm.add_local_root_group(LocalRootGroupInfo {
+            name: "bp-relays".into(),
+            addrs: vec![bp_relay],
+            hot_valency: 1,
+            warm_valency: 1,
+            diffusion_mode: Some(DiffusionMode::InitiatorOnly),
+            behind_firewall: false,
+            advertise: false,
+        });
+
+        // Relay inherits node-level default.
+        assert_eq!(
+            pm.effective_diffusion_mode(&relay),
+            DiffusionMode::InitiatorAndResponder
+        );
+        // BP relay uses per-group override.
+        assert_eq!(
+            pm.effective_diffusion_mode(&bp_relay),
+            DiffusionMode::InitiatorOnly
+        );
+        // Unknown peer falls back to node-level.
+        assert_eq!(
+            pm.effective_diffusion_mode(&unknown),
+            DiffusionMode::InitiatorAndResponder
+        );
+    }
+
+    #[test]
+    fn test_behind_firewall_and_advertise() {
+        let mut pm = NodePeerManager::new(PeerManagerConfig::default());
+        let fw_addr: SocketAddr = "10.0.0.1:3001".parse().unwrap();
+        let normal_addr: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        let unknown_addr: SocketAddr = "8.8.8.8:3001".parse().unwrap();
+
+        pm.add_local_root_group(LocalRootGroupInfo {
+            name: "firewall-group".into(),
+            addrs: vec![fw_addr],
+            hot_valency: 1,
+            warm_valency: 1,
+            diffusion_mode: None,
+            behind_firewall: true,
+            advertise: false,
+        });
+        pm.add_local_root_group(LocalRootGroupInfo {
+            name: "normal-group".into(),
+            addrs: vec![normal_addr],
+            hot_valency: 1,
+            warm_valency: 1,
+            diffusion_mode: None,
+            behind_firewall: false,
+            advertise: true,
+        });
+
+        assert!(pm.is_behind_firewall(&fw_addr));
+        assert!(!pm.is_behind_firewall(&normal_addr));
+        assert!(!pm.is_behind_firewall(&unknown_addr));
+
+        assert!(!pm.is_advertisable(&fw_addr));
+        assert!(pm.is_advertisable(&normal_addr));
+        assert!(pm.is_advertisable(&unknown_addr)); // unknown defaults to true
     }
 }
