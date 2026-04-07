@@ -15,6 +15,10 @@ dugite-serialization = { path = "../crates/dugite-serialization" }
 dugite-network = { path = "../crates/dugite-network" }
 dugite-primitives = { path = "../crates/dugite-primitives" }
 dugite-ledger = { path = "../crates/dugite-ledger" }
+dugite-mempool = { path = "../crates/dugite-mempool" }
+dugite-lsm = { path = "../crates/dugite-lsm" }
+tempfile = "3"
+tokio = { version = "1", features = ["rt"] }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -63,4 +67,34 @@ doc = false
 [[bin]]
 name = "fuzz_ledger_snapshot"
 path = "fuzz_targets/ledger_snapshot.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_tx_validation"
+path = "fuzz_targets/tx_validation.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_block_apply"
+path = "fuzz_targets/block_apply.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_lsm_operations"
+path = "fuzz_targets/lsm_operations.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_mempool_admission"
+path = "fuzz_targets/mempool_admission.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_epoch_transition"
+path = "fuzz_targets/epoch_transition.rs"
 doc = false
