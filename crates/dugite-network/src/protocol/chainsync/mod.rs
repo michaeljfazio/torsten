@@ -220,6 +220,10 @@ pub fn decode_message(data: &[u8]) -> Result<ChainSyncMessage, String> {
                     // Legacy / Dugite-to-Dugite: raw bytes fallback.
                     dec.skip().map_err(|e| e.to_string())?;
                 }
+                minicbor::data::Type::Tag => {
+                    // N2C Serialised encoding: tag(24)(bytes(block_cbor)).
+                    dec.skip().map_err(|e| e.to_string())?;
+                }
                 other => {
                     return Err(format!(
                         "ChainSync RollForward: unexpected header type {other:?}"

@@ -1,8 +1,10 @@
 //! LocalChainSync server — serves full blocks to N2C clients.
 //!
 //! Uses the same ChainSync message wire format (tags 0-7) but wraps block data
-//! in HFC era encoding for multi-era support: `[era_id, CBOR_tag_24(block_bytes)]`.
+//! in `Serialised` encoding: `tag(24)(bytes(block_cbor))` (CBOR-in-CBOR).
+//! This matches the Haskell `SerialiseNodeToClient` encoding for `Serialised blk`.
 
+use minicbor::Encoder;
 use tokio::sync::broadcast;
 
 use crate::codec::Point;
@@ -11,6 +13,19 @@ use crate::mux::channel::MuxChannel;
 use crate::protocol::chainsync::server::{BlockAnnouncement, RollbackAnnouncement};
 use crate::protocol::chainsync::{decode_message, encode_message, ChainSyncMessage};
 use crate::BlockProvider;
+
+/// Wrap raw block CBOR in `Serialised` encoding: `tag(24)(bytes(block_cbor))`.
+///
+/// N2C LocalChainSync sends blocks as `Serialised (HardForkBlock xs)` which
+/// uses CBOR-in-CBOR wrapping. The inner bytes are the full multi-era block
+/// CBOR (including era tag) as stored in ChainDB.
+fn wrap_serialised(block_cbor: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(block_cbor.len() + 10);
+    let mut enc = Encoder::new(&mut buf);
+    enc.tag(minicbor::data::Tag::new(24)).expect("infallible");
+    enc.bytes(block_cbor).expect("infallible");
+    buf
+}
 
 /// LocalChainSync server that serves full blocks to N2C clients.
 ///
@@ -155,12 +170,9 @@ impl LocalChainSyncServer {
         {
             let tip = block_provider.get_tip();
 
-            // For LocalChainSync, we send the full block CBOR (not just header).
-            // In a full implementation, this would be wrapped as [era_id, tag24(block_bytes)].
-            // For now, we send the raw block bytes — the wrapping is added in the
-            // node integration layer which knows the era.
+            // N2C sends full blocks wrapped in Serialised encoding: tag(24)(bytes(block_cbor)).
             let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                header: block_cbor,
+                header: wrap_serialised(&block_cbor),
                 tip_slot: tip.slot,
                 tip_hash: tip.hash,
                 tip_block_number: tip.block_number,
@@ -191,7 +203,7 @@ impl LocalChainSyncServer {
                             {
                                 let tip = block_provider.get_tip();
                                 let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                                    header: block_cbor,
+                                    header: wrap_serialised(&block_cbor),
                                     tip_slot: tip.slot,
                                     tip_hash: tip.hash,
                                     tip_block_number: tip.block_number,
@@ -220,7 +232,7 @@ impl LocalChainSyncServer {
                         if let Some(block_cbor) = block_provider.get_block(&ann.hash) {
                             let tip = block_provider.get_tip();
                             let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                                header: block_cbor,
+                                header: wrap_serialised(&block_cbor),
                                 tip_slot: tip.slot,
                                 tip_hash: tip.hash,
                                 tip_block_number: tip.block_number,
@@ -238,7 +250,7 @@ impl LocalChainSyncServer {
                         {
                             let tip = block_provider.get_tip();
                             let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                                header: block_cbor,
+                                header: wrap_serialised(&block_cbor),
                                 tip_slot: tip.slot,
                                 tip_hash: tip.hash,
                                 tip_block_number: tip.block_number,
@@ -699,8 +711,8 @@ mod tests {
         let msg = recv_msg(&mut egress_rx).await;
         match msg {
             ChainSyncMessage::MsgRollForward { header, .. } => {
-                // LocalChainSync sends full block CBOR (not just header).
-                assert_eq!(header, block_b_cbor);
+                // LocalChainSync wraps blocks in Serialised encoding: tag(24)(bytes(cbor)).
+                assert_eq!(header, wrap_serialised(&block_b_cbor));
             }
             other => panic!("expected MsgRollForward, got {other:?}"),
         }
@@ -747,7 +759,7 @@ mod tests {
             let msg = recv_msg(&mut egress_rx).await;
             match msg {
                 ChainSyncMessage::MsgRollForward { header, .. } => {
-                    assert_eq!(&header, expected);
+                    assert_eq!(header, wrap_serialised(expected));
                 }
                 other => panic!("expected MsgRollForward, got {other:?}"),
             }
@@ -784,8 +796,9 @@ mod tests {
         match msg {
             ChainSyncMessage::MsgRollForward { header, .. } => {
                 assert_eq!(
-                    header, full_block,
-                    "LocalChainSync must send full block CBOR, not extracted header"
+                    header,
+                    wrap_serialised(&full_block),
+                    "LocalChainSync must send Serialised-wrapped full block CBOR"
                 );
             }
             other => panic!("expected MsgRollForward, got {other:?}"),
@@ -1004,7 +1017,7 @@ mod tests {
         let msg = recv_msg(&mut egress_rx).await;
         match msg {
             ChainSyncMessage::MsgRollForward { header, .. } => {
-                assert_eq!(header, new_block_cbor);
+                assert_eq!(header, wrap_serialised(&new_block_cbor));
             }
             other => panic!("expected MsgRollForward after announcement, got {other:?}"),
         }
