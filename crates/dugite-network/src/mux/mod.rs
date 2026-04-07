@@ -278,8 +278,14 @@ impl<B: Bearer> Mux<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bearer::tcp::TcpBearer;
     use crate::bearer::MockBearer;
     use crate::mux::segment::encode_header;
+    use crate::protocol::keepalive::client::KeepAliveClient;
+    use crate::protocol::keepalive::server::KeepAliveServer;
+    use crate::protocol::PROTOCOL_N2N_KEEPALIVE;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     /// Build a mock bearer pre-loaded with raw SDU data for ingress testing.
     fn build_mock_bearer_with_sdus(sdus: Vec<(u16, Direction, Vec<u8>)>) -> MockBearer {
@@ -335,5 +341,177 @@ mod tests {
         let result = mux_handle.await.unwrap();
         // It's OK if this returns an error due to the bearer closing
         let _ = result;
+    }
+
+    /// Duplex KeepAlive integration test.
+    ///
+    /// Exercises a real TCP loopback connection with a full Mux instance on each
+    /// side, each running both a KeepAlive CLIENT and a KeepAlive SERVER
+    /// simultaneously. This is the duplex configuration matching `PeerConnection`
+    /// where client and server use different direction slots to avoid collisions.
+    ///
+    /// ## Direction assignment (no collision)
+    ///
+    /// Each side subscribes BOTH directions for protocol 8, assigning one to the
+    /// client and the other to the server:
+    ///
+    /// ```text
+    /// Side A (TCP initiator, outbound):
+    ///   (8, InitiatorDir) → A's CLIENT (sends pings, receives pongs)
+    ///   (8, ResponderDir)  → A's SERVER (receives B's pings, sends pongs)
+    ///
+    /// Side B (TCP responder, inbound):
+    ///   (8, ResponderDir)  → B's SERVER (receives A's pings, sends pongs)
+    ///   (8, InitiatorDir) → B's CLIENT (sends pings, receives pongs)
+    /// ```
+    ///
+    /// ## Message flow (A→B)
+    ///
+    /// ```text
+    /// A client sends on InitiatorDir → wire=InitiatorDir
+    /// B ingress flips: InitiatorDir → ResponderDir → B's (8, ResponderDir) = B's server ✓
+    /// B server sends pong on ResponderDir → wire=ResponderDir
+    /// A ingress flips: ResponderDir → InitiatorDir → A's (8, InitiatorDir) = A's client ✓
+    /// ```
+    ///
+    /// ## Message flow (B→A)
+    ///
+    /// ```text
+    /// B client sends on InitiatorDir → wire=InitiatorDir
+    /// A ingress flips: InitiatorDir → ResponderDir → A's (8, ResponderDir) = A's server ✓
+    /// A server sends pong on ResponderDir → wire=ResponderDir
+    /// B ingress flips: ResponderDir → InitiatorDir → B's (8, InitiatorDir) = B's client ✓
+    /// ```
+    ///
+    /// No direction collisions: each `(protocol_id, direction)` key is subscribed
+    /// exactly once per mux instance.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplex_keepalive_both_sides_receive_pongs() {
+        // ── 1. Real TCP loopback connection ───────────────────────────────────
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind TCP listener");
+        let addr = listener.local_addr().expect("no local addr");
+
+        let (stream_a, stream_b) = tokio::join!(
+            async {
+                tokio::net::TcpStream::connect(addr)
+                    .await
+                    .expect("TcpStream::connect failed")
+            },
+            async {
+                let (stream, _peer_addr) = listener.accept().await.expect("accept failed");
+                stream
+            }
+        );
+
+        let bearer_a = TcpBearer::new(stream_a).expect("TcpBearer for side A");
+        let bearer_b = TcpBearer::new(stream_b).expect("TcpBearer for side B");
+
+        // ── 2. Mux instances ─────────────────────────────────────────────────
+        let mut mux_a = Mux::new(bearer_a, true /* TCP initiator */);
+        let mut mux_b = Mux::new(bearer_b, false /* TCP responder */);
+
+        // ── 3. Subscribe protocol 8 (KeepAlive) channels ─────────────────────
+        //
+        // Correct duplex assignment: client and server use DIFFERENT directions
+        // on each side. This matches PeerConnection::connect/accept where:
+        //   outbound: client=InitiatorDir, server=ResponderDir
+        //   inbound:  server=ResponderDir, client=InitiatorDir
+        //
+        // No HashMap collisions — each (protocol_id, direction) key is unique.
+
+        // Side A: client on InitiatorDir, server on ResponderDir
+        let mut a_client_ch =
+            mux_a.subscribe(PROTOCOL_N2N_KEEPALIVE, Direction::InitiatorDir, 65536);
+        let mut a_server_ch =
+            mux_a.subscribe(PROTOCOL_N2N_KEEPALIVE, Direction::ResponderDir, 65536);
+
+        // Side B: server on ResponderDir, client on InitiatorDir
+        let mut b_server_ch =
+            mux_b.subscribe(PROTOCOL_N2N_KEEPALIVE, Direction::ResponderDir, 65536);
+        let mut b_client_ch =
+            mux_b.subscribe(PROTOCOL_N2N_KEEPALIVE, Direction::InitiatorDir, 65536);
+
+        // ── 4. Run both Mux instances ────────────────────────────────────────
+        tokio::spawn(async move {
+            let _ = mux_a.run().await;
+        });
+        tokio::spawn(async move {
+            let _ = mux_b.run().await;
+        });
+
+        // ── 5. RTT reporting channels ────────────────────────────────────────
+        let (a_rtt_tx, mut a_rtt_rx) = tokio::sync::mpsc::channel::<f64>(16);
+        let (b_rtt_tx, mut b_rtt_rx) = tokio::sync::mpsc::channel::<f64>(16);
+
+        // ── 6. Cancellation tokens ───────────────────────────────────────────
+        let cancel_a = CancellationToken::new();
+        let cancel_b = CancellationToken::new();
+
+        // ── 7. Spawn KeepAlive SERVERS ───────────────────────────────────────
+        //
+        // Servers are started before clients so they are ready to echo pings
+        // before the first MsgKeepAlive arrives on the channel.
+        tokio::spawn(async move {
+            let _ = KeepAliveServer::run(&mut a_server_ch).await;
+        });
+        tokio::spawn(async move {
+            let _ = KeepAliveServer::run(&mut b_server_ch).await;
+        });
+
+        // ── 8. Spawn KeepAlive CLIENTS ───────────────────────────────────────
+        //
+        // 5-second ping interval: the test window is 15 seconds, so each client
+        // attempts at least two pings.
+        let cancel_a_clone = cancel_a.clone();
+        let a_client_handle = tokio::spawn(async move {
+            let client = KeepAliveClient::new(Duration::from_secs(5), cancel_a_clone)
+                .with_rtt_sender(a_rtt_tx);
+            client.run(&mut a_client_ch).await
+        });
+
+        let cancel_b_clone = cancel_b.clone();
+        let b_client_handle = tokio::spawn(async move {
+            let client = KeepAliveClient::new(Duration::from_secs(5), cancel_b_clone)
+                .with_rtt_sender(b_rtt_tx);
+            client.run(&mut b_client_ch).await
+        });
+
+        // ── 9. Wait up to 15 seconds for at least one pong on each side ──────
+        let a_pong_result = tokio::time::timeout(Duration::from_secs(15), a_rtt_rx.recv()).await;
+        let b_pong_result = tokio::time::timeout(Duration::from_secs(15), b_rtt_rx.recv()).await;
+
+        // Cancel both clients for a graceful shutdown.
+        cancel_a.cancel();
+        cancel_b.cancel();
+
+        // Allow time for MsgDone to be sent and the client tasks to unwind.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // ── 10. Assert both sides received at least one pong ─────────────────
+        assert!(
+            a_pong_result.is_ok() && a_pong_result.unwrap().is_some(),
+            "side A (TCP initiator) KeepAlive CLIENT received no pong within 15 s"
+        );
+        assert!(
+            b_pong_result.is_ok() && b_pong_result.unwrap().is_some(),
+            "side B (TCP acceptor) KeepAlive CLIENT received no pong within 15 s"
+        );
+
+        // Confirm that both client tasks exited without a protocol error.
+        let a_result = a_client_handle.await.expect("side A client task panicked");
+        let b_result = b_client_handle.await.expect("side B client task panicked");
+
+        assert!(
+            a_result.is_ok(),
+            "side A KeepAlive client exited with error: {:?}",
+            a_result.unwrap_err()
+        );
+        assert!(
+            b_result.is_ok(),
+            "side B KeepAlive client exited with error: {:?}",
+            b_result.unwrap_err()
+        );
     }
 }

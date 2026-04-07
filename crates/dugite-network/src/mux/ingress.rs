@@ -143,7 +143,8 @@ impl IngressTask {
             let local_direction = header.direction.flip();
             let key = (header.protocol_id, local_direction);
 
-            tracing::trace!(
+            // Temporarily log ALL SDU routing at debug for duplex diagnostics.
+            tracing::debug!(
                 protocol_id = header.protocol_id,
                 wire_direction = ?header.direction,
                 local_direction = ?local_direction,
