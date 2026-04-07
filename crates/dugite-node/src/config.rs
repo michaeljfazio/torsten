@@ -6,6 +6,45 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::path::Path;
 
+/// Consensus protocol mode.
+///
+/// Matches cardano-node's `ConsensusMode`:
+/// - `PraosMode`: Standard Ouroboros Praos operation.
+/// - `GenesisMode`: Enables Ouroboros Genesis for trustless bulk sync.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConsensusMode {
+    /// Standard Ouroboros Praos operation.
+    #[default]
+    PraosMode,
+    /// Ouroboros Genesis for trustless bulk sync from untrusted peers.
+    GenesisMode,
+}
+
+/// Inbound connection limits (matches Haskell AcceptedConnectionsLimit).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedConnectionsLimit {
+    /// Refuse new inbound connections beyond this count.
+    #[serde(default = "default_hard_limit")]
+    pub accepted_connections_hard_limit: u32,
+    /// Start delaying new connections at this count.
+    #[serde(default = "default_soft_limit")]
+    pub accepted_connections_soft_limit: u32,
+    /// Delay in seconds applied to connections above soft limit.
+    #[serde(default = "default_conn_delay")]
+    pub accepted_connections_delay: u32,
+}
+
+impl Default for AcceptedConnectionsLimit {
+    fn default() -> Self {
+        Self {
+            accepted_connections_hard_limit: 512,
+            accepted_connections_soft_limit: 384,
+            accepted_connections_delay: 5,
+        }
+    }
+}
+
 /// Diffusion mode — controls whether the node accepts inbound N2N connections.
 ///
 /// Matches cardano-node's `DiffusionMode` config field:
@@ -191,6 +230,53 @@ pub struct NodeConfig {
     /// Must remain false on mainnet unless instructed otherwise.
     #[serde(default)]
     pub experimental_hard_forks_enabled: bool,
+
+    /// Consensus protocol mode (PraosMode or GenesisMode).
+    #[serde(default)]
+    pub consensus_mode: ConsensusMode,
+
+    // ── Genesis mode sync targets ──────────────────────────────────────
+    /// Active peers during Genesis bulk sync (default: 0).
+    #[serde(default)]
+    pub sync_target_number_of_active_peers: usize,
+    /// Established peers during Genesis bulk sync (default: 0).
+    #[serde(default)]
+    pub sync_target_number_of_established_peers: usize,
+    /// Known peers during Genesis bulk sync (default: 0).
+    #[serde(default)]
+    pub sync_target_number_of_known_peers: usize,
+    /// Root peers during Genesis bulk sync (default: 0).
+    #[serde(default)]
+    pub sync_target_number_of_root_peers: usize,
+    /// Active big ledger peers during Genesis bulk sync (default: 30).
+    #[serde(default = "default_sync_active_blp")]
+    pub sync_target_number_of_active_big_ledger_peers: usize,
+    /// Established big ledger peers during Genesis bulk sync (default: 50).
+    #[serde(default = "default_sync_established_blp")]
+    pub sync_target_number_of_established_big_ledger_peers: usize,
+    /// Known big ledger peers during Genesis bulk sync (default: 100).
+    #[serde(default = "default_sync_known_blp")]
+    pub sync_target_number_of_known_big_ledger_peers: usize,
+    /// Pause sync if active BLPs drop below this (Genesis safety gate, default: 5).
+    #[serde(default = "default_min_blp_trusted")]
+    pub min_big_ledger_peers_for_trusted_state: usize,
+
+    // ── Connection management ──────────────────────────────────────────
+    /// Inbound connection limits (hard/soft/delay).
+    #[serde(default)]
+    pub accepted_connections_limit: Option<AcceptedConnectionsLimit>,
+    /// Time before idle mini-protocol connection is pruned (seconds, default: 5).
+    #[serde(default = "default_protocol_idle_timeout")]
+    pub protocol_idle_timeout: u64,
+    /// Connection TIME_WAIT duration after close (seconds, default: 60).
+    #[serde(default = "default_time_wait_timeout")]
+    pub time_wait_timeout: u64,
+    /// Outbound governor poll interval (seconds, default: 10).
+    #[serde(default = "default_egress_poll_interval")]
+    pub egress_poll_interval: u64,
+    /// ChainSync-specific idle timeout (seconds, 0 = no timeout).
+    #[serde(default)]
+    pub chain_sync_idle_timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -265,6 +351,46 @@ fn default_stall_demotion_cycles() -> u32 {
 
 fn default_error_demotion_threshold() -> u32 {
     5 // 5 accumulated failures triggers demotion
+}
+
+fn default_hard_limit() -> u32 {
+    512
+}
+
+fn default_soft_limit() -> u32 {
+    384
+}
+
+fn default_conn_delay() -> u32 {
+    5
+}
+
+fn default_sync_active_blp() -> usize {
+    30
+}
+
+fn default_sync_established_blp() -> usize {
+    50
+}
+
+fn default_sync_known_blp() -> usize {
+    100
+}
+
+fn default_min_blp_trusted() -> usize {
+    5
+}
+
+fn default_protocol_idle_timeout() -> u64 {
+    5
+}
+
+fn default_time_wait_timeout() -> u64 {
+    60
+}
+
+fn default_egress_poll_interval() -> u64 {
+    10
 }
 
 fn default_min_severity() -> String {
@@ -450,6 +576,20 @@ impl Default for NodeConfig {
             stall_demotion_cycles: default_stall_demotion_cycles(),
             error_demotion_threshold: default_error_demotion_threshold(),
             experimental_hard_forks_enabled: false,
+            consensus_mode: ConsensusMode::default(),
+            sync_target_number_of_active_peers: 0,
+            sync_target_number_of_established_peers: 0,
+            sync_target_number_of_known_peers: 0,
+            sync_target_number_of_root_peers: 0,
+            sync_target_number_of_active_big_ledger_peers: default_sync_active_blp(),
+            sync_target_number_of_established_big_ledger_peers: default_sync_established_blp(),
+            sync_target_number_of_known_big_ledger_peers: default_sync_known_blp(),
+            min_big_ledger_peers_for_trusted_state: default_min_blp_trusted(),
+            accepted_connections_limit: None,
+            protocol_idle_timeout: default_protocol_idle_timeout(),
+            time_wait_timeout: default_time_wait_timeout(),
+            egress_poll_interval: default_egress_poll_interval(),
+            chain_sync_idle_timeout: None,
         }
     }
 }
@@ -710,5 +850,87 @@ mod tests {
             ..NodeConfig::default()
         };
         assert!(config.effective_peer_sharing(true));
+    }
+
+    // ── ConsensusMode config field ──────────────────────────────────────────
+
+    #[test]
+    fn test_consensus_mode_default() {
+        let config = NodeConfig::default();
+        assert_eq!(config.consensus_mode, ConsensusMode::PraosMode);
+    }
+
+    #[test]
+    fn test_consensus_mode_genesis_from_json() {
+        let json = r#"{"ConsensusMode": "GenesisMode"}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.consensus_mode, ConsensusMode::GenesisMode);
+    }
+
+    // ── Genesis sync targets ────────────────────────────────────────────────
+
+    #[test]
+    fn test_sync_targets_from_json() {
+        let json = r#"{
+            "SyncTargetNumberOfActiveBigLedgerPeers": 25,
+            "MinBigLedgerPeersForTrustedState": 10
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.sync_target_number_of_active_big_ledger_peers, 25);
+        assert_eq!(config.min_big_ledger_peers_for_trusted_state, 10);
+    }
+
+    // ── AcceptedConnectionsLimit ────────────────────────────────────────────
+
+    #[test]
+    fn test_accepted_connections_limit_from_json() {
+        let json = r#"{
+            "AcceptedConnectionsLimit": {
+                "acceptedConnectionsHardLimit": 256,
+                "acceptedConnectionsSoftLimit": 200,
+                "acceptedConnectionsDelay": 2
+            }
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        let limit = config.accepted_connections_limit.unwrap();
+        assert_eq!(limit.accepted_connections_hard_limit, 256);
+        assert_eq!(limit.accepted_connections_soft_limit, 200);
+        assert_eq!(limit.accepted_connections_delay, 2);
+    }
+
+    // ── Connection timeouts ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_connection_timeouts_from_json() {
+        let json = r#"{
+            "ProtocolIdleTimeout": 10,
+            "TimeWaitTimeout": 120,
+            "EgressPollInterval": 20
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.protocol_idle_timeout, 10);
+        assert_eq!(config.time_wait_timeout, 120);
+        assert_eq!(config.egress_poll_interval, 20);
+    }
+
+    // ── All new fields absent → defaults ────────────────────────────────────
+
+    #[test]
+    fn test_new_config_fields_absent_use_defaults() {
+        let json = r#"{}"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.consensus_mode, ConsensusMode::PraosMode);
+        assert_eq!(config.sync_target_number_of_active_big_ledger_peers, 30);
+        assert_eq!(
+            config.sync_target_number_of_established_big_ledger_peers,
+            50
+        );
+        assert_eq!(config.sync_target_number_of_known_big_ledger_peers, 100);
+        assert_eq!(config.min_big_ledger_peers_for_trusted_state, 5);
+        assert_eq!(config.protocol_idle_timeout, 5);
+        assert_eq!(config.time_wait_timeout, 60);
+        assert_eq!(config.egress_poll_interval, 10);
+        assert!(config.accepted_connections_limit.is_none());
+        assert!(config.chain_sync_idle_timeout.is_none());
     }
 }
