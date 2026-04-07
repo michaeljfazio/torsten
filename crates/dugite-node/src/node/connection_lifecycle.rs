@@ -1304,8 +1304,7 @@ impl ConnectionLifecycleManager {
                             if let Ok(tx) =
                                 dugite_serialization::decode_transaction(era_id, &tx_bytes)
                             {
-                                let hash =
-                                    dugite_primitives::hash::Hash32::from_bytes(tx_hash);
+                                let hash = dugite_primitives::hash::Hash32::from_bytes(tx_hash);
                                 if tx_mempool.add_tx(hash, tx, size_bytes).is_ok() {
                                     tx_metrics
                                         .transactions_validated

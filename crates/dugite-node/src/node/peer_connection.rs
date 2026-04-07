@@ -592,22 +592,16 @@ impl PeerConnection {
             .blockfetch_server_channel
             .take()
             .ok_or(PeerConnectionError::ChannelUnavailable("blockfetch_server"))?;
-        let tx_ch = self
-            .txsubmission_server_channel
-            .take()
-            .ok_or(PeerConnectionError::ChannelUnavailable(
-                "txsubmission_server",
-            ))?;
+        let tx_ch = self.txsubmission_server_channel.take().ok_or(
+            PeerConnectionError::ChannelUnavailable("txsubmission_server"),
+        )?;
         let ka_ch = self
             .keepalive_server_channel
             .take()
             .ok_or(PeerConnectionError::ChannelUnavailable("keepalive_server"))?;
-        let ps_ch = self
-            .peersharing_server_channel
-            .take()
-            .ok_or(PeerConnectionError::ChannelUnavailable(
-                "peersharing_server",
-            ))?;
+        let ps_ch = self.peersharing_server_channel.take().ok_or(
+            PeerConnectionError::ChannelUnavailable("peersharing_server"),
+        )?;
 
         // Spawn ChainSync server task.
         let cs_token = self.cancel.child_token();

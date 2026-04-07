@@ -1948,8 +1948,9 @@ impl Node {
         }
         // Channel for the N2N listener to send accepted+handshaked connections
         // to the main run loop for lifecycle manager registration.
-        let (inbound_accept_tx, mut inbound_accept_rx) =
-            tokio::sync::mpsc::channel::<Result<(std::net::SocketAddr, PeerConnection, f64), (std::net::SocketAddr, String)>>(32);
+        let (inbound_accept_tx, mut inbound_accept_rx) = tokio::sync::mpsc::channel::<
+            Result<(std::net::SocketAddr, PeerConnection, f64), (std::net::SocketAddr, String)>,
+        >(32);
 
         if self.config.diffusion_mode == crate::config::DiffusionMode::InitiatorAndResponder {
             let n2n_listen_addr = self.listen_addr;
