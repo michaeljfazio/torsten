@@ -21,26 +21,41 @@ pub enum ConsensusMode {
 }
 
 /// Inbound connection limits (matches Haskell AcceptedConnectionsLimit).
+///
+/// Haskell's hand-written `FromJSON` instance uses short keys (`hardLimit`,
+/// `softLimit`, `delay`).  We expose those as the primary names and accept the
+/// old long camelCase names as aliases for backward compatibility.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AcceptedConnectionsLimit {
     /// Refuse new inbound connections beyond this count.
-    #[serde(default = "default_hard_limit")]
-    pub accepted_connections_hard_limit: u32,
+    #[serde(
+        alias = "acceptedConnectionsHardLimit",
+        rename = "hardLimit",
+        default = "default_hard_limit"
+    )]
+    pub hard_limit: u32,
     /// Start delaying new connections at this count.
-    #[serde(default = "default_soft_limit")]
-    pub accepted_connections_soft_limit: u32,
-    /// Delay in seconds applied to connections above soft limit.
-    #[serde(default = "default_conn_delay")]
-    pub accepted_connections_delay: u32,
+    #[serde(
+        alias = "acceptedConnectionsSoftLimit",
+        rename = "softLimit",
+        default = "default_soft_limit"
+    )]
+    pub soft_limit: u32,
+    /// Max delay in seconds applied to connections above soft limit.
+    #[serde(
+        alias = "acceptedConnectionsDelay",
+        rename = "delay",
+        default = "default_conn_delay"
+    )]
+    pub delay: f64,
 }
 
 impl Default for AcceptedConnectionsLimit {
     fn default() -> Self {
         Self {
-            accepted_connections_hard_limit: 512,
-            accepted_connections_soft_limit: 384,
-            accepted_connections_delay: 5,
+            hard_limit: 512,
+            soft_limit: 384,
+            delay: 5.0,
         }
     }
 }
@@ -370,8 +385,8 @@ fn default_soft_limit() -> u32 {
     384
 }
 
-fn default_conn_delay() -> u32 {
-    5
+fn default_conn_delay() -> f64 {
+    5.0
 }
 
 fn default_sync_active_peers() -> usize {
@@ -972,18 +987,36 @@ mod tests {
 
     #[test]
     fn test_accepted_connections_limit_from_json() {
+        // Short keys matching Haskell's hand-written FromJSON instance.
         let json = r#"{
             "AcceptedConnectionsLimit": {
-                "acceptedConnectionsHardLimit": 256,
-                "acceptedConnectionsSoftLimit": 200,
-                "acceptedConnectionsDelay": 2
+                "hardLimit": 256,
+                "softLimit": 200,
+                "delay": 2.0
             }
         }"#;
         let config: NodeConfig = serde_json::from_str(json).unwrap();
         let limit = config.accepted_connections_limit.unwrap();
-        assert_eq!(limit.accepted_connections_hard_limit, 256);
-        assert_eq!(limit.accepted_connections_soft_limit, 200);
-        assert_eq!(limit.accepted_connections_delay, 2);
+        assert_eq!(limit.hard_limit, 256);
+        assert_eq!(limit.soft_limit, 200);
+        assert!((limit.delay - 2.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_accepted_connections_limit_backward_compat_aliases() {
+        // Old long camelCase keys must still parse via serde aliases.
+        let json = r#"{
+            "AcceptedConnectionsLimit": {
+                "acceptedConnectionsHardLimit": 300,
+                "acceptedConnectionsSoftLimit": 250,
+                "acceptedConnectionsDelay": 3
+            }
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        let limit = config.accepted_connections_limit.unwrap();
+        assert_eq!(limit.hard_limit, 300);
+        assert_eq!(limit.soft_limit, 250);
+        assert!((limit.delay - 3.0_f64).abs() < f64::EPSILON);
     }
 
     // ── Connection timeouts ─────────────────────────────────────────────────
