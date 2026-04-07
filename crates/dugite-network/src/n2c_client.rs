@@ -780,24 +780,25 @@ fn strip_msg_result(decoder: &mut minicbor::Decoder) -> Result<(), NetworkError>
     Ok(())
 }
 
-/// Strip the HardFork Combinator success wrapper `[1, result]`.
+/// Strip the HardFork Combinator EitherMismatch success wrapper `[result]`.
 ///
-/// BlockQuery results from the server are wrapped: `[1, actual_result]`.
-/// After stripping, the decoder is positioned at `actual_result`.
-/// If the response is unwrapped, the position is reset so the caller
-/// can parse directly.
+/// BlockQuery QueryIfCurrent results are wrapped in an array(1): `[result]`.
+/// The HFC uses array length as discriminator: 1 = success, 2 = era mismatch.
+/// After stripping, the decoder is positioned at the actual result.
+/// If the response is unwrapped (non-BlockQuery), the position is reset
+/// so the caller can parse directly.
 fn strip_hfc_wrapper(decoder: &mut minicbor::Decoder) -> Result<(), NetworkError> {
     let pos = decoder.position();
     match decoder.array() {
+        Ok(Some(1)) => {
+            // HFC success: array(1) containing the result — decoder is now at the result
+            Ok(())
+        }
         Ok(Some(2)) => {
-            // Read the HFC tag (should be 1 for success)
-            match decoder.u64() {
-                Ok(1) => Ok(()), // success — decoder is now at the actual result
-                _ => {
-                    decoder.set_position(pos);
-                    Ok(())
-                }
-            }
+            // HFC era mismatch: array(2) [query_era, ledger_era]
+            // This shouldn't happen in normal operation; reset and let caller handle.
+            decoder.set_position(pos);
+            Ok(())
         }
         _ => {
             decoder.set_position(pos);
