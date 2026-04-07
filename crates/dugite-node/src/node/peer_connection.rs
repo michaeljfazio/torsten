@@ -95,27 +95,48 @@ pub struct PeerConnection {
     /// Cardano network magic (e.g. 2 for preview, 764824073 for mainnet).
     pub network_magic: u64,
 
-    // ── Protocol channels ──
+    // ── Client protocol channels ──
     // Created during mux setup, taken when protocol tasks start.
     // `None` means the channel is currently in use by a running task.
-    /// ChainSync channel (protocol 2, InitiatorDir for outbound connections).
-    pub(crate) chainsync_channel: Option<MuxChannel>,
+    // For outbound connections: subscribed on InitiatorDir.
+    // For inbound connections: subscribed on InitiatorDir (we act as client on initiator's direction).
+    /// ChainSync client channel (protocol 2).
+    pub(crate) chainsync_client_channel: Option<MuxChannel>,
 
-    /// BlockFetch channel (protocol 3, InitiatorDir for outbound connections).
-    pub(crate) blockfetch_channel: Option<MuxChannel>,
+    /// BlockFetch client channel (protocol 3).
+    pub(crate) blockfetch_client_channel: Option<MuxChannel>,
 
-    /// TxSubmission2 channel (protocol 4, InitiatorDir for outbound connections).
-    pub(crate) txsubmission_channel: Option<MuxChannel>,
+    /// TxSubmission2 client channel (protocol 4).
+    pub(crate) txsubmission_client_channel: Option<MuxChannel>,
 
-    /// KeepAlive channel (protocol 8, InitiatorDir for outbound connections).
-    pub(crate) keepalive_channel: Option<MuxChannel>,
+    /// KeepAlive client channel (protocol 8).
+    pub(crate) keepalive_client_channel: Option<MuxChannel>,
 
-    /// PeerSharing channel (protocol 10). Reserved for future use.
+    /// PeerSharing client channel (protocol 10). Reserved for future use.
     /// In Haskell, PeerSharing responder starts on-demand when the remote peer
     /// sends a MsgShareRequest. The initiator sends requests periodically from
     /// the Governor. Currently subscribed but no task is spawned for it —
     /// PeerSharing integration is tracked separately.
-    pub(crate) peersharing_channel: Option<MuxChannel>,
+    pub(crate) peersharing_client_channel: Option<MuxChannel>,
+
+    // ── Server protocol channels ──
+    // Only populated when `initiator_only=false` (duplex mode).
+    // For outbound connections: subscribed on ResponderDir (remote initiates, we respond).
+    // For inbound connections: subscribed on ResponderDir (remote initiates, we respond).
+    /// ChainSync server channel (protocol 2, ResponderDir). Only set in duplex mode.
+    pub(crate) chainsync_server_channel: Option<MuxChannel>,
+
+    /// BlockFetch server channel (protocol 3, ResponderDir). Only set in duplex mode.
+    pub(crate) blockfetch_server_channel: Option<MuxChannel>,
+
+    /// TxSubmission2 server channel (protocol 4, ResponderDir). Only set in duplex mode.
+    pub(crate) txsubmission_server_channel: Option<MuxChannel>,
+
+    /// KeepAlive server channel (protocol 8, ResponderDir). Only set in duplex mode.
+    pub(crate) keepalive_server_channel: Option<MuxChannel>,
+
+    /// PeerSharing server channel (protocol 10, ResponderDir). Only set in duplex mode.
+    pub(crate) peersharing_server_channel: Option<MuxChannel>,
 
     // ── Mux lifecycle ──
     /// Handle to the spawned mux task. When this completes, the connection is dead.
@@ -130,6 +151,10 @@ pub struct PeerConnection {
 
     /// Hot-temperature protocol tasks (ChainSync, BlockFetch, TxSubmission2).
     hot_tasks: Vec<(JoinHandle<()>, CancellationToken)>,
+
+    /// Server protocol tasks (ChainSync, BlockFetch, TxSubmission2, KeepAlive, PeerSharing responders).
+    /// Only populated when running in duplex mode (`initiator_only=false`).
+    server_tasks: Vec<(JoinHandle<()>, CancellationToken)>,
 }
 
 /// A boxed future type for protocol task factories.
@@ -188,32 +213,69 @@ impl PeerConnection {
             DEFAULT_INGRESS_LIMIT,
         );
 
-        // Subscribe all N2N protocol channels on InitiatorDir.
-        let chainsync_ch = mux.subscribe(
+        // Subscribe all N2N client protocol channels on InitiatorDir.
+        // For outbound connections, we are the TCP initiator so our client
+        // protocols use InitiatorDir.
+        let chainsync_client_ch = mux.subscribe(
             PROTOCOL_N2N_CHAINSYNC,
             Direction::InitiatorDir,
             DEFAULT_INGRESS_LIMIT,
         );
-        let blockfetch_ch = mux.subscribe(
+        let blockfetch_client_ch = mux.subscribe(
             PROTOCOL_N2N_BLOCKFETCH,
             Direction::InitiatorDir,
             DEFAULT_INGRESS_LIMIT,
         );
-        let txsubmission_ch = mux.subscribe(
+        let txsubmission_client_ch = mux.subscribe(
             PROTOCOL_N2N_TXSUBMISSION,
             Direction::InitiatorDir,
             DEFAULT_INGRESS_LIMIT,
         );
-        let keepalive_ch = mux.subscribe(
+        let keepalive_client_ch = mux.subscribe(
             PROTOCOL_N2N_KEEPALIVE,
             Direction::InitiatorDir,
             DEFAULT_INGRESS_LIMIT,
         );
-        let peersharing_ch = mux.subscribe(
+        let peersharing_client_ch = mux.subscribe(
             PROTOCOL_N2N_PEERSHARING,
             Direction::InitiatorDir,
             DEFAULT_INGRESS_LIMIT,
         );
+
+        // In duplex mode, also subscribe ResponderDir channels for server protocols.
+        // The mux flips direction on ingress: remote's InitiatorDir messages arrive
+        // on our ResponderDir. So when the remote peer acts as client (InitiatorDir),
+        // we serve on ResponderDir.
+        let (cs_srv, bf_srv, tx_srv, ka_srv, ps_srv) = if !initiator_only {
+            let cs = mux.subscribe(
+                PROTOCOL_N2N_CHAINSYNC,
+                Direction::ResponderDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            let bf = mux.subscribe(
+                PROTOCOL_N2N_BLOCKFETCH,
+                Direction::ResponderDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            let tx = mux.subscribe(
+                PROTOCOL_N2N_TXSUBMISSION,
+                Direction::ResponderDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            let ka = mux.subscribe(
+                PROTOCOL_N2N_KEEPALIVE,
+                Direction::ResponderDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            let ps = mux.subscribe(
+                PROTOCOL_N2N_PEERSHARING,
+                Direction::ResponderDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            (Some(cs), Some(bf), Some(tx), Some(ka), Some(ps))
+        } else {
+            (None, None, None, None, None)
+        };
 
         // Spawn mux task — runs until bearer closes or error.
         let cancel = CancellationToken::new();
@@ -232,15 +294,21 @@ impl PeerConnection {
             addr,
             version,
             network_magic,
-            chainsync_channel: Some(chainsync_ch),
-            blockfetch_channel: Some(blockfetch_ch),
-            txsubmission_channel: Some(txsubmission_ch),
-            keepalive_channel: Some(keepalive_ch),
-            peersharing_channel: Some(peersharing_ch),
+            chainsync_client_channel: Some(chainsync_client_ch),
+            blockfetch_client_channel: Some(blockfetch_client_ch),
+            txsubmission_client_channel: Some(txsubmission_client_ch),
+            keepalive_client_channel: Some(keepalive_client_ch),
+            peersharing_client_channel: Some(peersharing_client_ch),
+            chainsync_server_channel: cs_srv,
+            blockfetch_server_channel: bf_srv,
+            txsubmission_server_channel: tx_srv,
+            keepalive_server_channel: ka_srv,
+            peersharing_server_channel: ps_srv,
             mux_handle,
             cancel,
             warm_tasks: Vec::new(),
             hot_tasks: Vec::new(),
+            server_tasks: Vec::new(),
         })
     }
 
@@ -280,32 +348,70 @@ impl PeerConnection {
             DEFAULT_INGRESS_LIMIT,
         );
 
-        // Subscribe all N2N protocol channels on ResponderDir.
-        let chainsync_ch = mux.subscribe(
+        // Subscribe all N2N server protocol channels on ResponderDir.
+        // For inbound connections, we are the TCP responder. The remote peer's
+        // InitiatorDir messages arrive on our ResponderDir, so our server
+        // protocols use ResponderDir.
+        let chainsync_server_ch = mux.subscribe(
             PROTOCOL_N2N_CHAINSYNC,
             Direction::ResponderDir,
             DEFAULT_INGRESS_LIMIT,
         );
-        let blockfetch_ch = mux.subscribe(
+        let blockfetch_server_ch = mux.subscribe(
             PROTOCOL_N2N_BLOCKFETCH,
             Direction::ResponderDir,
             DEFAULT_INGRESS_LIMIT,
         );
-        let txsubmission_ch = mux.subscribe(
+        let txsubmission_server_ch = mux.subscribe(
             PROTOCOL_N2N_TXSUBMISSION,
             Direction::ResponderDir,
             DEFAULT_INGRESS_LIMIT,
         );
-        let keepalive_ch = mux.subscribe(
+        let keepalive_server_ch = mux.subscribe(
             PROTOCOL_N2N_KEEPALIVE,
             Direction::ResponderDir,
             DEFAULT_INGRESS_LIMIT,
         );
-        let peersharing_ch = mux.subscribe(
+        let peersharing_server_ch = mux.subscribe(
             PROTOCOL_N2N_PEERSHARING,
             Direction::ResponderDir,
             DEFAULT_INGRESS_LIMIT,
         );
+
+        // In duplex mode, also subscribe InitiatorDir channels for client protocols.
+        // For inbound connections in duplex mode, we can also act as client by
+        // sending on InitiatorDir. The mux flips direction on egress so our
+        // InitiatorDir messages reach the remote's ResponderDir.
+        let (cs_cli, bf_cli, tx_cli, ka_cli, ps_cli) = if !initiator_only {
+            let cs = mux.subscribe(
+                PROTOCOL_N2N_CHAINSYNC,
+                Direction::InitiatorDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            let bf = mux.subscribe(
+                PROTOCOL_N2N_BLOCKFETCH,
+                Direction::InitiatorDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            let tx = mux.subscribe(
+                PROTOCOL_N2N_TXSUBMISSION,
+                Direction::InitiatorDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            let ka = mux.subscribe(
+                PROTOCOL_N2N_KEEPALIVE,
+                Direction::InitiatorDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            let ps = mux.subscribe(
+                PROTOCOL_N2N_PEERSHARING,
+                Direction::InitiatorDir,
+                DEFAULT_INGRESS_LIMIT,
+            );
+            (Some(cs), Some(bf), Some(tx), Some(ka), Some(ps))
+        } else {
+            (None, None, None, None, None)
+        };
 
         // Spawn mux task.
         let cancel = CancellationToken::new();
@@ -324,15 +430,21 @@ impl PeerConnection {
             addr,
             version,
             network_magic,
-            chainsync_channel: Some(chainsync_ch),
-            blockfetch_channel: Some(blockfetch_ch),
-            txsubmission_channel: Some(txsubmission_ch),
-            keepalive_channel: Some(keepalive_ch),
-            peersharing_channel: Some(peersharing_ch),
+            chainsync_client_channel: cs_cli,
+            blockfetch_client_channel: bf_cli,
+            txsubmission_client_channel: tx_cli,
+            keepalive_client_channel: ka_cli,
+            peersharing_client_channel: ps_cli,
+            chainsync_server_channel: Some(chainsync_server_ch),
+            blockfetch_server_channel: Some(blockfetch_server_ch),
+            txsubmission_server_channel: Some(txsubmission_server_ch),
+            keepalive_server_channel: Some(keepalive_server_ch),
+            peersharing_server_channel: Some(peersharing_server_ch),
             mux_handle,
             cancel,
             warm_tasks: Vec::new(),
             hot_tasks: Vec::new(),
+            server_tasks: Vec::new(),
         })
     }
 
@@ -352,7 +464,7 @@ impl PeerConnection {
         keepalive_fn: ProtocolTaskFn,
     ) -> Result<(), PeerConnectionError> {
         let ch = self
-            .keepalive_channel
+            .keepalive_client_channel
             .take()
             .ok_or(PeerConnectionError::ChannelUnavailable("keepalive"))?;
 
@@ -389,15 +501,15 @@ impl PeerConnection {
         txsubmission_fn: ProtocolTaskFn,
     ) -> Result<(), PeerConnectionError> {
         let cs_ch = self
-            .chainsync_channel
+            .chainsync_client_channel
             .take()
             .ok_or(PeerConnectionError::ChannelUnavailable("chainsync"))?;
         let bf_ch = self
-            .blockfetch_channel
+            .blockfetch_client_channel
             .take()
             .ok_or(PeerConnectionError::ChannelUnavailable("blockfetch"))?;
         let tx_ch = self
-            .txsubmission_channel
+            .txsubmission_client_channel
             .take()
             .ok_or(PeerConnectionError::ChannelUnavailable("txsubmission"))?;
 
@@ -444,6 +556,102 @@ impl PeerConnection {
     /// Same graceful-then-abort pattern as [`stop_hot_protocols`].
     pub async fn stop_warm_protocols(&mut self) {
         Self::stop_tasks(&mut self.warm_tasks, "warm", self.addr).await;
+    }
+
+    /// Start server-side (responder) protocol tasks.
+    ///
+    /// Takes the server channels and spawns each protocol as an independent
+    /// tokio task using the provided factory functions. Each factory receives
+    /// its channel and a cancellation token.
+    ///
+    /// Server protocols run the responder side: they wait for requests from
+    /// the remote peer's client protocols and respond accordingly. In duplex
+    /// mode, both client and server protocols run simultaneously on the same
+    /// multiplexed connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `chainsync_server_fn` — Factory for the ChainSync server task
+    /// * `blockfetch_server_fn` — Factory for the BlockFetch server task
+    /// * `txsubmission_server_fn` — Factory for the TxSubmission2 server task
+    /// * `keepalive_server_fn` — Factory for the KeepAlive server task
+    /// * `peersharing_server_fn` — Factory for the PeerSharing server task
+    pub fn start_server_protocols(
+        &mut self,
+        chainsync_server_fn: ProtocolTaskFn,
+        blockfetch_server_fn: ProtocolTaskFn,
+        txsubmission_server_fn: ProtocolTaskFn,
+        keepalive_server_fn: ProtocolTaskFn,
+        peersharing_server_fn: ProtocolTaskFn,
+    ) -> Result<(), PeerConnectionError> {
+        let cs_ch = self
+            .chainsync_server_channel
+            .take()
+            .ok_or(PeerConnectionError::ChannelUnavailable("chainsync_server"))?;
+        let bf_ch = self
+            .blockfetch_server_channel
+            .take()
+            .ok_or(PeerConnectionError::ChannelUnavailable("blockfetch_server"))?;
+        let tx_ch = self.txsubmission_server_channel.take().ok_or(
+            PeerConnectionError::ChannelUnavailable("txsubmission_server"),
+        )?;
+        let ka_ch = self
+            .keepalive_server_channel
+            .take()
+            .ok_or(PeerConnectionError::ChannelUnavailable("keepalive_server"))?;
+        let ps_ch = self.peersharing_server_channel.take().ok_or(
+            PeerConnectionError::ChannelUnavailable("peersharing_server"),
+        )?;
+
+        // Spawn ChainSync server task.
+        let cs_token = self.cancel.child_token();
+        let cs_token_clone = cs_token.clone();
+        let cs_handle = tokio::spawn(async move {
+            (chainsync_server_fn)(cs_ch, cs_token_clone).await;
+        });
+        self.server_tasks.push((cs_handle, cs_token));
+
+        // Spawn BlockFetch server task.
+        let bf_token = self.cancel.child_token();
+        let bf_token_clone = bf_token.clone();
+        let bf_handle = tokio::spawn(async move {
+            (blockfetch_server_fn)(bf_ch, bf_token_clone).await;
+        });
+        self.server_tasks.push((bf_handle, bf_token));
+
+        // Spawn TxSubmission2 server task.
+        let tx_token = self.cancel.child_token();
+        let tx_token_clone = tx_token.clone();
+        let tx_handle = tokio::spawn(async move {
+            (txsubmission_server_fn)(tx_ch, tx_token_clone).await;
+        });
+        self.server_tasks.push((tx_handle, tx_token));
+
+        // Spawn KeepAlive server task.
+        let ka_token = self.cancel.child_token();
+        let ka_token_clone = ka_token.clone();
+        let ka_handle = tokio::spawn(async move {
+            (keepalive_server_fn)(ka_ch, ka_token_clone).await;
+        });
+        self.server_tasks.push((ka_handle, ka_token));
+
+        // Spawn PeerSharing server task.
+        let ps_token = self.cancel.child_token();
+        let ps_token_clone = ps_token.clone();
+        let ps_handle = tokio::spawn(async move {
+            (peersharing_server_fn)(ps_ch, ps_token_clone).await;
+        });
+        self.server_tasks.push((ps_handle, ps_token));
+
+        debug!(addr = %self.addr, "started server protocols (ChainSync, BlockFetch, TxSubmission2, KeepAlive, PeerSharing)");
+        Ok(())
+    }
+
+    /// Stop server-side protocol tasks.
+    ///
+    /// Same graceful-then-abort pattern as [`stop_hot_protocols`].
+    pub async fn stop_server_protocols(&mut self) {
+        Self::stop_tasks(&mut self.server_tasks, "server", self.addr).await;
     }
 
     /// Internal helper: cancel tasks, wait with timeout, abort stragglers.
@@ -494,6 +702,7 @@ impl PeerConnection {
         // Stop protocol tasks first (graceful).
         self.stop_hot_protocols().await;
         self.stop_warm_protocols().await;
+        self.stop_server_protocols().await;
 
         // Cancel the top-level token — this will signal any remaining child tasks.
         self.cancel.cancel();

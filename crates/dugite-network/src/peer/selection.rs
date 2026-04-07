@@ -46,14 +46,20 @@ pub fn select_best_cold(peer_manager: &PeerManager) -> Option<SocketAddr> {
 /// Select the worst hot peer for demotion to warm.
 ///
 /// Returns the hot peer with the lowest composite score.
+/// Topology peers (local roots) are excluded — they must never be demoted.
 pub fn select_worst_hot(peer_manager: &PeerManager) -> Option<SocketAddr> {
+    use super::manager::PeerSource;
     peer_manager
         .peers_in_state(PeerState::Hot)
         .into_iter()
         .filter_map(|addr| {
-            peer_manager
-                .get_peer(&addr)
-                .map(|info| (addr, peer_score(info)))
+            peer_manager.get_peer(&addr).and_then(|info| {
+                // Never demote local root peers (topology-configured).
+                if info.source == PeerSource::Topology {
+                    return None;
+                }
+                Some((addr, peer_score(info)))
+            })
         })
         .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(addr, _)| addr)
@@ -93,14 +99,20 @@ pub fn select_lowest_reputation_cold(peer_manager: &PeerManager, count: usize) -
 /// Select the worst warm peer for demotion to cold during warm churn.
 ///
 /// Returns the warm peer with the lowest composite score.
+/// Topology peers (local roots) are excluded — they must never be demoted.
 pub fn select_worst_warm(peer_manager: &PeerManager) -> Option<SocketAddr> {
+    use super::manager::PeerSource;
     peer_manager
         .peers_in_state(PeerState::Warm)
         .into_iter()
         .filter_map(|addr| {
-            peer_manager
-                .get_peer(&addr)
-                .map(|info| (addr, peer_score(info)))
+            peer_manager.get_peer(&addr).and_then(|info| {
+                // Never demote local root peers (topology-configured).
+                if info.source == PeerSource::Topology {
+                    return None;
+                }
+                Some((addr, peer_score(info)))
+            })
         })
         .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(addr, _)| addr)
@@ -263,6 +275,50 @@ mod tests {
 
         let best = select_best_warm(&pm).unwrap();
         assert_eq!(best, test_addr(3001));
+    }
+
+    #[test]
+    fn select_worst_hot_excludes_topology() {
+        let mut pm = PeerManager::new();
+        // Topology peer with worst score — should be excluded.
+        pm.add_peer(test_addr(3001), PeerSource::Topology);
+        pm.promote_to_warm(&test_addr(3001));
+        pm.promote_to_hot(&test_addr(3001));
+        pm.get_peer_mut(&test_addr(3001))
+            .unwrap()
+            .update_latency(999.0);
+        pm.get_peer_mut(&test_addr(3001)).unwrap().reputation = 0.0;
+
+        // Ledger peer with better score — should be returned as worst non-topology.
+        pm.add_peer(test_addr(3002), PeerSource::Ledger);
+        pm.promote_to_warm(&test_addr(3002));
+        pm.promote_to_hot(&test_addr(3002));
+        pm.get_peer_mut(&test_addr(3002))
+            .unwrap()
+            .update_latency(100.0);
+
+        let worst = select_worst_hot(&pm).unwrap();
+        assert_eq!(worst, test_addr(3002)); // Not the topology peer
+    }
+
+    #[test]
+    fn select_worst_warm_excludes_topology() {
+        let mut pm = PeerManager::new();
+        pm.add_peer(test_addr(3001), PeerSource::Topology);
+        pm.promote_to_warm(&test_addr(3001));
+        pm.get_peer_mut(&test_addr(3001))
+            .unwrap()
+            .update_latency(999.0);
+        pm.get_peer_mut(&test_addr(3001)).unwrap().reputation = 0.0;
+
+        pm.add_peer(test_addr(3002), PeerSource::Ledger);
+        pm.promote_to_warm(&test_addr(3002));
+        pm.get_peer_mut(&test_addr(3002))
+            .unwrap()
+            .update_latency(100.0);
+
+        let worst = select_worst_warm(&pm).unwrap();
+        assert_eq!(worst, test_addr(3002));
     }
 
     #[test]

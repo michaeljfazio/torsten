@@ -36,6 +36,7 @@ use crate::node::block_fetch_logic::BlockFetchLogicTask;
 use crate::node::connection_lifecycle::{
     CandidateChainState, ConnectResult, ConnectionLifecycleManager, FetchedBlock, LifecycleError,
 };
+use crate::node::peer_connection::PeerConnection;
 
 use dugite_consensus::chain_fragment::ChainFragment;
 use dugite_consensus::OuroborosPraos;
@@ -1239,27 +1240,16 @@ impl Node {
             // Advertise P2P configuration so the TUI can display the real state
             // rather than guessing from peer counts.
             let effective_peer_sharing = args.config.effective_peer_sharing(is_bp);
-            m.set_p2p_config(
-                args.config.enable_p2_p,
-                &args.config.diffusion_mode,
-                effective_peer_sharing,
-            );
+            m.set_p2p_config(&args.config.diffusion_mode, effective_peer_sharing);
             Arc::new(m)
         };
 
         // Log P2P configuration at startup for diagnostics.
         info!(
-            p2p_enabled = args.config.enable_p2_p,
             diffusion_mode = %args.config.diffusion_mode,
             peer_sharing = args.config.effective_peer_sharing(block_producer.is_some()),
             "P2P networking configuration"
         );
-        if !args.config.enable_p2_p {
-            warn!(
-                "P2P is disabled — running in static topology mode \
-                 (no peer governor, no churn, no ledger-based discovery)"
-            );
-        }
 
         // ── Phase 1: Initialize ChainFragment from ImmutableDB tip ──────────
         //
@@ -1796,13 +1786,24 @@ impl Node {
             }
 
             // Resolve local root group members for per-group valency registration.
-            // Each entry is (resolved_addrs_for_group, hot_valency, warm_valency).
-            // We collect these here (pre-lock) so that `add_local_root_group` can
-            // be called with already-resolved addresses while holding the PM lock.
-            let mut resolved_groups: Vec<(Vec<std::net::SocketAddr>, usize, usize)> = Vec::new();
+            // Each entry carries resolved addresses plus all topology metadata so
+            // `add_local_root_group` can be called with fully-populated info.
+            struct ResolvedGroup {
+                addrs: Vec<std::net::SocketAddr>,
+                hot_valency: usize,
+                warm_valency: usize,
+                diffusion_mode: Option<networking::DiffusionMode>,
+                behind_firewall: bool,
+                advertise: bool,
+            }
+            let mut resolved_groups: Vec<ResolvedGroup> = Vec::new();
             for group in &self.topology.local_roots {
                 let hot_val = usize::from(group.effective_hot_valency());
                 let warm_val = usize::from(group.effective_warm_valency());
+                let diffusion_mode = group.diffusion_mode.as_deref().map(|s| match s {
+                    "InitiatorOnly" => networking::DiffusionMode::InitiatorOnly,
+                    _ => networking::DiffusionMode::InitiatorAndResponder,
+                });
                 let mut group_addrs = Vec::new();
                 for ap in &group.access_points {
                     match tokio::net::lookup_host(format!("{}:{}", ap.address, ap.port)).await {
@@ -1821,7 +1822,14 @@ impl Node {
                     }
                 }
                 if !group_addrs.is_empty() {
-                    resolved_groups.push((group_addrs, hot_val, warm_val));
+                    resolved_groups.push(ResolvedGroup {
+                        addrs: group_addrs,
+                        hot_valency: hot_val,
+                        warm_valency: warm_val,
+                        diffusion_mode,
+                        behind_firewall: group.is_behind_firewall(),
+                        advertise: group.advertise,
+                    });
                 }
             }
 
@@ -1831,12 +1839,15 @@ impl Node {
             }
             // Register per-group valency targets.  This must happen AFTER
             // add_config_peer() calls so the peer table contains the members.
-            for (group_addrs, hot_val, warm_val) in resolved_groups {
+            for rg in resolved_groups {
                 pm.add_local_root_group(networking::LocalRootGroupInfo {
                     name: String::new(),
-                    addrs: group_addrs,
-                    hot_valency: hot_val,
-                    warm_valency: warm_val,
+                    addrs: rg.addrs,
+                    hot_valency: rg.hot_valency,
+                    warm_valency: rg.warm_valency,
+                    diffusion_mode: rg.diffusion_mode,
+                    behind_firewall: rg.behind_firewall,
+                    advertise: rg.advertise,
                 });
             }
             let stats = pm.stats();
@@ -1945,6 +1956,12 @@ impl Node {
             self.block_announcement_tx = Some(block_ann_tx);
             self.rollback_announcement_tx = Some(rollback_ann_tx);
         }
+        // Channel for the N2N listener to send accepted+handshaked connections
+        // to the main run loop for lifecycle manager registration.
+        let (inbound_accept_tx, mut inbound_accept_rx) = tokio::sync::mpsc::channel::<
+            Result<(std::net::SocketAddr, PeerConnection, f64), (std::net::SocketAddr, String)>,
+        >(32);
+
         if self.config.diffusion_mode == crate::config::DiffusionMode::InitiatorAndResponder {
             let n2n_listen_addr = self.listen_addr;
             let n2n_shutdown_rx = shutdown_rx.clone();
@@ -1953,21 +1970,6 @@ impl Node {
                 .config
                 .effective_peer_sharing(self.block_producer.is_some());
             let n2n_metrics = self.metrics.clone();
-            let n2n_peer_manager = peer_manager.clone();
-            let n2n_block_provider = Arc::new(serve::ChainDBBlockProvider {
-                chain_db: self.chain_db.clone(),
-            });
-            let n2n_mempool = self.mempool.clone();
-            let n2n_block_ann_tx = self
-                .block_announcement_tx
-                .as_ref()
-                .expect("block_announcement_tx was just set")
-                .clone();
-            let n2n_rollback_ann_tx = self
-                .rollback_announcement_tx
-                .as_ref()
-                .expect("rollback_announcement_tx was just set")
-                .clone();
 
             let diffusion_mode = self.peer_manager.read().await.diffusion_mode();
             info!(
@@ -1984,11 +1986,9 @@ impl Node {
                 }
             };
 
+            let n2n_inbound_tx = inbound_accept_tx.clone();
             tokio::spawn(async move {
                 let mut shutdown = n2n_shutdown_rx;
-                // Track spawned inbound connection handlers so we can abort
-                // them on shutdown — otherwise they block waiting for peer I/O.
-                let mut conn_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
                 loop {
                     tokio::select! {
                         accept_result = tcp_listener.accept() => {
@@ -1999,41 +1999,25 @@ impl Node {
                                     conn_metrics
                                         .n2n_connections_total
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    conn_metrics
-                                        .n2n_connections_active
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                                    let bp = n2n_block_provider.clone();
-                                    let mp = n2n_mempool.clone();
-                                    let metrics = conn_metrics.clone();
-                                    let pm = n2n_peer_manager.clone();
-                                    let ann_rx = n2n_block_ann_tx.subscribe();
-                                    let rb_rx = n2n_rollback_ann_tx.subscribe();
                                     let magic = n2n_network_magic;
                                     let ps = n2n_peer_sharing;
+                                    let tx = n2n_inbound_tx.clone();
 
-                                    // Start the connection handler immediately without
-                                    // waiting for the peer manager lock — the handshake
-                                    // must complete within the Haskell timeout (10s).
-                                    // Peer registration happens after the handshake.
-                                    let handle = tokio::spawn(async move {
-                                        if let Err(e) = Self::handle_n2n_connection(
-                                            stream, magic, ps, bp, mp, pm.clone(),
-                                            peer_addr, ann_rx, rb_rx, metrics.clone(),
-                                        )
-                                        .await
-                                        {
-                                            debug!(
-                                                %peer_addr,
-                                                "N2N inbound connection ended: {e}"
-                                            );
+                                    tokio::spawn(async move {
+                                        let start = std::time::Instant::now();
+                                        match PeerConnection::accept(
+                                            stream, peer_addr, magic, false, ps,
+                                        ).await {
+                                            Ok(conn) => {
+                                                let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
+                                                let _ = tx.send(Ok((peer_addr, conn, rtt_ms))).await;
+                                            }
+                                            Err(e) => {
+                                                let _ = tx.send(Err((peer_addr, e.to_string()))).await;
+                                            }
                                         }
-                                        metrics
-                                            .n2n_connections_active
-                                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-                                        pm.write().await.peer_disconnected(&peer_addr);
                                     });
-                                    conn_handles.push(handle);
                                 }
                                 Err(e) => {
                                     warn!("N2N accept error: {e}");
@@ -2046,17 +2030,14 @@ impl Node {
                         }
                     }
                 }
-                // Abort all active N2N inbound connection handlers.
-                for handle in &conn_handles {
-                    handle.abort();
-                }
             });
         } else {
             info!("N2N server skipped (DiffusionMode=InitiatorOnly, outbound connections only)");
         }
 
-        // Start ledger-based peer discovery task (only when P2P is enabled)
-        if self.config.enable_p2_p {
+        // Ledger-based peer discovery — gated by useLedgerAfterSlot in the
+        // topology, matching Haskell's ledgerPeersThread which always runs.
+        {
             let ledger = self.ledger_state.clone();
             let pm = peer_manager.clone();
             let topology = self.topology.clone();
@@ -2263,6 +2244,15 @@ impl Node {
             peer_failure_tx,
             keepalive_rtt_tx,
             self.gsm_event_tx.clone(),
+            // Duplex server protocol fields
+            Arc::new(serve::ChainDBBlockProvider {
+                chain_db: self.chain_db.clone(),
+            }),
+            self.rollback_announcement_tx
+                .as_ref()
+                .expect("rollback_announcement_tx was just set")
+                .clone(),
+            peer_manager.clone(),
         );
         self.connection_lifecycle = Some(lifecycle);
         self.fetched_blocks_rx = Some(fetched_blocks_rx);
@@ -2567,16 +2557,10 @@ impl Node {
 
                 // ── Governor evaluation (periodic, every 2s) ────────────
                 _ = governor_ticker.tick() => {
-                    // When P2P is disabled, skip governor evaluation entirely —
-                    // static topology connections are maintained without churn.
-                    if !self.config.enable_p2_p {
-                        continue;
-                    }
-
                     // Compute governor actions based on current peer state.
                     let actions = {
                         let pm = peer_manager.read().await;
-                        governor.compute_actions(&pm.inner)
+                        governor.compute_actions(&pm.inner, &[])
                     };
 
                     if !actions.is_empty() {
@@ -2674,6 +2658,36 @@ impl Node {
                             debug!(%addr, "background cold->warm failed: {error}");
                             let mut pm = peer_manager.write().await;
                             pm.peer_failed(&addr);
+                        }
+                    }
+                }
+
+                // ── Inbound N2N connections (accepted + handshaked) ───────
+                //
+                // The N2N listener accepts TCP streams and runs the mux +
+                // handshake in background tasks. Completed connections arrive
+                // here for registration with the lifecycle manager, which
+                // starts server protocol tasks on the duplex channels.
+                Some(result) = inbound_accept_rx.recv() => {
+                    match result {
+                        Ok((addr, conn, rtt_ms)) => {
+                            if let Some(ref mut lifecycle) = self.connection_lifecycle {
+                                let mut pm = peer_manager.write().await;
+                                match lifecycle.register_inbound_connection(addr, conn, rtt_ms, &mut pm) {
+                                    Ok(()) => {
+                                        info!(%addr, rtt_ms = format_args!("{rtt_ms:.0}"), "inbound connection registered");
+                                        self.metrics
+                                            .n2n_connections_active
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    Err(e) => {
+                                        debug!(%addr, "inbound registration failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                        Err((addr, reason)) => {
+                            debug!(%addr, "inbound handshake failed: {reason}");
                         }
                     }
                 }
@@ -3305,219 +3319,6 @@ impl Node {
             r = mux_handle => {
                 if let Ok(Err(e)) = r {
                     debug!("N2C mux error: {e}");
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    // ─── handle_n2n_connection() ─────────────────────────────────────────────
-
-    /// Handle a single inbound N2N (TCP) connection.
-    ///
-    /// Sets up a Mux over the bearer, runs the N2N handshake as server, then
-    /// spawns protocol tasks for ChainSync, BlockFetch, TxSubmission2,
-    /// KeepAlive, and PeerSharing.
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_n2n_connection(
-        stream: tokio::net::TcpStream,
-        network_magic: u64,
-        peer_sharing: bool,
-        block_provider: Arc<serve::ChainDBBlockProvider>,
-        mempool: Arc<Mempool>,
-        peer_manager: Arc<RwLock<NodePeerManager>>,
-        peer_addr: std::net::SocketAddr,
-        announcement_rx: tokio::sync::broadcast::Receiver<dugite_network::BlockAnnouncement>,
-        rollback_rx: tokio::sync::broadcast::Receiver<RollbackAnnouncement>,
-        metrics: Arc<crate::metrics::NodeMetrics>,
-    ) -> Result<()> {
-        use dugite_network::protocol;
-
-        let bearer = dugite_network::TcpBearer::new(stream)?;
-        let mut mux = dugite_network::Mux::new(bearer, false); // we are responder
-
-        // Subscribe protocol channels (responder direction for all)
-        let mut hs_ch = mux.subscribe(
-            protocol::PROTOCOL_HANDSHAKE,
-            dugite_network::Direction::ResponderDir,
-            65536,
-        );
-        let mut cs_ch = mux.subscribe(
-            protocol::PROTOCOL_N2N_CHAINSYNC,
-            dugite_network::Direction::ResponderDir,
-            1_048_576,
-        );
-        let mut bf_ch = mux.subscribe(
-            protocol::PROTOCOL_N2N_BLOCKFETCH,
-            dugite_network::Direction::ResponderDir,
-            4_194_304,
-        );
-        let mut tx_ch = mux.subscribe(
-            protocol::PROTOCOL_N2N_TXSUBMISSION,
-            dugite_network::Direction::ResponderDir,
-            1_048_576,
-        );
-        let mut ka_ch = mux.subscribe(
-            protocol::PROTOCOL_N2N_KEEPALIVE,
-            dugite_network::Direction::ResponderDir,
-            65536,
-        );
-        let mut ps_ch = mux.subscribe(
-            protocol::PROTOCOL_N2N_PEERSHARING,
-            dugite_network::Direction::ResponderDir,
-            65536,
-        );
-
-        // Start the mux tasks
-        let mux_handle = tokio::spawn(async move { mux.run().await });
-
-        // Run N2N handshake as server (responder).
-        // This must complete quickly — the Haskell peer times out after 10 seconds.
-        info!(%peer_addr, "N2N inbound: starting handshake");
-        // When handling inbound connections, we are always in
-        // InitiatorAndResponder mode (the listener is only started in that
-        // mode), so initiator_only is false.
-        let our_data = dugite_network::N2NVersionData::new(network_magic, false, peer_sharing);
-        let hs_result =
-            dugite_network::handshake::run_n2n_handshake_server(&mut hs_ch, &our_data).await;
-        match hs_result {
-            Ok(r) => {
-                info!(
-                    %peer_addr,
-                    version = r.version,
-                    "N2N inbound handshake accepted"
-                );
-            }
-            Err(e) => {
-                warn!(%peer_addr, "N2N inbound handshake failed: {e}");
-                mux_handle.abort();
-                return Ok(());
-            }
-        }
-
-        // Register the peer in the peer manager asynchronously — do NOT block
-        // protocol task startup on the write lock. The lifecycle manager may hold
-        // the peer manager lock for 5+ seconds during TCP connect timeouts,
-        // which would delay ChainSync/BlockFetch/TxSubmission2 server startup
-        // and cause the Haskell peer to time out its ChainSync idle timeout.
-        {
-            let pm_clone = peer_manager.clone();
-            let addr = peer_addr;
-            tokio::spawn(async move {
-                let mut pm_w = pm_clone.write().await;
-                pm_w.peer_connected(&addr, crate::node::networking::ConnectionDirection::Inbound);
-            });
-        }
-
-        // ChainSync server
-        let cs_bp = block_provider.clone();
-        let cs_ann_rx = announcement_rx;
-        let cs_rb_rx = rollback_rx;
-        let cs_task = tokio::spawn(async move {
-            let mut server = protocol::chainsync::server::ChainSyncServer::new();
-            if let Err(e) = server
-                .run(&mut cs_ch, cs_bp.as_ref(), cs_ann_rx, cs_rb_rx)
-                .await
-            {
-                debug!("N2N ChainSync server ended: {e}");
-            }
-        });
-
-        // BlockFetch server
-        let bf_bp = block_provider.clone();
-        let bf_task = tokio::spawn(async move {
-            if let Err(e) =
-                protocol::blockfetch::server::BlockFetchServer::run(&mut bf_ch, bf_bp.as_ref())
-                    .await
-            {
-                debug!("N2N BlockFetch server ended: {e}");
-            }
-        });
-
-        // TxSubmission2 server
-        let tx_mempool = mempool;
-        let tx_metrics = metrics.clone();
-        let tx_task = tokio::spawn(async move {
-            let on_tx = |tx_hash: [u8; 32], tx_bytes: Vec<u8>| -> bool {
-                // Track every transaction received from peers in real-time
-                // so the monitor and Prometheus reflect activity immediately.
-                tx_metrics
-                    .transactions_received
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                // Best-effort mempool admission for peer-submitted txs.
-                // Try all supported eras for decoding (Conway=6, Babbage=5, Alonzo=4, etc.)
-                let size_bytes = tx_bytes.len();
-                for era_id in [6u16, 5, 4, 3, 2] {
-                    if let Ok(tx) = dugite_serialization::decode_transaction(era_id, &tx_bytes) {
-                        let hash = dugite_primitives::hash::Hash32::from_bytes(tx_hash);
-                        if tx_mempool.add_tx(hash, tx, size_bytes).is_ok() {
-                            tx_metrics
-                                .transactions_validated
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return true;
-                        } else {
-                            tx_metrics
-                                .transactions_rejected
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return false;
-                        }
-                    }
-                }
-                // Failed to decode in any era — count as rejected
-                tx_metrics
-                    .transactions_rejected
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                false
-            };
-            match dugite_network::TxSubmissionServer::run(&mut tx_ch, on_tx).await {
-                Ok(stats) => {
-                    debug!(
-                        tx_ids = stats.tx_ids_received,
-                        txs_received = stats.txs_received,
-                        accepted = stats.txs_accepted,
-                        rejected = stats.txs_rejected,
-                        "N2N TxSubmission2 server ended"
-                    );
-                }
-                Err(e) => {
-                    debug!("N2N TxSubmission2 server error: {e}");
-                }
-            }
-        });
-
-        // KeepAlive server
-        let ka_task = tokio::spawn(async move {
-            if let Err(e) = dugite_network::KeepAliveServer::run(&mut ka_ch).await {
-                debug!("N2N KeepAlive server ended: {e}");
-            }
-        });
-
-        // PeerSharing server — share routable peer addresses
-        let ps_pm = peer_manager;
-        let ps_task = tokio::spawn(async move {
-            let peers: Vec<std::net::SocketAddr> = {
-                let pm = ps_pm.read().await;
-                pm.connected_peer_addrs()
-            };
-            if let Err(e) =
-                protocol::peersharing::server::PeerSharingServer::run(&mut ps_ch, &peers).await
-            {
-                debug!("N2N PeerSharing server ended: {e}");
-            }
-        });
-
-        // Wait for any protocol task to complete, then clean up.
-        tokio::select! {
-            _ = cs_task => {}
-            _ = bf_task => {}
-            _ = tx_task => {}
-            _ = ka_task => {}
-            _ = ps_task => {}
-            r = mux_handle => {
-                if let Ok(Err(e)) = r {
-                    debug!(%peer_addr, "N2N mux error: {e}");
                 }
             }
         }

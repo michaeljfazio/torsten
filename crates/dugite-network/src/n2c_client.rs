@@ -67,7 +67,7 @@ impl N2CClient {
 
         // Subscribe protocol channels
         let mut handshake_channel = mux.subscribe(0, Direction::InitiatorDir, 65536);
-        let state_query_channel = mux.subscribe(7, Direction::InitiatorDir, 1_048_576);
+        let state_query_channel = mux.subscribe(7, Direction::InitiatorDir, 16_777_216);
         let tx_submission_channel = mux.subscribe(6, Direction::InitiatorDir, 65536);
         let tx_monitor_channel = mux.subscribe(9, Direction::InitiatorDir, 65536);
         let chain_sync_channel = mux.subscribe(5, Direction::InitiatorDir, 4_194_304);
@@ -780,24 +780,25 @@ fn strip_msg_result(decoder: &mut minicbor::Decoder) -> Result<(), NetworkError>
     Ok(())
 }
 
-/// Strip the HardFork Combinator success wrapper `[1, result]`.
+/// Strip the HardFork Combinator EitherMismatch success wrapper `[result]`.
 ///
-/// BlockQuery results from the server are wrapped: `[1, actual_result]`.
-/// After stripping, the decoder is positioned at `actual_result`.
-/// If the response is unwrapped, the position is reset so the caller
-/// can parse directly.
+/// BlockQuery QueryIfCurrent results are wrapped in an array(1): `[result]`.
+/// The HFC uses array length as discriminator: 1 = success, 2 = era mismatch.
+/// After stripping, the decoder is positioned at the actual result.
+/// If the response is unwrapped (non-BlockQuery), the position is reset
+/// so the caller can parse directly.
 fn strip_hfc_wrapper(decoder: &mut minicbor::Decoder) -> Result<(), NetworkError> {
     let pos = decoder.position();
     match decoder.array() {
+        Ok(Some(1)) => {
+            // HFC success: array(1) containing the result — decoder is now at the result
+            Ok(())
+        }
         Ok(Some(2)) => {
-            // Read the HFC tag (should be 1 for success)
-            match decoder.u64() {
-                Ok(1) => Ok(()), // success — decoder is now at the actual result
-                _ => {
-                    decoder.set_position(pos);
-                    Ok(())
-                }
-            }
+            // HFC era mismatch: array(2) [query_era, ledger_era]
+            // This shouldn't happen in normal operation; reset and let caller handle.
+            decoder.set_position(pos);
+            Ok(())
         }
         _ => {
             decoder.set_position(pos);

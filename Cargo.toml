@@ -48,7 +48,7 @@ crossterm = "0.28"
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-minicbor = { version = "0.25", features = ["std", "derive"] }
+minicbor = { version = "0.26", features = ["std", "derive"] }
 hex = "0.4"
 base64 = "0.22"
 
@@ -56,9 +56,9 @@ base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 blake2 = "0.10"
 blake2b_simd = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 rand = "0.8"
-rand_chacha = "0.3"
+rand_chacha = "0.9"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -79,7 +79,7 @@ curve25519-dalek-fork = { package = "curve25519-dalek", git = "https://github.co
 
 # Storage
 tempfile = "3"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # Logging & diagnostics
 tracing = "0.1"
@@ -89,7 +89,7 @@ tracing-journald = "0.3"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 
 # Error handling
 thiserror = "2"
@@ -98,7 +98,7 @@ anyhow = "1"
 # Misc
 bytes = "1"
 byteorder = "1"
-derive_more = { version = "1", features = ["display", "from"] }
+derive_more = { version = "2", features = ["display", "from"] }
 dashmap = "6"
 parking_lot = "0.12"
 num-bigint = "0.4"
@@ -119,7 +119,7 @@ hickory-resolver = "0.25"
 socket2 = "0.5"
 zstd = "0.13"
 tar = "0.4"
-indicatif = "0.17"
+indicatif = "0.18"
 futures-util = "0.3"
 memmap2 = "0.9"
 fs2 = "0.4"

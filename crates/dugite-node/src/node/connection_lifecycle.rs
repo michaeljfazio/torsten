@@ -45,6 +45,7 @@ use tracing::{debug, info, warn};
 
 use dugite_network::peer::governor::GovernorAction;
 use dugite_network::BlockAnnouncement;
+use dugite_network::RollbackAnnouncement;
 
 use dugite_ledger::LedgerState;
 use dugite_mempool::Mempool;
@@ -54,6 +55,7 @@ use dugite_storage::ChainDB;
 
 use super::networking::{ConnectionDirection, NodePeerManager};
 use super::peer_connection::{PeerConnection, PeerConnectionError, ProtocolTaskFn};
+use super::serve::ChainDBBlockProvider;
 use crate::metrics::NodeMetrics;
 
 // ─── Shared State Types ─────────────────────────────────────────────────────
@@ -230,6 +232,15 @@ pub struct ConnectionLifecycleManager {
     /// PeerRegistered, BlockReceived, PeerTipUpdated, PeerActive, PeerIdling
     /// events to the GSM actor.
     gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
+
+    /// Shared block provider for server protocols (ChainSync server, BlockFetch server).
+    block_provider: Arc<ChainDBBlockProvider>,
+
+    /// Broadcast sender for rollback announcements to ChainSync servers.
+    rollback_announcement_tx: broadcast::Sender<RollbackAnnouncement>,
+
+    /// Shared peer manager for PeerSharing server to query connected peers.
+    peer_manager_for_servers: Arc<RwLock<NodePeerManager>>,
 }
 
 /// Errors from lifecycle management operations.
@@ -282,6 +293,9 @@ impl ConnectionLifecycleManager {
     /// * `peer_failure_tx` — Channel for protocol tasks to report peer failures
     /// * `keepalive_rtt_tx` — Channel for KeepAlive tasks to report per-pong RTT
     /// * `gsm_event_tx` — GSM event sender for ChainSync tasks
+    /// * `block_provider` — Shared block provider for server protocols
+    /// * `rollback_announcement_tx` — Broadcast sender for rollback announcements
+    /// * `peer_manager_for_servers` — Shared peer manager for PeerSharing server
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_magic: u64,
@@ -301,6 +315,9 @@ impl ConnectionLifecycleManager {
         peer_failure_tx: mpsc::Sender<SocketAddr>,
         keepalive_rtt_tx: mpsc::Sender<(SocketAddr, f64)>,
         gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
+        block_provider: Arc<ChainDBBlockProvider>,
+        rollback_announcement_tx: broadcast::Sender<RollbackAnnouncement>,
+        peer_manager_for_servers: Arc<RwLock<NodePeerManager>>,
     ) -> Self {
         Self {
             connections: HashMap::new(),
@@ -323,6 +340,9 @@ impl ConnectionLifecycleManager {
             peer_failure_tx,
             keepalive_rtt_tx,
             gsm_event_tx,
+            block_provider,
+            rollback_announcement_tx,
+            peer_manager_for_servers,
         }
     }
 
@@ -369,6 +389,7 @@ impl ConnectionLifecycleManager {
         // Start warm protocols (KeepAlive).
         let keepalive_fn = self.make_keepalive_task(addr);
         conn.start_warm_protocols(keepalive_fn)?;
+        self.start_server_protocols_on(addr, &mut conn)?;
 
         // Update peer manager state.
         peer_manager.peer_connected(&addr, ConnectionDirection::Outbound);
@@ -446,6 +467,7 @@ impl ConnectionLifecycleManager {
 
         let keepalive_fn = self.make_keepalive_task(addr);
         conn.start_warm_protocols(keepalive_fn)?;
+        self.start_server_protocols_on(addr, &mut conn)?;
 
         peer_manager.peer_connected(&addr, ConnectionDirection::Outbound);
         self.connections.insert(addr, conn);
@@ -577,70 +599,6 @@ impl ConnectionLifecycleManager {
         peer_manager.peer_disconnected(&addr);
 
         info!(%addr, "warm -> cold complete");
-        Ok(())
-    }
-
-    // ─── Inbound Connection Handling ────────────────────────────────────────
-
-    /// Accept an inbound connection from a peer.
-    ///
-    /// If we already have an outbound connection to this peer, the Haskell
-    /// node promotes the connection to Duplex mode. We handle this by marking
-    /// the existing connection as duplex in the peer manager. If no connection
-    /// exists, we create a new `PeerConnection` from the accepted stream and
-    /// start warm protocols.
-    ///
-    /// # Arguments
-    ///
-    /// * `stream` — Already-accepted TCP stream from the listener
-    /// * `addr` — Remote peer socket address
-    /// * `peer_manager` — Node peer manager for state tracking
-    pub async fn accept_inbound(
-        &mut self,
-        stream: tokio::net::TcpStream,
-        addr: SocketAddr,
-        peer_manager: &mut NodePeerManager,
-    ) -> Result<(), LifecycleError> {
-        // Check for simultaneous open (we already have an outbound connection).
-        if self.connections.contains_key(&addr) {
-            // Haskell promotes to Duplex: both initiator and responder protocols
-            // share the same connection. For now, mark as duplex and close the
-            // inbound stream (the outbound connection stays).
-            info!(%addr, "simultaneous open: marking existing connection as duplex");
-            peer_manager.mark_peer_duplex(&addr);
-            // Drop the inbound stream — our outbound connection handles everything.
-            drop(stream);
-            return Ok(());
-        }
-
-        info!(%addr, "accepting inbound connection");
-
-        // Time the TCP accept + handshake for RTT measurement.
-        let accept_start = std::time::Instant::now();
-
-        // Accept: create mux from stream, run handshake as server.
-        let mut conn = PeerConnection::accept(
-            stream,
-            addr,
-            self.network_magic,
-            self.initiator_only,
-            self.peer_sharing,
-        )
-        .await?;
-
-        // Record handshake RTT (includes mux setup + handshake exchange).
-        let rtt_ms = accept_start.elapsed().as_secs_f64() * 1000.0;
-        self.metrics.record_handshake_rtt(rtt_ms);
-
-        // Start warm protocols (KeepAlive).
-        let keepalive_fn = self.make_keepalive_task(addr);
-        conn.start_warm_protocols(keepalive_fn)?;
-
-        // Update peer manager.
-        peer_manager.peer_connected(&addr, ConnectionDirection::Inbound);
-
-        self.connections.insert(addr, conn);
-        info!(%addr, "inbound connection accepted, warm protocols started");
         Ok(())
     }
 
@@ -1194,6 +1152,240 @@ impl ConnectionLifecycleManager {
                 }
             })
         })
+    }
+
+    // ─── Server Protocol Task Factories ─────────────────────────────────────
+    //
+    // These create responder-side protocol closures for duplex connections.
+    // Each returns a `ProtocolTaskFn` that is spawned on the server-side mux
+    // channels of a `PeerConnection`.
+
+    /// Create the ChainSync server task closure.
+    ///
+    /// Subscribes to block announcements and rollback announcements, then runs
+    /// the ChainSync server loop — streaming blocks to downstream peers as
+    /// they are produced or relayed.
+    fn make_chainsync_server_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
+        let block_provider = self.block_provider.clone();
+        let announcement_rx = self.block_announcement_tx.subscribe();
+        let rollback_rx = self.rollback_announcement_tx.subscribe();
+
+        Box::new(move |mut channel, cancel| {
+            Box::pin(async move {
+                let mut server =
+                    dugite_network::protocol::chainsync::server::ChainSyncServer::new();
+                tokio::select! {
+                    result = server.run(&mut channel, block_provider.as_ref(), announcement_rx, rollback_rx) => {
+                        match result {
+                            Ok(()) => debug!(%addr, "chainsync server completed"),
+                            Err(e) => debug!(%addr, "chainsync server error: {e}"),
+                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        debug!(%addr, "chainsync server cancelled");
+                    }
+                }
+            })
+        })
+    }
+
+    /// Create the BlockFetch server task closure.
+    ///
+    /// Serves block data from ChainDB in response to `MsgRequestRange` from
+    /// downstream peers.
+    fn make_blockfetch_server_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
+        let block_provider = self.block_provider.clone();
+
+        Box::new(move |mut channel, cancel| {
+            Box::pin(async move {
+                tokio::select! {
+                    result = dugite_network::protocol::blockfetch::server::BlockFetchServer::run(&mut channel, block_provider.as_ref()) => {
+                        match result {
+                            Ok(()) => debug!(%addr, "blockfetch server completed"),
+                            Err(e) => debug!(%addr, "blockfetch server error: {e}"),
+                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        debug!(%addr, "blockfetch server cancelled");
+                    }
+                }
+            })
+        })
+    }
+
+    /// Create the TxSubmission2 server task closure.
+    ///
+    /// Receives transactions from downstream peers, decodes them across all
+    /// supported eras (Conway=6 through Shelley=2), and adds valid ones to
+    /// the mempool. Tracks received/validated/rejected metrics.
+    fn make_txsubmission_server_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
+        let mempool = self.mempool.clone();
+        let metrics = self.metrics.clone();
+
+        Box::new(move |mut channel, cancel| {
+            Box::pin(async move {
+                let on_tx = {
+                    let tx_mempool = mempool;
+                    let tx_metrics = metrics;
+                    move |tx_hash: [u8; 32], tx_bytes: Vec<u8>| -> bool {
+                        // Track every transaction received from peers in real-time.
+                        tx_metrics
+                            .transactions_received
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        // Best-effort mempool admission: try all supported eras for decoding.
+                        let size_bytes = tx_bytes.len();
+                        for era_id in [6u16, 5, 4, 3, 2] {
+                            if let Ok(tx) =
+                                dugite_serialization::decode_transaction(era_id, &tx_bytes)
+                            {
+                                let hash = dugite_primitives::hash::Hash32::from_bytes(tx_hash);
+                                if tx_mempool.add_tx(hash, tx, size_bytes).is_ok() {
+                                    tx_metrics
+                                        .transactions_validated
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    return true;
+                                } else {
+                                    tx_metrics
+                                        .transactions_rejected
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    return false;
+                                }
+                            }
+                        }
+                        // Failed to decode in any era — count as rejected.
+                        tx_metrics
+                            .transactions_rejected
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        false
+                    }
+                };
+
+                tokio::select! {
+                    result = dugite_network::TxSubmissionServer::run(&mut channel, on_tx) => {
+                        match result {
+                            Ok(stats) => debug!(
+                                %addr,
+                                tx_ids = stats.tx_ids_received,
+                                txs_received = stats.txs_received,
+                                accepted = stats.txs_accepted,
+                                rejected = stats.txs_rejected,
+                                "txsubmission2 server completed",
+                            ),
+                            Err(e) => debug!(%addr, "txsubmission2 server error: {e}"),
+                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        debug!(%addr, "txsubmission2 server cancelled");
+                    }
+                }
+            })
+        })
+    }
+
+    /// Create the KeepAlive server task closure.
+    ///
+    /// Responds to `MsgKeepAlive` pings from downstream peers with
+    /// `MsgKeepAliveResponse` pongs.
+    fn make_keepalive_server_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
+        Box::new(move |mut channel, cancel| {
+            Box::pin(async move {
+                tokio::select! {
+                    result = dugite_network::KeepAliveServer::run(&mut channel) => {
+                        match result {
+                            Ok(count) => debug!(%addr, count, "keepalive server completed"),
+                            Err(e) => debug!(%addr, "keepalive server error: {e}"),
+                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        debug!(%addr, "keepalive server cancelled");
+                    }
+                }
+            })
+        })
+    }
+
+    /// Create the PeerSharing server task closure.
+    ///
+    /// Reads connected peer addresses from the shared peer manager and serves
+    /// them to downstream peers in response to `MsgShareRequest`.
+    fn make_peersharing_server_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
+        let peer_manager = self.peer_manager_for_servers.clone();
+
+        Box::new(move |mut channel, cancel| {
+            Box::pin(async move {
+                // Snapshot connected peer addresses at task start.
+                let peers: Vec<SocketAddr> = {
+                    let pm = peer_manager.read().await;
+                    pm.connected_peer_addrs()
+                };
+                tokio::select! {
+                    result = dugite_network::protocol::peersharing::server::PeerSharingServer::run(&mut channel, &peers) => {
+                        match result {
+                            Ok(()) => debug!(%addr, "peersharing server completed"),
+                            Err(e) => debug!(%addr, "peersharing server error: {e}"),
+                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        debug!(%addr, "peersharing server cancelled");
+                    }
+                }
+            })
+        })
+    }
+
+    /// Start all five server-side protocol tasks on a connection.
+    ///
+    /// Called after warm protocols are started, to activate the responder side
+    /// of the duplex mux. This enables downstream peers to sync blocks, fetch
+    /// data, submit transactions, send keepalives, and request peer addresses.
+    fn start_server_protocols_on(
+        &self,
+        addr: SocketAddr,
+        conn: &mut PeerConnection,
+    ) -> Result<(), PeerConnectionError> {
+        let cs = self.make_chainsync_server_task(addr);
+        let bf = self.make_blockfetch_server_task(addr);
+        let tx = self.make_txsubmission_server_task(addr);
+        let ka = self.make_keepalive_server_task(addr);
+        let ps = self.make_peersharing_server_task(addr);
+        conn.start_server_protocols(cs, bf, tx, ka, ps)
+    }
+
+    /// Register an inbound connection from the N2N listener background task.
+    ///
+    /// This is the entry point for connections accepted by the TCP listener.
+    /// The listener performs the handshake and creates a `PeerConnection`, then
+    /// passes it here for lifecycle management. We start warm + server protocols
+    /// and register the connection in the peer manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LifecycleError::AlreadyConnected` if a connection already exists
+    /// for this address (simultaneous open — the inbound side is dropped).
+    pub fn register_inbound_connection(
+        &mut self,
+        addr: SocketAddr,
+        mut conn: PeerConnection,
+        rtt_ms: f64,
+        peer_manager: &mut NodePeerManager,
+    ) -> Result<(), LifecycleError> {
+        if self.connections.contains_key(&addr) {
+            info!(%addr, "simultaneous open: dropping inbound (outbound exists)");
+            return Err(LifecycleError::AlreadyConnected(addr));
+        }
+
+        // Record handshake RTT for Prometheus metrics.
+        self.metrics.record_handshake_rtt(rtt_ms);
+
+        let keepalive_fn = self.make_keepalive_task(addr);
+        conn.start_warm_protocols(keepalive_fn)?;
+        self.start_server_protocols_on(addr, &mut conn)?;
+
+        peer_manager.peer_connected(&addr, ConnectionDirection::Inbound);
+        self.connections.insert(addr, conn);
+        info!(%addr, rtt_ms = format_args!("{rtt_ms:.0}"), "inbound cold -> warm complete");
+        Ok(())
     }
 }
 

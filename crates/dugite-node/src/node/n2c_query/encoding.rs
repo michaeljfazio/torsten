@@ -17,7 +17,7 @@ use crate::node::n2c_query::types::{
 /// Wire format:
 /// ```text
 /// [4, result]                          -- QueryAnytime / QueryHardFork / top-level
-/// [4, [result]]                        -- BlockQuery (EitherMismatch Right wrapper)
+/// [4, [result]]                        -- BlockQuery (EitherMismatch success: array(1))
 /// ```
 #[allow(dead_code)] // used in tests
 pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
@@ -36,8 +36,9 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     //   [4, toCBOR result]  — result directly, no HFC wrapping
     //
     // BlockQuery > QueryIfCurrent results (Shelley era queries):
-    //   [4, array(1), result]  — EitherMismatch Right (success) wrapper
-    //   The array(1) = Right in the Either encoding. No NS era index on results.
+    //   [4, [result]]  — EitherMismatch success wrapper (array(1))
+    //   Haskell HFC: success = array(1)[result], mismatch = array(2)[era1, era2]
+    //   Discriminator is array length, NOT a tag byte.
     //
     // BlockQuery > QueryAnytime results (GetCurrentEra, GetEraStart):
     //   [4, result]  — no EitherMismatch wrapping
@@ -59,7 +60,8 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     );
 
     if needs_either_mismatch {
-        // QueryIfCurrent results get EitherMismatch Right wrapper: array(1) = success
+        // HFC EitherMismatch success: array(1) containing just the result.
+        // Array length 1 = success, length 2 = era mismatch.
         enc.array(1).ok();
     }
 
@@ -71,7 +73,7 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
 /// Encode a `QueryResult` as the MsgResult payload (no `[4, ...]` envelope).
 ///
 /// Returns the result with proper HFC wrapping:
-/// - BlockQuery QueryIfCurrent results: `[1, result]` (EitherMismatch Right)
+/// - BlockQuery QueryIfCurrent results: `[result]` (EitherMismatch success: array(1))
 /// - Top-level / QueryAnytime / QueryHardFork results: `result` (no wrapping)
 pub fn encode_query_result_payload(result: &QueryResult) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -89,6 +91,8 @@ pub fn encode_query_result_payload(result: &QueryResult) -> Vec<u8> {
     );
 
     if needs_either_mismatch {
+        // HFC EitherMismatch success: array(1) containing just the result.
+        // Array length 1 = success, length 2 = era mismatch.
         enc.array(1).ok();
     }
 
@@ -2288,7 +2292,7 @@ mod tests {
         // [4, [payload]]
         dec.array().unwrap();
         dec.u32().unwrap(); // 4 = MsgResult tag
-        dec.array().unwrap(); // HFC EitherMismatch Right wrapper
+        dec.array().unwrap(); // HFC EitherMismatch success wrapper (array(1))
         cbor[dec.position()..].to_vec()
     }
 

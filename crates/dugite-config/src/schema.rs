@@ -174,17 +174,6 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         tuning_hint: "Use 'RequiresMagic' for all testnets, 'RequiresNoMagic' for mainnet.",
     },
     ParamDef {
-        key: "EnableP2P",
-        section: "Network",
-        param_type: ParamType::Bool,
-        default: "true",
-        description: "Enable the Ouroboros P2P networking stack. When true, Dugite \
-                      uses the diffusion layer for peer discovery and connection management. \
-                      Set to false only for legacy non-P2P relay configurations.",
-        tuning_hint: "Always enable for production. \
-                      Disable only for isolated testing or legacy topology setups.",
-    },
-    ParamDef {
         key: "DiffusionMode",
         section: "Network",
         param_type: ParamType::Enum {
@@ -284,6 +273,90 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         description: "Target size of the known big-ledger-peer set (cold + warm + hot).",
         tuning_hint: "15-25 gives a good pool of candidates for ledger peer selection \
                       without excessive churn.",
+    },
+    ParamDef {
+        key: "ConsensusMode",
+        section: "Network",
+        param_type: ParamType::Enum {
+            values: &["PraosMode", "GenesisMode"],
+        },
+        default: "PraosMode",
+        description: "Consensus protocol mode. PraosMode is the standard operating mode. \
+                      GenesisMode enables Ouroboros Genesis for trustless bulk sync from \
+                      potentially dishonest peers.",
+        tuning_hint: "Use PraosMode unless you specifically need Genesis sync guarantees. \
+                      GenesisMode requires additional SyncTargetNumberOf* configuration.",
+    },
+    ParamDef {
+        key: "SyncTargetNumberOfActivePeers",
+        section: "Network",
+        param_type: ParamType::U64 { min: 0, max: 100 },
+        default: "0",
+        description: "Target active peers during Genesis bulk sync. Only used when \
+                      ConsensusMode is GenesisMode.",
+        tuning_hint: "Leave at 0 for PraosMode. For GenesisMode, match your regular \
+                      TargetNumberOfActivePeers or set higher for aggressive sync.",
+    },
+    ParamDef {
+        key: "SyncTargetNumberOfEstablishedPeers",
+        section: "Network",
+        param_type: ParamType::U64 { min: 0, max: 200 },
+        default: "0",
+        description: "Target established peers during Genesis bulk sync.",
+        tuning_hint: "Leave at 0 for PraosMode.",
+    },
+    ParamDef {
+        key: "SyncTargetNumberOfKnownPeers",
+        section: "Network",
+        param_type: ParamType::U64 { min: 0, max: 500 },
+        default: "0",
+        description: "Target known peers during Genesis bulk sync.",
+        tuning_hint: "Leave at 0 for PraosMode.",
+    },
+    ParamDef {
+        key: "SyncTargetNumberOfRootPeers",
+        section: "Network",
+        param_type: ParamType::U64 { min: 0, max: 200 },
+        default: "0",
+        description: "Target root peers during Genesis bulk sync.",
+        tuning_hint: "Leave at 0 for PraosMode.",
+    },
+    ParamDef {
+        key: "SyncTargetNumberOfActiveBigLedgerPeers",
+        section: "Network",
+        param_type: ParamType::U64 { min: 0, max: 100 },
+        default: "30",
+        description: "Target active big ledger peers during Genesis bulk sync. \
+                      High value ensures honest chain availability during sync.",
+        tuning_hint: "30 is the Haskell default. Higher values improve Genesis safety \
+                      at the cost of more connections during sync.",
+    },
+    ParamDef {
+        key: "SyncTargetNumberOfEstablishedBigLedgerPeers",
+        section: "Network",
+        param_type: ParamType::U64 { min: 0, max: 200 },
+        default: "50",
+        description: "Target established big ledger peers during Genesis bulk sync.",
+        tuning_hint: "50 is the Haskell default.",
+    },
+    ParamDef {
+        key: "SyncTargetNumberOfKnownBigLedgerPeers",
+        section: "Network",
+        param_type: ParamType::U64 { min: 0, max: 500 },
+        default: "100",
+        description: "Target known big ledger peers during Genesis bulk sync.",
+        tuning_hint: "100 is the Haskell default.",
+    },
+    ParamDef {
+        key: "MinBigLedgerPeersForTrustedState",
+        section: "Network",
+        param_type: ParamType::U64 { min: 0, max: 100 },
+        default: "5",
+        description: "Minimum active big ledger peers required to continue syncing in \
+                      Genesis mode. If active BLPs drop below this, block adoption is \
+                      paused until enough connections recover.",
+        tuning_hint: "5 is the Haskell default. Lower values reduce safety guarantees. \
+                      Only relevant when ConsensusMode is GenesisMode.",
     },
     // --- Genesis section ---------------------------------------------------
     ParamDef {
@@ -612,6 +685,43 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         tuning_hint: "Lower to aggressively shed failing peers. Raise if peers are being \
                       demoted too frequently due to transient network issues.",
     },
+    ParamDef {
+        key: "ProtocolIdleTimeout",
+        section: "Advanced",
+        param_type: ParamType::U64 { min: 1, max: 3600 },
+        default: "5",
+        description: "Time in seconds before an idle mini-protocol connection is pruned.",
+        tuning_hint: "5 seconds (default) matches Haskell. Increase if peers have high \
+                      latency and idle connections are being pruned prematurely.",
+    },
+    ParamDef {
+        key: "TimeWaitTimeout",
+        section: "Advanced",
+        param_type: ParamType::U64 { min: 1, max: 3600 },
+        default: "60",
+        description: "Duration in seconds a connection stays in TIME_WAIT after close.",
+        tuning_hint: "60 seconds (default) matches Haskell. Rarely needs changing.",
+    },
+    ParamDef {
+        key: "EgressPollInterval",
+        section: "Advanced",
+        param_type: ParamType::U64 { min: 1, max: 3600 },
+        default: "10",
+        description: "How often (in seconds) the outbound governor polls for new \
+                      connection opportunities.",
+        tuning_hint: "10 seconds (default) matches Haskell. Lower values increase \
+                      responsiveness at the cost of more CPU cycles.",
+    },
+    ParamDef {
+        key: "ChainSyncIdleTimeout",
+        section: "Advanced",
+        param_type: ParamType::U64 { min: 0, max: 3600 },
+        default: "300",
+        description: "ChainSync-specific idle timeout in seconds. 0 disables the timeout \
+                      (used in GenesisMode). Default 300s for PraosMode.",
+        tuning_hint: "300 seconds for PraosMode, 0 for GenesisMode. A lower value helps \
+                      detect stalled ChainSync peers faster.",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -626,7 +736,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
 pub fn build_lookup() -> HashMap<&'static str, &'static ParamDef> {
     let mut map = HashMap::new();
     for def in KNOWN_PARAMS {
-        // First occurrence wins — avoids duplicates like the EnableP2P one above.
+        // First occurrence wins — avoids duplicates.
         map.entry(def.key).or_insert(def);
     }
     map
@@ -724,7 +834,6 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
     map.insert("RequiresNetworkMagic".into(), json!(req_magic));
 
     // P2P networking.
-    map.insert("EnableP2P".into(), json!(true));
     map.insert("DiffusionMode".into(), json!("InitiatorAndResponder"));
     map.insert("PeerSharing".into(), json!("PeerSharingPublic"));
     map.insert("TargetNumberOfActivePeers".into(), json!(15));
@@ -734,6 +843,22 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
     map.insert("TargetNumberOfActiveBigLedgerPeers".into(), json!(5));
     map.insert("TargetNumberOfEstablishedBigLedgerPeers".into(), json!(10));
     map.insert("TargetNumberOfKnownBigLedgerPeers".into(), json!(15));
+
+    // Consensus mode.
+    map.insert("ConsensusMode".into(), json!("PraosMode"));
+
+    // Genesis sync targets.
+    map.insert("SyncTargetNumberOfActivePeers".into(), json!(0));
+    map.insert("SyncTargetNumberOfEstablishedPeers".into(), json!(0));
+    map.insert("SyncTargetNumberOfKnownPeers".into(), json!(0));
+    map.insert("SyncTargetNumberOfRootPeers".into(), json!(0));
+    map.insert("SyncTargetNumberOfActiveBigLedgerPeers".into(), json!(30));
+    map.insert(
+        "SyncTargetNumberOfEstablishedBigLedgerPeers".into(),
+        json!(50),
+    );
+    map.insert("SyncTargetNumberOfKnownBigLedgerPeers".into(), json!(100));
+    map.insert("MinBigLedgerPeersForTrustedState".into(), json!(5));
 
     // Genesis files (conventional relative paths).
     map.insert(
@@ -784,6 +909,12 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
     map.insert("ChurnIntervalSyncSecs".into(), json!(900));
     map.insert("StallDemotionCycles".into(), json!(6));
     map.insert("ErrorDemotionThreshold".into(), json!(5));
+
+    // Connection management.
+    map.insert("ProtocolIdleTimeout".into(), json!(5));
+    map.insert("TimeWaitTimeout".into(), json!(60));
+    map.insert("EgressPollInterval".into(), json!(10));
+    map.insert("ChainSyncIdleTimeout".into(), json!(300));
 
     map
 }

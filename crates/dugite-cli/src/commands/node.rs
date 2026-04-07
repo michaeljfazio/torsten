@@ -329,15 +329,21 @@ pub fn issue_op_cert(
     // Sign with the cold key
     let signature = cold_sk.sign(&cert_body);
 
-    // Build the full operational certificate:
-    // [hot_vkey, sequence_number, kes_period, cold_key_signature]
+    // Build the full operational certificate matching Haskell's OperationalCertificate:
+    // array(2) [ocert, cold_vkey]
+    // where ocert = array(4) [hot_vkey, sequence_number, kes_period, cold_key_signature]
+    let cold_vk = cold_sk.verification_key();
     let mut opcert_cbor = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut opcert_cbor);
+    enc.array(2)?;
+    // [0] OCert body
     enc.array(4)?;
     enc.bytes(kes_vkey)?;
     enc.u64(counter_value)?;
     enc.u64(kes_period)?;
     enc.bytes(&signature)?;
+    // [1] Cold verification key (raw 32 bytes)
+    enc.bytes(&cold_vk.to_bytes())?;
 
     let opcert_env = serde_json::json!({
         "type": "NodeOperationalCertificate",
@@ -349,7 +355,6 @@ pub fn issue_op_cert(
 
     // Increment the counter
     let new_counter = counter_value + 1;
-    let cold_vk = cold_sk.verification_key();
     let mut new_counter_cbor = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut new_counter_cbor);
     enc.array(2)?;
