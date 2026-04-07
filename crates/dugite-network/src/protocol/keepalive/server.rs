@@ -21,6 +21,11 @@ impl KeepAliveServer {
     /// Returns `Ok(ping_count)` on clean shutdown (MsgDone received).
     pub async fn run(channel: &mut MuxChannel) -> Result<u64, ProtocolError> {
         let mut ping_count: u64 = 0;
+        tracing::info!(
+            protocol_id = channel.protocol_id(),
+            direction = ?channel.direction(),
+            "keepalive server: started, waiting for pings"
+        );
 
         loop {
             let msg_bytes = channel.recv().await.map_err(ProtocolError::from)?;

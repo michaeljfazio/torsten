@@ -73,6 +73,12 @@ impl KeepAliveClient {
         let mut last_rtt: Option<Duration> = None;
         let mut consecutive_failures: u32 = 0;
 
+        tracing::info!(
+            protocol_id = channel.protocol_id(),
+            direction = ?channel.direction(),
+            "keepalive client: started"
+        );
+
         loop {
             // Check for cancellation before sending
             if self.cancel.is_cancelled() {

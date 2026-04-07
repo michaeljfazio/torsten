@@ -143,6 +143,14 @@ impl IngressTask {
             let local_direction = header.direction.flip();
             let key = (header.protocol_id, local_direction);
 
+            tracing::trace!(
+                protocol_id = header.protocol_id,
+                wire_direction = ?header.direction,
+                local_direction = ?local_direction,
+                payload_len = header.payload_length,
+                "ingress: routing SDU"
+            );
+
             match self.routes.get_mut(&key) {
                 Some(route) => {
                     let payload_len = payload.len();

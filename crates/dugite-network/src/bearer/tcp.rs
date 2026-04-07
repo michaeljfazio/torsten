@@ -2,7 +2,7 @@
 //!
 //! SDU payload size: 12,288 bytes (matching Haskell `makeSocketBearer`).
 //! Batch size: 131,072 bytes.
-//! TCP_NODELAY=false (Nagle enabled — mux egress batching handles coalescing).
+//! TCP_NODELAY=true (Nagle disabled — matching Haskell `configureSocket`).
 //! SO_KEEPALIVE=true with 60s interval.
 
 use socket2::{Socket, TcpKeepalive};
@@ -37,19 +37,28 @@ impl TcpBearer {
     /// Create a new TCP bearer from an existing stream.
     ///
     /// Configures:
-    /// - `TCP_NODELAY=false` (Nagle enabled — mux batching handles coalescing)
+    /// - `TCP_NODELAY=true` (Nagle disabled — matching Haskell `configureSocket`)
     /// - `SO_KEEPALIVE=true` with 60s interval
+    ///
+    /// TCP_NODELAY is critical for Ouroboros mux correctness. The mux sends
+    /// small SDUs (e.g., KeepAlive pings = 11 bytes) that must be delivered
+    /// immediately. With Nagle's algorithm enabled, small packets are buffered
+    /// waiting for ACKs, causing multi-second delays or deadlocks — especially
+    /// on duplex connections where both sides send small packets simultaneously
+    /// (Nagle + delayed ACK interaction).
+    ///
+    /// Haskell's `configureSocket` (ouroboros-network Snocket.hs) and
+    /// `configureOutboundSocket` (ConnectionHandler.hs) both set NoDelay=1.
     pub fn new(stream: TcpStream) -> Result<Self, BearerError> {
         // Match Haskell cardano-node bearer configuration:
-        // TCP_NODELAY=false (Nagle enabled — mux egress batching handles coalescing)
+        // TCP_NODELAY=true (Nagle disabled — required for mux SDU delivery)
         // SO_KEEPALIVE with 60s interval
         //
         // Use socket2 for TCP option configuration, then convert back to tokio.
-        // socket2 0.6 renamed set_nodelay() → set_tcp_nodelay().
         let std_stream = stream.into_std().map_err(BearerError::Io)?;
         let socket = Socket::from(std_stream);
 
-        socket.set_tcp_nodelay(false).map_err(BearerError::Io)?;
+        socket.set_tcp_nodelay(true).map_err(BearerError::Io)?;
 
         let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_INTERVAL);
         socket
