@@ -417,6 +417,7 @@ impl NodePeerManager {
     /// Called during simultaneous open detection — an inbound connection arrives
     /// while we already have an outbound connection to the same peer. The
     /// connection transitions to `DuplexConn` matching Haskell's `DuplexState`.
+    #[allow(dead_code)] // Will be used when full simultaneous-open handling is implemented
     pub fn mark_peer_duplex(&mut self, addr: &SocketAddr) {
         if self.conn_states.contains_key(addr) {
             self.conn_states.insert(*addr, ConnectionState::DuplexConn);

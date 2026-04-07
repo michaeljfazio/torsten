@@ -595,75 +595,15 @@ impl ConnectionLifecycleManager {
             chains.remove(&addr);
         }
 
+        // Decrement active connection counter.
+        self.metrics
+            .n2n_connections_active
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
         // Update peer manager — removes connection state entirely.
         peer_manager.peer_disconnected(&addr);
 
         info!(%addr, "warm -> cold complete");
-        Ok(())
-    }
-
-    // ─── Inbound Connection Handling ────────────────────────────────────────
-
-    /// Accept an inbound connection from a peer.
-    ///
-    /// If we already have an outbound connection to this peer, the Haskell
-    /// node promotes the connection to Duplex mode. We handle this by marking
-    /// the existing connection as duplex in the peer manager. If no connection
-    /// exists, we create a new `PeerConnection` from the accepted stream and
-    /// start warm protocols.
-    ///
-    /// # Arguments
-    ///
-    /// * `stream` — Already-accepted TCP stream from the listener
-    /// * `addr` — Remote peer socket address
-    /// * `peer_manager` — Node peer manager for state tracking
-    pub async fn accept_inbound(
-        &mut self,
-        stream: tokio::net::TcpStream,
-        addr: SocketAddr,
-        peer_manager: &mut NodePeerManager,
-    ) -> Result<(), LifecycleError> {
-        // Check for simultaneous open (we already have an outbound connection).
-        if self.connections.contains_key(&addr) {
-            // Haskell promotes to Duplex: both initiator and responder protocols
-            // share the same connection. For now, mark as duplex and close the
-            // inbound stream (the outbound connection stays).
-            info!(%addr, "simultaneous open: marking existing connection as duplex");
-            peer_manager.mark_peer_duplex(&addr);
-            // Drop the inbound stream — our outbound connection handles everything.
-            drop(stream);
-            return Ok(());
-        }
-
-        info!(%addr, "accepting inbound connection");
-
-        // Time the TCP accept + handshake for RTT measurement.
-        let accept_start = std::time::Instant::now();
-
-        // Accept: create mux from stream, run handshake as server.
-        let mut conn = PeerConnection::accept(
-            stream,
-            addr,
-            self.network_magic,
-            self.initiator_only,
-            self.peer_sharing,
-        )
-        .await?;
-
-        // Record handshake RTT (includes mux setup + handshake exchange).
-        let rtt_ms = accept_start.elapsed().as_secs_f64() * 1000.0;
-        self.metrics.record_handshake_rtt(rtt_ms);
-
-        // Start warm protocols (KeepAlive).
-        let keepalive_fn = self.make_keepalive_task(addr);
-        conn.start_warm_protocols(keepalive_fn)?;
-        self.start_server_protocols_on(addr, &mut conn)?;
-
-        // Update peer manager.
-        peer_manager.peer_connected(&addr, ConnectionDirection::Inbound);
-
-        self.connections.insert(addr, conn);
-        info!(%addr, "inbound connection accepted, warm protocols started");
         Ok(())
     }
 
@@ -770,6 +710,12 @@ impl ConnectionLifecycleManager {
                 let mut chains = self.candidate_chains.write().await;
                 chains.remove(&addr);
             }
+
+            // Decrement active connection counter (balances the increment
+            // in the inbound accept handler or outbound connect path).
+            self.metrics
+                .n2n_connections_active
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
             peer_manager.peer_disconnected(&addr);
             warn!(%addr, "removed dead connection");
@@ -1439,6 +1385,9 @@ impl ConnectionLifecycleManager {
             info!(%addr, "simultaneous open: dropping inbound (outbound exists)");
             return Err(LifecycleError::AlreadyConnected(addr));
         }
+
+        // Record handshake RTT for Prometheus metrics.
+        self.metrics.record_handshake_rtt(rtt_ms);
 
         let keepalive_fn = self.make_keepalive_task(addr);
         conn.start_warm_protocols(keepalive_fn)?;
