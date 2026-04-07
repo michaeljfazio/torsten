@@ -606,14 +606,22 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         kv_aligned(
             "Tx Received",
             App::format_number(tx_received),
-            theme.muted,
+            if tx_received > 0 {
+                theme.success
+            } else {
+                theme.muted
+            },
             theme,
             col_w,
         ),
         kv_aligned(
             "Tx Validated",
             App::format_number(tx_validated),
-            theme.muted,
+            if tx_validated > 0 {
+                theme.success
+            } else {
+                theme.muted
+            },
             theme,
             col_w,
         ),
