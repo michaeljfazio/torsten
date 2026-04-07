@@ -6,7 +6,9 @@
 
 ## Overview
 
-Close the gaps between Dugite's P2P governor, topology handling, and config parsing compared to Haskell cardano-node 10.x. The Haskell implementation uses per-group local root peer management with unconditional demotion exclusions — our current governor uses aggregate peer counts and is source-blind in most demotion paths. This spec covers 7 work items ordered by priority.
+Close the remaining gaps between Dugite's P2P governor, topology handling, and config parsing compared to Haskell cardano-node 10.x. Our governor already has per-group local root promotion (`governor.rs` lines 152-233) and topology demotion exclusions in selection functions (`select_worst_hot`, `select_worst_warm`, `select_lowest_reputation_cold`). The remaining work is: ensuring the aggregate target paths exclude topology peers, adding the `aboveTargetLocal` exception path, wiring per-group `diffusionMode` to handshakes, adding missing config fields, and startup validation. This spec covers 7 work items ordered by priority.
+
+> **Note on peer selection strategy:** Haskell uses **uniform random selection** for all promotions (`simplePromotionPolicy`) and score-based selection only for hot demotions. Our implementation uses score-based selection throughout. This is a deliberate divergence — our scoring approach (reputation + latency + failure penalty) provides better peer quality optimization while maintaining the same structural guarantees (per-group targets, topology exclusions). This spec does not change the selection strategy.
 
 ---
 
@@ -32,54 +34,32 @@ In Haskell, `belowTargetLocal` in `EstablishedPeers.hs` and `ActivePeers.hs` ope
 
 **Warm-to-hot (`ActivePeers.belowTargetLocal`):**
 
-Same pattern but checks `|membersActive| < hotValency` per group. An additional constraint: peers must pass `readyPeers` — they must have been warm for at least `policyPeerShareActivationDelay` before being eligible for hot promotion.
+Same pattern but checks `|membersActive| < hotValency` per group. An additional constraint: peers must pass `readyPeers` — a peer is only eligible for warm→hot if it is NOT in `nextActivateTimes` (the repromote delay queue). A peer lands in `nextActivateTimes` when it suffers an async demotion from hot back to warm; it must wait `repromoteDelay` before being eligible again. Note: `policyPeerShareActivationDelay` (default 300s) is a **separate** concept controlling when a peer can participate in peer sharing, NOT when it can be promoted to hot. A newly-warmed peer is immediately eligible for hot promotion unless it was recently demoted from hot.
 
 **Key properties:**
 - Fires even when aggregate `targetNumberOfEstablishedPeers` is satisfied
 - `belowTargetOther` explicitly excludes `LocalRootPeers.keysSet` from its candidate set — local roots are ONLY promoted by `belowTargetLocal`
 - Guard ordering: `belowTargetBigLedgerPeers <> belowTargetLocal <> belowTargetOther` — local has priority via STM `<|>` (orElse) semantics
 
-### Current Gap
+### Current State
 
-`compute_actions()` in `governor.rs` uses aggregate counts (`warm + hot < target_warm`). No per-group iteration. Topology peers can be promoted by the same path as ledger/DNS peers — there is no independent local root guard.
+`compute_actions()` in `governor.rs` **already has** per-group local root promotion (Stage 1, lines 152-233). It iterates each `LocalRootGroupTarget`, counts warm-or-hot members, and promotes cold→warm / warm→hot for deficient groups. It also uses an `already_promoted` HashSet to prevent double-promoting.
+
+### Remaining Gap
+
+1. **Aggregate target paths don't exclude topology peers.** Stage 2 (lines 237-255) and Stage 3 (lines 257-273) can promote topology peers again via the aggregate path, duplicating the per-group logic. Haskell's `belowTargetOther` explicitly excludes `LocalRootPeers.keysSet` — our aggregate paths must do the same.
+
+2. **No `inProgressPromoteCold` tracking.** Haskell tracks a global `Set peeraddr` of peers with in-flight cold→warm promotion jobs. This prevents double-promotion across governor iterations when async promotion is slow. Our `already_promoted` HashSet is per-invocation only — it doesn't persist across ticks.
+
+3. **No backoff-aware filtering in local root promotion.** Haskell's `localAvailableToConnect` is `localRootPeers ∩ KnownPeers.availableToConnect` — peers in exponential backoff after connection failure are excluded. Our per-group promotion (Stage 1) uses `peers_eligible_to_connect()` which does filter by backoff, but verify the intersection is correct.
 
 ### Design
 
-Add a `LocalRootGroup` tracking struct to `PeerManager`:
+1. **Exclude topology peers from aggregate paths:** In Stage 2 (`below_target_other_warm`), filter out `PeerSource::Topology` from the eligible set. In Stage 3 (`below_target_other_hot`), same exclusion. This ensures local roots are ONLY managed by the per-group guards.
 
-```rust
-pub struct LocalRootGroupState {
-    pub name: String,
-    pub members: HashSet<SocketAddr>,
-    pub warm_valency: usize,
-    pub hot_valency: usize,
-}
-```
+2. **Add `in_progress_promote_cold: HashSet<SocketAddr>` to `Governor`:** Populated when `PromoteToWarm` actions are emitted, cleared when the promotion completes (success or failure callback). Subtract from candidate sets in both local and aggregate paths. The `numToPromote` calculation per group should subtract `|inProgressPromoteCold ∩ group.members|`.
 
-`NodePeerManager` already stores `local_root_groups: Vec<LocalRootGroupInfo>` with `addrs`, `hot_valency`, `warm_valency`. Expose a method to query per-group established/active counts:
-
-```rust
-impl PeerManager {
-    /// Returns groups where |members ∩ established| < warm_valency
-    pub fn local_groups_below_warm_target(&self) -> Vec<(usize, Vec<SocketAddr>)>;
-    
-    /// Returns groups where |members ∩ active| < hot_valency  
-    pub fn local_groups_below_hot_target(&self) -> Vec<(usize, Vec<SocketAddr>)>;
-}
-```
-
-In `Governor::compute_actions()`, insert the local root check **before** aggregate target logic:
-
-```
-1. below_target_local_warm() → PromoteToWarm for deficient groups (from group members only)
-2. below_target_local_hot()  → PromoteToHot for deficient groups (from group members only)
-3. below_target_other_warm() → PromoteToWarm from non-local-root cold peers (existing logic)
-4. below_target_other_hot()  → PromoteToHot from non-local-root warm peers (existing logic)
-5. above_target_other_hot()  → DemoteToWarm (existing logic, with exclusion from §2)
-6. Churn, discovery, etc.
-```
-
-The `belowTargetOther` paths must exclude `PeerSource::Topology` peers from their candidate sets — local roots should only be managed by the local root guards.
+3. **Verify backoff filtering:** Ensure Stage 1 correctly intersects group members with `peers_eligible_to_connect()` results (peers whose `next_connect_after` has elapsed or is None).
 
 ### Acceptance Criteria
 
@@ -113,21 +93,27 @@ Local root peers are excluded from **every** demotion and forget candidate set v
 
 **Churn never targets local roots:** Churn modifies `PeerSelectionTargets` (the target numbers), not individual peers. When targets decrease, `aboveTargetOther` fires — but local roots are excluded from those candidate sets. Additionally, `decreaseActivePeers` floors the active target at `max 1 localRootHotTarget` to avoid dropping below local root needs.
 
-### Current Gap
+### Current State
 
-Our code only excludes topology peers from `select_lowest_reputation_cold()` (cold churn eviction). The following paths are **source-blind**:
-- `select_worst_hot()` — used for hot→warm when `hot > target_hot` (line ~153)
-- Hot churn at line ~165 — calls `select_worst_hot()` 
-- `select_worst_warm()` — used for warm→cold when `warm > target` (line ~193)
-- `peer_failed()` forgets non-topology peers after 5 failures — correct
+Our code **already excludes** topology peers from:
+- `select_worst_hot()` (line 58 in selection.rs) — hot→warm demotion
+- `select_worst_warm()` (line 111) — warm→cold demotion
+- `select_lowest_reputation_cold()` (line 82) — cold churn eviction
+- `peer_failed()` (networking.rs line 398-419) — forgetting after 5 failures
+
+### Remaining Gap
+
+1. **Stage 4 in `compute_actions()` (lines 275-300)** — the hot→warm target-driven demotion path. This path **does** filter topology peers (lines 288-290 check `info.source == PeerSource::Topology`), so it's already correct. **Verify this is consistent.**
+
+2. **Missing `aboveTargetLocal` exception path.** There is no logic to demote local root peers when a group exceeds its `hotValency`. This can happen when inbound connections push a group above target.
+
+3. **No `aboveTargetLocal` in EstablishedPeers.** Confirmed: Haskell has NO `aboveTargetLocal` for warm→cold. Local root warm peers are **never** demoted to cold. Only `ActivePeers.aboveTargetLocal` exists (hot→warm when group exceeds `hotValency`).
 
 ### Design
 
-Add topology exclusion to every demotion/selection function in `selection.rs`:
+1. **Audit and confirm existing exclusions.** Verify all demotion paths in `compute_actions()` and all selection functions exclude topology peers. The code exploration shows this is already done for the selection functions.
 
-1. **`select_worst_hot(peer_manager) -> Option<SocketAddr>`**: Add `if info.source == PeerSource::Topology { continue; }` filter
-2. **`select_worst_warm(peer_manager) -> Option<SocketAddr>`**: Same exclusion
-3. **New: `select_excess_local_hot(peer_manager, groups) -> Vec<SocketAddr>`**: For each local root group where `|hot_members| > hot_valency`, select `excess` worst-scoring hot members for demotion. This is the one exception path.
+2. **New: `select_excess_local_hot(peer_manager, groups) -> Vec<SocketAddr>`**: For each local root group where `|hot_members| > hot_valency`, select `excess` worst-scoring hot members for demotion. This is the one exception path.
 
 In `governor.rs`, update the above-target logic:
 
@@ -161,14 +147,16 @@ above_target_warm:
 | JSON Key | Type | Default | Purpose |
 |----------|------|---------|---------|
 | `ConsensusMode` | enum `PraosMode \| GenesisMode` | `PraosMode` | Enables Ouroboros Genesis |
-| `SyncTargetNumberOfActivePeers` | `usize` | `0` | Active peers during Genesis sync |
-| `SyncTargetNumberOfEstablishedPeers` | `usize` | `0` | Established peers during sync |
-| `SyncTargetNumberOfKnownPeers` | `usize` | `0` | Known peers during sync |
+| `SyncTargetNumberOfActivePeers` | `usize` | `5` | Active peers during Genesis sync |
+| `SyncTargetNumberOfEstablishedPeers` | `usize` | `10` | Established peers during sync |
+| `SyncTargetNumberOfKnownPeers` | `usize` | `150` | Known peers during sync |
 | `SyncTargetNumberOfRootPeers` | `usize` | `0` | Root peers during sync |
 | `SyncTargetNumberOfActiveBigLedgerPeers` | `usize` | `30` | Active BLPs during sync |
-| `SyncTargetNumberOfEstablishedBigLedgerPeers` | `usize` | `50` | Established BLPs during sync |
+| `SyncTargetNumberOfEstablishedBigLedgerPeers` | `usize` | `40` | Established BLPs during sync |
 | `SyncTargetNumberOfKnownBigLedgerPeers` | `usize` | `100` | Known BLPs during sync |
 | `MinBigLedgerPeersForTrustedState` | `usize` | `5` | Pause sync if active BLPs drop below this |
+
+> **Source:** `defaultSyncTargets` in `cardano-diffusion/lib/Cardano/Network/Diffusion/Configuration.hs` lines 51-60. Note `SyncTargetNumberOfEstablishedBigLedgerPeers` defaults to 40 (not 50 as stated in the issue).
 
 **Haskell `ConsensusMode` type:** Parsed from JSON string literals `"PraosMode"` or `"GenesisMode"` via derived `FromJSON`. Default is `PraosMode`. In `GenesisMode`, the governor switches between "deadline targets" (normal) and "sync targets" (when `LedgerStateJudgement = TooOld`). When `PraosMode`, sync targets are ignored.
 
@@ -182,7 +170,17 @@ above_target_warm:
 | `EgressPollInterval` | `f64` (seconds) | `0.0` | Outbound governor poll interval |
 | `ChainSyncIdleTimeout` | `Option<f64>` (seconds) | `None` (means use default 3373s) | ChainSync-specific idle timeout |
 
-**`AcceptedConnectionsLimit` JSON format:** Parsed as an object with fields `acceptedConnectionsHardLimit` (u32), `acceptedConnectionsSoftLimit` (u32), `acceptedConnectionsDelay` (f64 seconds). The delay is NOT fixed — it scales linearly from 0 at soft limit to `delay` at hard limit. Above hard limit: block until count drops below, then wait `delay`.
+**`AcceptedConnectionsLimit` JSON format:** Parsed via a hand-written `FromJSON` instance in `OrphanInstances.hs` (lines 284-305). The JSON keys are **short forms**, NOT the full Haskell field names:
+
+```json
+"AcceptedConnectionsLimit": {
+  "hardLimit": 512,
+  "softLimit": 384,
+  "delay": 5
+}
+```
+
+JSON keys: `"hardLimit"` (Word32), `"softLimit"` (Word32), `"delay"` (DiffTime/seconds). The delay is NOT fixed — it scales linearly from 0 at soft limit to `delay` at hard limit. Above hard limit: block until count drops below, then wait `delay`.
 
 ### Design
 
@@ -195,23 +193,28 @@ pub enum ConsensusMode {
     GenesisMode,
 }
 
+/// Matches Haskell JSON format: {"hardLimit": 512, "softLimit": 384, "delay": 5}
+/// Hand-written FromJSON in OrphanInstances.hs uses short key names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AcceptedConnectionsLimit {
-    pub accepted_connections_hard_limit: u32,
-    pub accepted_connections_soft_limit: u32,
-    pub accepted_connections_delay: f64,
+    #[serde(rename = "hardLimit")]
+    pub hard_limit: u32,
+    #[serde(rename = "softLimit")]
+    pub soft_limit: u32,
+    #[serde(rename = "delay")]
+    pub delay: f64,
 }
 ```
 
-Add all fields to `NodeConfig` with `#[serde(default)]` using Haskell-matching defaults. **Phase 1** (this issue): parse and store. **Phase 2** (future): wire `AcceptedConnectionsLimit` to the N2N listener, Genesis targets to the governor.
+Add all fields to `NodeConfig` with `#[serde(default)]` using Haskell-matching defaults. All config JSON keys are **PascalCase** (matching Haskell `.:?` key strings from `POM.hs`). **Phase 1** (this issue): parse and store. **Phase 2** (future): wire `AcceptedConnectionsLimit` to the N2N listener, Genesis targets to the governor.
 
 ### Acceptance Criteria
 
 - All fields parse from cardano-node config JSON without errors
 - Missing fields use Haskell-matching defaults
 - `ConsensusMode` accepts exactly `"PraosMode"` and `"GenesisMode"`
-- `AcceptedConnectionsLimit` parses as nested object with camelCase field names
+- `AcceptedConnectionsLimit` parses as nested object with short keys (`hardLimit`, `softLimit`, `delay`)
+- `ChainSyncIdleTimeout`: `None` in config → use default 3373s (same for all modes, not mode-specific)
 - Unit tests for parsing valid configs and verifying defaults
 
 ---
@@ -232,17 +235,20 @@ The `rootDiffusionMode` field in `LocalRootPeersGroup` propagates through a 5-st
 
 Negotiation uses `min(local, remote)` — `InitiatorOnly < InitiatorAndResponder`, so either side requesting initiator-only makes the connection unidirectional.
 
-### Current Gap
+### Current State
 
-`topology.rs` already parses `diffusion_mode: Option<String>` on `LocalRootGroup`. But this value is **not wired** to the handshake. All outbound connections use the global `DiffusionMode` from `NodeConfig`.
+- `topology.rs` already parses `diffusion_mode: Option<String>` on `LocalRootGroup`
+- `networking.rs` already stores `diffusion_mode: Option<DiffusionMode>` in `LocalRootGroupInfo` (line 131)
+- `effective_diffusion_mode(&self, addr: &SocketAddr) -> DiffusionMode` already exists in `NodePeerManager` (lines 655-664) — checks group membership, applies per-group override, falls back to node-level config
+
+### Remaining Gap
+
+The `effective_diffusion_mode()` method exists but is **not called** from `connection_lifecycle.rs` during outbound connection establishment. All outbound handshakes use the global `DiffusionMode`.
 
 ### Design
 
-1. Store the parsed `diffusion_mode` in `LocalRootGroupInfo` (in `networking.rs`)
-2. Add a method `peer_diffusion_mode(&self, addr: &SocketAddr) -> DiffusionMode` to `NodePeerManager` that:
-   - Looks up which local root group the peer belongs to
-   - Returns the group's `diffusion_mode` if set, otherwise the global `DiffusionMode`
-3. In `connection_lifecycle.rs`, when establishing an outbound connection to a topology peer, call `peer_diffusion_mode()` to determine the handshake `initiator_only` flag instead of using the global config
+1. In `connection_lifecycle.rs`, when establishing an outbound connection to a topology peer, call `effective_diffusion_mode(addr)` on `NodePeerManager` to determine the handshake `initiator_only` flag instead of using the global config
+2. Verify the CBOR encoding: `InitiatorOnlyDiffusionMode` → `True`, `InitiatorAndResponderDiffusionMode` → `False` (matching Haskell wire format)
 
 **JSON values:** `"InitiatorOnly"` and `"InitiatorAndResponder"` (matching Haskell constructor names). Default when omitted: `InitiatorAndResponder`.
 
@@ -279,9 +285,11 @@ Negotiation uses `min(local, remote)` — `InitiatorOnly < InitiatorAndResponder
 
 ### 5c. `advertise`
 
-**Current state:** Already parsed in `LocalRootGroup`. Verify it's wired to peer sharing responses.
+**Current state:** Already parsed in `LocalRootGroup`. `is_advertisable(&self, addr: &SocketAddr)` exists in `NodePeerManager` (lines 677-684) — checks group membership for `advertise` flag, defaults `true` for non-topology peers.
 
-**Design:** Audit the peer sharing response path to ensure peers from `advertise: false` groups are excluded.
+**Gap:** `is_advertisable()` is NOT integrated into the peer sharing response path. The governor's `PeerShareRequest` action (line 355-360 in governor.rs) randomly picks from ALL warm peers with `peer_sharing=true` — it doesn't filter by `advertise`.
+
+**Design:** When building the peer sharing response, filter out peers where `is_advertisable()` returns `false`.
 
 ### Acceptance Criteria
 
@@ -389,13 +397,10 @@ Update `crates/dugite-config/src/schema.rs` to add `ParamDef` entries for every 
 - `ChainSyncIdleTimeout` — `ParamType::U64 { min: 0, max: 86400 }`
 
 **Connection Limits section (new):**
-- `AcceptedConnectionsLimit` — compound type; represent as three separate keys:
-  - `AcceptedConnectionsHardLimit` — `ParamType::U64 { min: 1, max: 65535 }`
-  - `AcceptedConnectionsSoftLimit` — `ParamType::U64 { min: 1, max: 65535 }`
-  - `AcceptedConnectionsDelay` — `ParamType::U64 { min: 0, max: 60 }`
+- `AcceptedConnectionsLimit` — compound type in config JSON (`{"hardLimit": 512, "softLimit": 384, "delay": 5}`). In the schema, represent as a single `ParamType::String` with description noting the JSON object format, since `dugite-config` doesn't support compound editing. The default JSON representation should be included in `default_config_for_network()`.
 
 **Genesis section (new):**
-- All `SyncTargetNumberOf*` fields — `ParamType::U64` with same bounds as their deadline counterparts
+- All `SyncTargetNumberOf*` fields — `ParamType::U64` with same bounds as their deadline counterparts. **Correct defaults:** active=5, established=10, known=150, root=0, activeBLP=30, establishedBLP=40, knownBLP=100
 - `MinBigLedgerPeersForTrustedState` — `ParamType::U64 { min: 0, max: 100 }`
 
 Update `default_config_for_network()` to include all new fields with Haskell-matching defaults.
@@ -412,20 +417,37 @@ Update `default_config_for_network()` to include all new fields with Haskell-mat
 
 ## Implementation Order
 
-1. **§2 — Demotion exclusion** (smallest change, highest correctness impact)
-2. **§1 — `below_target_local`** (depends on group tracking, most complex governor change)
+1. **§1 — Governor local root promotion gaps** (exclude topology from aggregate paths, add `inProgressPromoteCold` tracking)
+2. **§2 — Demotion exclusion audit + `aboveTargetLocal`** (audit existing exclusions, add hot→warm exception for oversubscribed groups)
 3. **§3 — Config fields** (additive, no behaviour change)
 4. **§6 — Startup validation** (depends on §3 for new fields)
 5. **§7 — Schema alignment** (depends on §3 for field names)
-6. **§4 — `diffusionMode` wiring** (independent but medium complexity)
-7. **§5 — Additional topology fields** (lowest priority, mostly verification)
+6. **§4 — `diffusionMode` wiring** (one callsite change in connection_lifecycle.rs)
+7. **§5 — Additional topology fields** (advertise integration, parse-only for rest)
 
 ---
 
 ## Testing Strategy
 
 - **Unit tests** for each governor change: mock `PeerManager` state, verify emitted actions
+- **Unit tests** for `aboveTargetLocal`: group with hot > hotValency → excess demoted
 - **Unit tests** for config parsing: valid/invalid JSON, default values, edge cases
-- **Unit tests** for startup validation: all constraint violations produce clear errors
+- **Unit tests** for startup validation: all 14 constraint predicates, both valid and invalid
+- **Unit tests** for `AcceptedConnectionsLimit`: verify short key names (`hardLimit`, `softLimit`, `delay`)
 - **Integration**: verify config compatibility with cardano-node 10.x JSON configs
 - **Soak test**: run node on preview testnet, verify local root reconnection under peer churn
+
+---
+
+## Errata vs Issue #369
+
+The following corrections were identified during spec review against Haskell source:
+
+1. **Sync target defaults (issue §3):** Issue states all non-BLP sync targets are 0. Haskell `defaultSyncTargets` has: active=5, established=10, known=150, root=0. Only root is 0.
+2. **SyncTargetNumberOfEstablishedBigLedgerPeers (issue §3):** Issue states default 50. Haskell default is 40.
+3. **AcceptedConnectionsLimit JSON keys (issue §3):** Issue implies full camelCase field names. Haskell `FromJSON` (OrphanInstances.hs) uses short keys: `hardLimit`, `softLimit`, `delay`.
+4. **ChainSyncIdleTimeout (issue §3):** Issue states "NoTimeout for GenesisMode, Timeout 300s for PraosMode". Haskell default is 3373s for ALL modes when no override set. 0 means no timeout; specific values override.
+5. **EgressPollInterval (issue §3):** Issue states default 10s. Haskell `defaultEgressPollInterval` is 0.
+6. **Per-group local root promotion (issue §1):** Issue implies this is entirely missing. `governor.rs` already has per-group promotion (Stage 1, lines 152-233). The gap is: aggregate paths don't exclude topology peers, and no `inProgressPromoteCold` tracking.
+7. **Demotion exclusions (issue §2):** Issue implies only cold churn has topology exclusion. `select_worst_hot()`, `select_worst_warm()` already exclude topology peers.
+8. **Haskell promotion strategy:** Haskell uses uniform random selection for promotions (`simplePromotionPolicy`), not score-based. Our score-based approach is a deliberate divergence.
