@@ -160,7 +160,10 @@ impl Governor {
         let eligible_to_connect: HashSet<SocketAddr> = if local_root_groups.is_empty() {
             HashSet::new()
         } else {
-            peer_manager.peers_eligible_to_connect().into_iter().collect()
+            peer_manager
+                .peers_eligible_to_connect()
+                .into_iter()
+                .collect()
         };
 
         for group in local_root_groups {
@@ -816,7 +819,11 @@ mod tests {
             .collect();
 
         // Exactly 2 promotions, all from group A.
-        assert_eq!(promote_warm.len(), 2, "should promote exactly 2 from group A");
+        assert_eq!(
+            promote_warm.len(),
+            2,
+            "should promote exactly 2 from group A"
+        );
         let group_a_set: HashSet<SocketAddr> = group_a_addrs.iter().copied().collect();
         for addr in &promote_warm {
             assert!(

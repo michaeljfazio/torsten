@@ -545,8 +545,7 @@ impl NodeConfig {
 
         // Sync targets (when Genesis mode is configured).
         if self.consensus_mode == ConsensusMode::GenesisMode {
-            if self.sync_target_number_of_known_peers
-                < self.sync_target_number_of_established_peers
+            if self.sync_target_number_of_known_peers < self.sync_target_number_of_established_peers
             {
                 anyhow::bail!(
                     "SyncTargetNumberOfKnownPeers ({}) must be >= \
