@@ -1326,15 +1326,25 @@ impl ConnectionLifecycleManager {
     ///
     /// Reads connected peer addresses from the shared peer manager and serves
     /// them to downstream peers in response to `MsgShareRequest`.
+    ///
+    /// Only peers that are advertisable are included in the response. Peers in
+    /// local root topology groups with `advertise: false` are excluded, matching
+    /// Haskell's `NodeToNodeVersion` peer sharing filter that respects the
+    /// `LocalRootPeers` `advertise` field (see `Ouroboros.Network.PeerSelection.State`).
     fn make_peersharing_server_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
         let peer_manager = self.peer_manager_for_servers.clone();
 
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
-                // Snapshot connected peer addresses at task start.
+                // Snapshot only advertisable connected peer addresses at task start.
+                // Peers in local root groups with `advertise: false` are excluded so
+                // private relays or block producers are never leaked to the network.
                 let peers: Vec<SocketAddr> = {
                     let pm = peer_manager.read().await;
                     pm.connected_peer_addrs()
+                        .into_iter()
+                        .filter(|a| pm.is_advertisable(a))
+                        .collect()
                 };
                 tokio::select! {
                     result = dugite_network::protocol::peersharing::server::PeerSharingServer::run(&mut channel, &peers) => {
