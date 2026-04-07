@@ -500,6 +500,73 @@ impl NodeConfig {
     /// `config_dir` is the directory containing the config file, used to resolve
     /// relative genesis file paths.
     pub fn validate(&self, config_dir: &Path) -> Result<()> {
+        // ── Peer target ordering ──────────────────────────────────────
+        // Haskell cardano-node validates at startup that:
+        //   known >= established >= active >= 0
+        // Violation causes a startup failure with explicit error message.
+
+        // Regular peer targets.
+        if self.target_number_of_known_peers < self.target_number_of_established_peers {
+            anyhow::bail!(
+                "TargetNumberOfKnownPeers ({}) must be >= TargetNumberOfEstablishedPeers ({})",
+                self.target_number_of_known_peers,
+                self.target_number_of_established_peers,
+            );
+        }
+        if self.target_number_of_established_peers < self.target_number_of_active_peers {
+            anyhow::bail!(
+                "TargetNumberOfEstablishedPeers ({}) must be >= TargetNumberOfActivePeers ({})",
+                self.target_number_of_established_peers,
+                self.target_number_of_active_peers,
+            );
+        }
+
+        // Big Ledger Peer targets.
+        if self.target_number_of_known_big_ledger_peers
+            < self.target_number_of_established_big_ledger_peers
+        {
+            anyhow::bail!(
+                "TargetNumberOfKnownBigLedgerPeers ({}) must be >= \
+                 TargetNumberOfEstablishedBigLedgerPeers ({})",
+                self.target_number_of_known_big_ledger_peers,
+                self.target_number_of_established_big_ledger_peers,
+            );
+        }
+        if self.target_number_of_established_big_ledger_peers
+            < self.target_number_of_active_big_ledger_peers
+        {
+            anyhow::bail!(
+                "TargetNumberOfEstablishedBigLedgerPeers ({}) must be >= \
+                 TargetNumberOfActiveBigLedgerPeers ({})",
+                self.target_number_of_established_big_ledger_peers,
+                self.target_number_of_active_big_ledger_peers,
+            );
+        }
+
+        // Sync targets (when Genesis mode is configured).
+        if self.consensus_mode == ConsensusMode::GenesisMode {
+            if self.sync_target_number_of_known_peers
+                < self.sync_target_number_of_established_peers
+            {
+                anyhow::bail!(
+                    "SyncTargetNumberOfKnownPeers ({}) must be >= \
+                     SyncTargetNumberOfEstablishedPeers ({})",
+                    self.sync_target_number_of_known_peers,
+                    self.sync_target_number_of_established_peers,
+                );
+            }
+            if self.sync_target_number_of_established_peers
+                < self.sync_target_number_of_active_peers
+            {
+                anyhow::bail!(
+                    "SyncTargetNumberOfEstablishedPeers ({}) must be >= \
+                     SyncTargetNumberOfActivePeers ({})",
+                    self.sync_target_number_of_established_peers,
+                    self.sync_target_number_of_active_peers,
+                );
+            }
+        }
+
         let genesis_files: &[(&str, &Option<String>, &Option<String>)] = &[
             ("Byron", &self.byron_genesis_file, &self.byron_genesis_hash),
             (
@@ -932,5 +999,64 @@ mod tests {
         assert_eq!(config.egress_poll_interval, 10);
         assert!(config.accepted_connections_limit.is_none());
         assert!(config.chain_sync_idle_timeout.is_none());
+    }
+
+    // ── Peer target ordering validation tests ─────────────────────────
+
+    #[test]
+    fn test_validate_known_less_than_established_fails() {
+        let config = NodeConfig {
+            target_number_of_known_peers: 10,
+            target_number_of_established_peers: 20,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(err.to_string().contains("TargetNumberOfKnownPeers"));
+    }
+
+    #[test]
+    fn test_validate_established_less_than_active_fails() {
+        let config = NodeConfig {
+            target_number_of_established_peers: 5,
+            target_number_of_active_peers: 10,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(err.to_string().contains("TargetNumberOfEstablishedPeers"));
+    }
+
+    #[test]
+    fn test_validate_blp_known_less_than_established_fails() {
+        let config = NodeConfig {
+            target_number_of_known_big_ledger_peers: 3,
+            target_number_of_established_big_ledger_peers: 10,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(err.to_string().contains("BigLedgerPeers"));
+    }
+
+    #[test]
+    fn test_validate_genesis_sync_targets() {
+        let config = NodeConfig {
+            consensus_mode: ConsensusMode::GenesisMode,
+            sync_target_number_of_known_peers: 5,
+            sync_target_number_of_established_peers: 10,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(err.to_string().contains("SyncTargetNumberOfKnownPeers"));
+    }
+
+    #[test]
+    fn test_validate_sync_targets_skipped_in_praos_mode() {
+        // Same invalid sync targets but in PraosMode — should pass.
+        let config = NodeConfig {
+            consensus_mode: ConsensusMode::PraosMode,
+            sync_target_number_of_known_peers: 5,
+            sync_target_number_of_established_peers: 10,
+            ..NodeConfig::default()
+        };
+        assert!(config.validate(Path::new(".")).is_ok());
     }
 }
