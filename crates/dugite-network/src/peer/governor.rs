@@ -1031,11 +1031,7 @@ mod tests {
             promoted.contains(&ledger_addr),
             "aggregate path should promote the ledger peer"
         );
-        assert_eq!(
-            promoted.len(),
-            1,
-            "exactly 1 promotion: ledger peer only"
-        );
+        assert_eq!(promoted.len(), 1, "exactly 1 promotion: ledger peer only");
     }
 
     /// Peers with an in-flight cold→warm promotion must not be promoted again
@@ -1179,7 +1175,7 @@ mod tests {
 
         // Two topology peers both promoted to Hot.
         let good_addr = test_addr(9000); // low latency → high score → keep
-        let bad_addr = test_addr(9001);  // high latency → low score → demote
+        let bad_addr = test_addr(9001); // high latency → low score → demote
 
         pm.add_peer(good_addr, PeerSource::Topology);
         pm.promote_to_warm(&good_addr);
