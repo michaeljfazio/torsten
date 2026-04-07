@@ -144,15 +144,15 @@ pub struct NodeConfig {
     #[serde(default = "default_root_peers")]
     pub target_number_of_root_peers: usize,
 
-    /// Target number of active peers (default: 15, matching cardano-node)
+    /// Target number of active peers (default: 20, matching cardano-node)
     #[serde(default = "default_active_peers")]
     pub target_number_of_active_peers: usize,
 
-    /// Target number of established peers (default: 40, matching cardano-node)
+    /// Target number of established peers (default: 30, matching cardano-node)
     #[serde(default = "default_established_peers")]
     pub target_number_of_established_peers: usize,
 
-    /// Target number of known peers (default: 85, matching cardano-node)
+    /// Target number of known peers (default: 150, matching cardano-node)
     #[serde(default = "default_known_peers")]
     pub target_number_of_known_peers: usize,
 
@@ -236,14 +236,14 @@ pub struct NodeConfig {
     pub consensus_mode: ConsensusMode,
 
     // ── Genesis mode sync targets ──────────────────────────────────────
-    /// Active peers during Genesis bulk sync (default: 0).
-    #[serde(default)]
+    /// Active peers during Genesis bulk sync (default: 5, matching cardano-node).
+    #[serde(default = "default_sync_active_peers")]
     pub sync_target_number_of_active_peers: usize,
-    /// Established peers during Genesis bulk sync (default: 0).
-    #[serde(default)]
+    /// Established peers during Genesis bulk sync (default: 10, matching cardano-node).
+    #[serde(default = "default_sync_established_peers")]
     pub sync_target_number_of_established_peers: usize,
-    /// Known peers during Genesis bulk sync (default: 0).
-    #[serde(default)]
+    /// Known peers during Genesis bulk sync (default: 150, matching cardano-node).
+    #[serde(default = "default_sync_known_peers")]
     pub sync_target_number_of_known_peers: usize,
     /// Root peers during Genesis bulk sync (default: 0).
     #[serde(default)]
@@ -251,7 +251,7 @@ pub struct NodeConfig {
     /// Active big ledger peers during Genesis bulk sync (default: 30).
     #[serde(default = "default_sync_active_blp")]
     pub sync_target_number_of_active_big_ledger_peers: usize,
-    /// Established big ledger peers during Genesis bulk sync (default: 50).
+    /// Established big ledger peers during Genesis bulk sync (default: 40, matching cardano-node).
     #[serde(default = "default_sync_established_blp")]
     pub sync_target_number_of_established_big_ledger_peers: usize,
     /// Known big ledger peers during Genesis bulk sync (default: 100).
@@ -323,15 +323,15 @@ fn default_root_peers() -> usize {
 }
 
 fn default_active_peers() -> usize {
-    15
+    20 // Haskell cardano-node default
 }
 
 fn default_established_peers() -> usize {
-    40
+    30 // Haskell cardano-node default
 }
 
 fn default_known_peers() -> usize {
-    85
+    150 // Haskell cardano-node default
 }
 
 fn default_active_big_ledger_peers() -> usize {
@@ -374,12 +374,24 @@ fn default_conn_delay() -> u32 {
     5
 }
 
+fn default_sync_active_peers() -> usize {
+    5 // Haskell cardano-node default
+}
+
+fn default_sync_established_peers() -> usize {
+    10 // Haskell cardano-node default
+}
+
+fn default_sync_known_peers() -> usize {
+    150 // Haskell cardano-node default
+}
+
 fn default_sync_active_blp() -> usize {
     30
 }
 
 fn default_sync_established_blp() -> usize {
-    50
+    40 // Haskell cardano-node default
 }
 
 fn default_sync_known_blp() -> usize {
@@ -637,9 +649,9 @@ impl Default for NodeConfig {
             diffusion_mode: DiffusionMode::default(),
             peer_sharing: None,
             target_number_of_root_peers: 60,
-            target_number_of_active_peers: 15,
-            target_number_of_established_peers: 40,
-            target_number_of_known_peers: 85,
+            target_number_of_active_peers: 20,
+            target_number_of_established_peers: 30,
+            target_number_of_known_peers: 150,
             target_number_of_active_big_ledger_peers: 5,
             target_number_of_established_big_ledger_peers: 10,
             target_number_of_known_big_ledger_peers: 15,
@@ -653,9 +665,9 @@ impl Default for NodeConfig {
             error_demotion_threshold: default_error_demotion_threshold(),
             experimental_hard_forks_enabled: false,
             consensus_mode: ConsensusMode::default(),
-            sync_target_number_of_active_peers: 0,
-            sync_target_number_of_established_peers: 0,
-            sync_target_number_of_known_peers: 0,
+            sync_target_number_of_active_peers: 5,
+            sync_target_number_of_established_peers: 10,
+            sync_target_number_of_known_peers: 150,
             sync_target_number_of_root_peers: 0,
             sync_target_number_of_active_big_ledger_peers: default_sync_active_blp(),
             sync_target_number_of_established_big_ledger_peers: default_sync_established_blp(),
@@ -1015,7 +1027,7 @@ mod tests {
         assert_eq!(config.sync_target_number_of_active_big_ledger_peers, 30);
         assert_eq!(
             config.sync_target_number_of_established_big_ledger_peers,
-            50
+            40
         );
         assert_eq!(config.sync_target_number_of_known_big_ledger_peers, 100);
         assert_eq!(config.min_big_ledger_peers_for_trusted_state, 5);
