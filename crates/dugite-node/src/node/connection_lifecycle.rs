@@ -150,9 +150,6 @@ pub struct ConnectionLifecycleManager {
     /// Network magic for N2N handshakes (e.g. 2 for preview, 764824073 for mainnet).
     network_magic: u64,
 
-    /// Whether this node is initiator-only (DiffusionMode::InitiatorOnly).
-    initiator_only: bool,
-
     /// Whether peer sharing is enabled in handshake negotiation.
     peer_sharing: bool,
 
@@ -278,7 +275,8 @@ impl ConnectionLifecycleManager {
     /// # Arguments
     ///
     /// * `network_magic` — Cardano network identifier for handshakes
-    /// * `peer_sharing` — Whether to advertise peer sharing support
+    /// * `peer_sharing` — Whether to advertise peer sharing support (node-level default;
+    ///   per-peer diffusion mode is resolved at connect time via `NodePeerManager::effective_diffusion_mode()`)
     /// * `connect_timeout` — TCP connect timeout for outbound connections
     /// * `candidate_chains` — Shared map for ChainSync -> BlockFetch coordination
     /// * `fetched_blocks_tx` — Channel for BlockFetch tasks to send blocks to the run loop
@@ -299,7 +297,6 @@ impl ConnectionLifecycleManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network_magic: u64,
-        initiator_only: bool,
         peer_sharing: bool,
         connect_timeout: Duration,
         candidate_chains: Arc<RwLock<HashMap<SocketAddr, CandidateChainState>>>,
@@ -322,7 +319,6 @@ impl ConnectionLifecycleManager {
         Self {
             connections: HashMap::new(),
             network_magic,
-            initiator_only,
             peer_sharing,
             connect_timeout,
             candidate_chains,
@@ -354,6 +350,11 @@ impl ConnectionLifecycleManager {
     /// Creates a new `PeerConnection` (TCP + mux + handshake) and starts
     /// the KeepAlive warm-temperature protocol.
     ///
+    /// The `initiator_only` flag for the handshake is resolved per-peer via
+    /// `NodePeerManager::effective_diffusion_mode()`, so topology peers with an
+    /// explicit `"diffusionMode": "InitiatorOnly"` group override correctly
+    /// advertise themselves as initiator-only regardless of the node-level default.
+    ///
     /// # Errors
     ///
     /// Returns `LifecycleError::AlreadyConnected` if a connection already exists,
@@ -363,11 +364,19 @@ impl ConnectionLifecycleManager {
         addr: SocketAddr,
         peer_manager: &mut NodePeerManager,
     ) -> Result<(), LifecycleError> {
+        use super::networking::DiffusionMode;
+
         if self.connections.contains_key(&addr) {
             return Err(LifecycleError::AlreadyConnected(addr));
         }
 
         info!(%addr, "promoting cold -> warm: connecting");
+
+        // Resolve per-peer initiator_only from the peer manager's group config.
+        // Falls back to the node-level DiffusionMode if the peer is not in any
+        // local root group with an explicit override.
+        let initiator_only =
+            peer_manager.effective_diffusion_mode(&addr) == DiffusionMode::InitiatorOnly;
 
         // Time the TCP connect + handshake for RTT measurement.
         let connect_start = std::time::Instant::now();
@@ -376,7 +385,7 @@ impl ConnectionLifecycleManager {
         let mut conn = PeerConnection::connect(
             addr,
             self.network_magic,
-            self.initiator_only,
+            initiator_only,
             self.peer_sharing,
             Some(self.connect_timeout),
         )
@@ -408,11 +417,19 @@ impl ConnectionLifecycleManager {
     /// it and calls [`Self::register_warm_connection`] (on success) or marks the
     /// peer as failed (on error).
     ///
+    /// `initiator_only` should be computed by the caller via
+    /// `NodePeerManager::effective_diffusion_mode(&addr) == DiffusionMode::InitiatorOnly`
+    /// so that per-group topology overrides are respected in the handshake.
+    ///
     /// The caller is responsible for tracking in-flight addresses to avoid
     /// spawning duplicate tasks for the same peer.
-    pub fn spawn_connect(&self, addr: SocketAddr, tx: mpsc::Sender<ConnectResult>) {
+    pub fn spawn_connect(
+        &self,
+        addr: SocketAddr,
+        initiator_only: bool,
+        tx: mpsc::Sender<ConnectResult>,
+    ) {
         let network_magic = self.network_magic;
-        let initiator_only = self.initiator_only;
         let peer_sharing = self.peer_sharing;
         let connect_timeout = self.connect_timeout;
         let metrics = Arc::clone(&self.metrics);
@@ -1309,15 +1326,25 @@ impl ConnectionLifecycleManager {
     ///
     /// Reads connected peer addresses from the shared peer manager and serves
     /// them to downstream peers in response to `MsgShareRequest`.
+    ///
+    /// Only peers that are advertisable are included in the response. Peers in
+    /// local root topology groups with `advertise: false` are excluded, matching
+    /// Haskell's `NodeToNodeVersion` peer sharing filter that respects the
+    /// `LocalRootPeers` `advertise` field (see `Ouroboros.Network.PeerSelection.State`).
     fn make_peersharing_server_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
         let peer_manager = self.peer_manager_for_servers.clone();
 
         Box::new(move |mut channel, cancel| {
             Box::pin(async move {
-                // Snapshot connected peer addresses at task start.
+                // Snapshot only advertisable connected peer addresses at task start.
+                // Peers in local root groups with `advertise: false` are excluded so
+                // private relays or block producers are never leaked to the network.
                 let peers: Vec<SocketAddr> = {
                     let pm = peer_manager.read().await;
                     pm.connected_peer_addrs()
+                        .into_iter()
+                        .filter(|a| pm.is_advertisable(a))
+                        .collect()
                 };
                 tokio::select! {
                     result = dugite_network::protocol::peersharing::server::PeerSharingServer::run(&mut channel, &peers) => {

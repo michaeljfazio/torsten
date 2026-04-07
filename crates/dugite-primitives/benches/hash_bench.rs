@@ -9,8 +9,8 @@
 //! HTML: target/criterion/report/index.html
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::hint::black_box;
 use dugite_primitives::hash::{blake2b_224, blake2b_256};
+use std::hint::black_box;
 
 fn bench_blake2b_256(c: &mut Criterion) {
     let mut group = c.benchmark_group("blake2b_256");

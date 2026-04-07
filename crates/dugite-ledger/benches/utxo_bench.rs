@@ -16,12 +16,12 @@
 //! HTML: target/criterion/report/index.html
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use std::hint::black_box;
 use dugite_ledger::utxo_store::UtxoStore;
 use dugite_primitives::hash::{Hash28, Hash32};
 use dugite_primitives::transaction::{OutputDatum, TransactionInput, TransactionOutput};
 use dugite_primitives::value::{AssetName, Lovelace, Value as TxValue};
 use std::collections::BTreeMap;
+use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
 // Constants — mainnet-representative scales

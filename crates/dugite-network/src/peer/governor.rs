@@ -117,6 +117,14 @@ pub struct Governor {
     last_hot_churn: Instant,
     last_cold_churn: Instant,
     last_warm_churn: Instant,
+    /// Peers for which a cold→warm (connect) promotion is currently in
+    /// flight asynchronously.  Cleared by `promotion_cold_completed()`.
+    /// Prevents double-promotion across governor ticks when async
+    /// connection attempts are slow to complete.
+    in_progress_promote_cold: HashSet<SocketAddr>,
+    /// Peers for which a warm→hot (activate) promotion is currently in
+    /// flight asynchronously.  Cleared by `promotion_warm_completed()`.
+    in_progress_promote_warm: HashSet<SocketAddr>,
 }
 
 impl Governor {
@@ -128,7 +136,25 @@ impl Governor {
             last_hot_churn: now,
             last_cold_churn: now,
             last_warm_churn: now,
+            in_progress_promote_cold: HashSet::new(),
+            in_progress_promote_warm: HashSet::new(),
         }
+    }
+
+    /// Signal that a cold→warm promotion has completed (succeeded or failed).
+    ///
+    /// The caller — typically the connection orchestrator — must invoke this
+    /// after every `GovernorAction::PromoteToWarm` attempt regardless of
+    /// outcome so the governor can re-evaluate the peer on the next tick.
+    pub fn promotion_cold_completed(&mut self, addr: &SocketAddr) {
+        self.in_progress_promote_cold.remove(addr);
+    }
+
+    /// Signal that a warm→hot promotion has completed (succeeded or failed).
+    ///
+    /// Must be called after every `GovernorAction::PromoteToHot` attempt.
+    pub fn promotion_warm_completed(&mut self, addr: &SocketAddr) {
+        self.in_progress_promote_warm.remove(addr);
     }
 
     /// Compute the actions needed to bring peer counts toward targets.
@@ -190,8 +216,13 @@ impl Governor {
                     if already_promoted.contains(addr) {
                         continue;
                     }
+                    // Skip peers whose cold→warm promotion is already in flight.
+                    if self.in_progress_promote_cold.contains(addr) {
+                        continue;
+                    }
                     if eligible_to_connect.contains(addr) {
                         actions.push(GovernorAction::PromoteToWarm(*addr));
+                        self.in_progress_promote_cold.insert(*addr);
                         already_promoted.insert(*addr);
                         promoted += 1;
                     }
@@ -221,9 +252,14 @@ impl Governor {
                     if already_promoted.contains(addr) {
                         continue;
                     }
+                    // Skip peers whose warm→hot promotion is already in flight.
+                    if self.in_progress_promote_warm.contains(addr) {
+                        continue;
+                    }
                     if let Some(peer) = peer_manager.get_peer(addr) {
                         if peer.state == PeerState::Warm {
                             actions.push(GovernorAction::PromoteToHot(*addr));
+                            self.in_progress_promote_warm.insert(*addr);
                             already_promoted.insert(*addr);
                             promoted += 1;
                         }
@@ -234,11 +270,16 @@ impl Governor {
 
         // ── Target-driven promotions/demotions ──────────────────────────
 
-        // Promote cold → warm if below target.
+        // Promote cold → warm if below target (belowTargetOther cold→warm).
         // Only select peers whose exponential backoff window has elapsed
         // (matches Haskell `availableToConnect` filtered by `nextConnectTimes`).
         // Skip peers already promoted by per-group local root logic above.
+        // Also skip topology (local root) peers — they are managed exclusively
+        // by the per-group belowTargetLocal path above, matching Haskell's
+        // `belowTargetOther` which excludes `LocalRootPeers.keysSet`.
         if warm_count + hot_count < self.config.targets.target_warm {
+            use super::manager::PeerSource;
+
             let needed = self.config.targets.target_warm - (warm_count + hot_count);
             let cold_peers = peer_manager.peers_eligible_to_connect();
             let mut promoted = 0;
@@ -246,17 +287,32 @@ impl Governor {
                 if promoted >= needed {
                     break;
                 }
-                if !already_promoted.contains(&addr) {
-                    actions.push(GovernorAction::PromoteToWarm(addr));
-                    already_promoted.insert(addr);
-                    promoted += 1;
+                if already_promoted.contains(&addr) {
+                    continue;
                 }
+                // Skip peers with an in-flight cold→warm promotion.
+                if self.in_progress_promote_cold.contains(&addr) {
+                    continue;
+                }
+                // Exclude topology peers from aggregate cold→warm promotion.
+                if let Some(info) = peer_manager.get_peer(&addr) {
+                    if info.source == PeerSource::Topology {
+                        continue;
+                    }
+                }
+                actions.push(GovernorAction::PromoteToWarm(addr));
+                self.in_progress_promote_cold.insert(addr);
+                already_promoted.insert(addr);
+                promoted += 1;
             }
         }
 
-        // Promote warm → hot if below target.
+        // Promote warm → hot if below target (belowTargetOther warm→hot).
         // Skip peers already promoted by per-group local root logic above.
+        // Also skip topology peers — handled exclusively by belowTargetLocal.
         if hot_count < self.config.targets.target_hot {
+            use super::manager::PeerSource;
+
             let needed = self.config.targets.target_hot - hot_count;
             let warm_peers = peer_manager.peers_in_state(PeerState::Warm);
             let mut promoted = 0;
@@ -264,11 +320,23 @@ impl Governor {
                 if promoted >= needed {
                     break;
                 }
-                if !already_promoted.contains(&addr) {
-                    actions.push(GovernorAction::PromoteToHot(addr));
-                    already_promoted.insert(addr);
-                    promoted += 1;
+                if already_promoted.contains(&addr) {
+                    continue;
                 }
+                // Skip peers with an in-flight warm→hot promotion.
+                if self.in_progress_promote_warm.contains(&addr) {
+                    continue;
+                }
+                // Exclude topology peers from aggregate warm→hot promotion.
+                if let Some(info) = peer_manager.get_peer(&addr) {
+                    if info.source == PeerSource::Topology {
+                        continue;
+                    }
+                }
+                actions.push(GovernorAction::PromoteToHot(addr));
+                self.in_progress_promote_warm.insert(addr);
+                already_promoted.insert(addr);
+                promoted += 1;
             }
         }
 
@@ -296,6 +364,43 @@ impl Governor {
             scored.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             for (addr, _) in scored.into_iter().take(excess) {
                 actions.push(GovernorAction::DemoteToWarm(addr));
+            }
+        }
+
+        // ── aboveTargetLocal hot→warm for local root groups ────────────
+        // When a local root group has MORE hot members than its hotValency,
+        // the excess must be demoted. This is the ONLY path that can demote
+        // topology (local root) peers — all other demotion paths exclude them.
+        // Matches Haskell's `aboveTargetLocal` in `ActivePeers.hs`.
+        //
+        // The worst-scoring peer in the group is demoted first (ascending sort
+        // so index 0 is the lowest score / highest latency).
+        {
+            use super::selection::peer_score;
+            for group in local_root_groups {
+                let mut hot_members: Vec<(SocketAddr, f64)> = group
+                    .members
+                    .iter()
+                    .filter_map(|addr| {
+                        peer_manager.get_peer(addr).and_then(|info| {
+                            if info.state == PeerState::Hot {
+                                Some((*addr, peer_score(info)))
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .collect();
+                if hot_members.len() > group.hot_valency {
+                    let excess = hot_members.len() - group.hot_valency;
+                    // Sort ascending — lowest score (worst peer) first.
+                    hot_members.sort_by(|(_, a), (_, b)| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    for (addr, _) in hot_members.into_iter().take(excess) {
+                        actions.push(GovernorAction::DemoteToWarm(addr));
+                    }
+                }
             }
         }
 
@@ -875,6 +980,254 @@ mod tests {
         assert!(
             group_set.contains(&promote_hot[0]),
             "promoted peer should be a group member"
+        );
+    }
+
+    /// Aggregate cold→warm (belowTargetOther) must NOT promote topology peers —
+    /// they are managed exclusively by the per-group belowTargetLocal path.
+    /// This mirrors Haskell's `belowTargetOther` which excludes
+    /// `LocalRootPeers.keysSet` from its candidate set.
+    #[test]
+    fn aggregate_warm_promotion_excludes_topology_peers() {
+        let mut pm = PeerManager::new();
+
+        // One topology cold peer — must NOT be promoted by aggregate logic.
+        let topo_addr = test_addr(7000);
+        pm.add_peer(topo_addr, PeerSource::Topology);
+
+        // One ledger cold peer — eligible for aggregate promotion.
+        let ledger_addr = test_addr(7001);
+        pm.add_peer(ledger_addr, PeerSource::Ledger);
+
+        // target_warm=2, but aggregate logic must skip topology.
+        // No local root groups supplied → belowTargetLocal emits nothing.
+        let config = GovernorConfig {
+            targets: PeerTargets {
+                target_warm: 2,
+                target_hot: 0,
+                max_cold: 100,
+            },
+            hot_churn_interval: Duration::from_secs(3600),
+            cold_churn_interval: Duration::from_secs(3600),
+            warm_churn_interval: Duration::from_secs(3600),
+        };
+        let mut gov = Governor::new(config);
+        let actions = gov.compute_actions(&pm, &[]);
+
+        let promoted: Vec<SocketAddr> = actions
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::PromoteToWarm(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+
+        // Only the ledger peer may be promoted; the topology peer must be skipped.
+        assert!(
+            !promoted.contains(&topo_addr),
+            "aggregate path must not promote topology peer"
+        );
+        assert!(
+            promoted.contains(&ledger_addr),
+            "aggregate path should promote the ledger peer"
+        );
+        assert_eq!(promoted.len(), 1, "exactly 1 promotion: ledger peer only");
+    }
+
+    /// Peers with an in-flight cold→warm promotion must not be promoted again
+    /// on the next governor tick before `promotion_cold_completed()` is called.
+    /// This prevents duplicate connection attempts when async promotions are slow.
+    #[test]
+    fn in_progress_cold_promotion_not_duplicated() {
+        let mut pm = PeerManager::new();
+
+        // Two ledger cold peers, both eligible.
+        let addr_a = test_addr(8000);
+        let addr_b = test_addr(8001);
+        pm.add_peer(addr_a, PeerSource::Ledger);
+        pm.add_peer(addr_b, PeerSource::Ledger);
+
+        let config = GovernorConfig {
+            targets: PeerTargets {
+                target_warm: 2,
+                target_hot: 0,
+                max_cold: 100,
+            },
+            hot_churn_interval: Duration::from_secs(3600),
+            cold_churn_interval: Duration::from_secs(3600),
+            warm_churn_interval: Duration::from_secs(3600),
+        };
+        let mut gov = Governor::new(config);
+
+        // First tick — both peers are promoted (in-progress sets are populated).
+        let actions1 = gov.compute_actions(&pm, &[]);
+        let promoted1: Vec<SocketAddr> = actions1
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::PromoteToWarm(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(promoted1.len(), 2, "first tick should promote both peers");
+
+        // Second tick without completing any promotions — must emit nothing new.
+        // The peers are still cold (PeerManager not updated) but in-progress sets
+        // prevent re-emission.
+        let actions2 = gov.compute_actions(&pm, &[]);
+        let promoted2: Vec<SocketAddr> = actions2
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::PromoteToWarm(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            promoted2.is_empty(),
+            "second tick must not re-emit PromoteToWarm while promotions are in flight"
+        );
+
+        // After completing addr_a's promotion the governor may re-evaluate it.
+        gov.promotion_cold_completed(&addr_a);
+        let actions3 = gov.compute_actions(&pm, &[]);
+        let promoted3: Vec<SocketAddr> = actions3
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::PromoteToWarm(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        // addr_a is eligible again; addr_b is still in-flight.
+        assert_eq!(promoted3.len(), 1);
+        assert_eq!(promoted3[0], addr_a);
+    }
+
+    /// Same guard for warm→hot: peers with an in-flight promotion must not be
+    /// re-promoted on subsequent ticks.
+    #[test]
+    fn in_progress_warm_promotion_not_duplicated() {
+        let mut pm = PeerManager::new();
+
+        // Two warm ledger peers.
+        let addr_a = test_addr(8100);
+        let addr_b = test_addr(8101);
+        pm.add_peer(addr_a, PeerSource::Ledger);
+        pm.promote_to_warm(&addr_a);
+        pm.add_peer(addr_b, PeerSource::Ledger);
+        pm.promote_to_warm(&addr_b);
+
+        let config = GovernorConfig {
+            targets: PeerTargets {
+                target_warm: 2,
+                target_hot: 2,
+                max_cold: 100,
+            },
+            hot_churn_interval: Duration::from_secs(3600),
+            cold_churn_interval: Duration::from_secs(3600),
+            warm_churn_interval: Duration::from_secs(3600),
+        };
+        let mut gov = Governor::new(config);
+
+        // First tick — both warm peers get PromoteToHot.
+        let actions1 = gov.compute_actions(&pm, &[]);
+        let promoted1: Vec<SocketAddr> = actions1
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::PromoteToHot(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(promoted1.len(), 2, "first tick should promote both to hot");
+
+        // Second tick without update — must not re-emit.
+        let actions2 = gov.compute_actions(&pm, &[]);
+        let promoted2: Vec<SocketAddr> = actions2
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::PromoteToHot(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            promoted2.is_empty(),
+            "second tick must not re-emit PromoteToHot while promotions are in flight"
+        );
+
+        // After completing addr_b, it becomes eligible again.
+        gov.promotion_warm_completed(&addr_b);
+        let actions3 = gov.compute_actions(&pm, &[]);
+        let promoted3: Vec<SocketAddr> = actions3
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::PromoteToHot(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(promoted3.len(), 1);
+        assert_eq!(promoted3[0], addr_b);
+    }
+
+    /// aboveTargetLocal: when a local root group has more hot members than
+    /// its hotValency, the excess (worst-scoring) must be demoted to warm.
+    /// This is the ONLY path that can demote topology peers.
+    #[test]
+    fn above_target_local_hot_demotes_excess() {
+        let mut pm = PeerManager::new();
+
+        // Two topology peers both promoted to Hot.
+        let good_addr = test_addr(9000); // low latency → high score → keep
+        let bad_addr = test_addr(9001); // high latency → low score → demote
+
+        pm.add_peer(good_addr, PeerSource::Topology);
+        pm.promote_to_warm(&good_addr);
+        pm.promote_to_hot(&good_addr);
+        pm.get_peer_mut(&good_addr).unwrap().update_latency(5.0);
+        pm.get_peer_mut(&good_addr).unwrap().reputation = 0.9;
+
+        pm.add_peer(bad_addr, PeerSource::Topology);
+        pm.promote_to_warm(&bad_addr);
+        pm.promote_to_hot(&bad_addr);
+        pm.get_peer_mut(&bad_addr).unwrap().update_latency(999.0);
+        pm.get_peer_mut(&bad_addr).unwrap().reputation = 0.1;
+
+        // Group hot_valency=1 → 2 hot members, excess=1.
+        let group = LocalRootGroupTarget {
+            members: [good_addr, bad_addr].iter().copied().collect(),
+            warm_valency: 2,
+            hot_valency: 1,
+        };
+
+        // Aggregate targets high so they don't interfere.
+        let config = GovernorConfig {
+            targets: PeerTargets {
+                target_warm: 10,
+                target_hot: 10,
+                max_cold: 100,
+            },
+            hot_churn_interval: Duration::from_secs(3600),
+            cold_churn_interval: Duration::from_secs(3600),
+            warm_churn_interval: Duration::from_secs(3600),
+        };
+        let mut gov = Governor::new(config);
+        let actions = gov.compute_actions(&pm, &[group]);
+
+        let demoted: Vec<SocketAddr> = actions
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::DemoteToWarm(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+
+        // Exactly one demotion: the worst-scoring peer.
+        assert_eq!(demoted.len(), 1, "should demote exactly 1 excess hot peer");
+        assert_eq!(
+            demoted[0], bad_addr,
+            "the worse-scoring peer should be demoted"
+        );
+        // The good peer must not be demoted.
+        assert!(
+            !demoted.contains(&good_addr),
+            "better-scoring topology peer must be retained"
         );
     }
 }

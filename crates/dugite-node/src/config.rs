@@ -21,26 +21,41 @@ pub enum ConsensusMode {
 }
 
 /// Inbound connection limits (matches Haskell AcceptedConnectionsLimit).
+///
+/// Haskell's hand-written `FromJSON` instance uses short keys (`hardLimit`,
+/// `softLimit`, `delay`).  We expose those as the primary names and accept the
+/// old long camelCase names as aliases for backward compatibility.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AcceptedConnectionsLimit {
     /// Refuse new inbound connections beyond this count.
-    #[serde(default = "default_hard_limit")]
-    pub accepted_connections_hard_limit: u32,
+    #[serde(
+        alias = "acceptedConnectionsHardLimit",
+        rename = "hardLimit",
+        default = "default_hard_limit"
+    )]
+    pub hard_limit: u32,
     /// Start delaying new connections at this count.
-    #[serde(default = "default_soft_limit")]
-    pub accepted_connections_soft_limit: u32,
-    /// Delay in seconds applied to connections above soft limit.
-    #[serde(default = "default_conn_delay")]
-    pub accepted_connections_delay: u32,
+    #[serde(
+        alias = "acceptedConnectionsSoftLimit",
+        rename = "softLimit",
+        default = "default_soft_limit"
+    )]
+    pub soft_limit: u32,
+    /// Max delay in seconds applied to connections above soft limit.
+    #[serde(
+        alias = "acceptedConnectionsDelay",
+        rename = "delay",
+        default = "default_conn_delay"
+    )]
+    pub delay: f64,
 }
 
 impl Default for AcceptedConnectionsLimit {
     fn default() -> Self {
         Self {
-            accepted_connections_hard_limit: 512,
-            accepted_connections_soft_limit: 384,
-            accepted_connections_delay: 5,
+            hard_limit: 512,
+            soft_limit: 384,
+            delay: 5.0,
         }
     }
 }
@@ -144,15 +159,15 @@ pub struct NodeConfig {
     #[serde(default = "default_root_peers")]
     pub target_number_of_root_peers: usize,
 
-    /// Target number of active peers (default: 15, matching cardano-node)
+    /// Target number of active peers (default: 20, matching cardano-node)
     #[serde(default = "default_active_peers")]
     pub target_number_of_active_peers: usize,
 
-    /// Target number of established peers (default: 40, matching cardano-node)
+    /// Target number of established peers (default: 30, matching cardano-node)
     #[serde(default = "default_established_peers")]
     pub target_number_of_established_peers: usize,
 
-    /// Target number of known peers (default: 85, matching cardano-node)
+    /// Target number of known peers (default: 150, matching cardano-node)
     #[serde(default = "default_known_peers")]
     pub target_number_of_known_peers: usize,
 
@@ -236,14 +251,14 @@ pub struct NodeConfig {
     pub consensus_mode: ConsensusMode,
 
     // ── Genesis mode sync targets ──────────────────────────────────────
-    /// Active peers during Genesis bulk sync (default: 0).
-    #[serde(default)]
+    /// Active peers during Genesis bulk sync (default: 5, matching cardano-node).
+    #[serde(default = "default_sync_active_peers")]
     pub sync_target_number_of_active_peers: usize,
-    /// Established peers during Genesis bulk sync (default: 0).
-    #[serde(default)]
+    /// Established peers during Genesis bulk sync (default: 10, matching cardano-node).
+    #[serde(default = "default_sync_established_peers")]
     pub sync_target_number_of_established_peers: usize,
-    /// Known peers during Genesis bulk sync (default: 0).
-    #[serde(default)]
+    /// Known peers during Genesis bulk sync (default: 150, matching cardano-node).
+    #[serde(default = "default_sync_known_peers")]
     pub sync_target_number_of_known_peers: usize,
     /// Root peers during Genesis bulk sync (default: 0).
     #[serde(default)]
@@ -251,7 +266,7 @@ pub struct NodeConfig {
     /// Active big ledger peers during Genesis bulk sync (default: 30).
     #[serde(default = "default_sync_active_blp")]
     pub sync_target_number_of_active_big_ledger_peers: usize,
-    /// Established big ledger peers during Genesis bulk sync (default: 50).
+    /// Established big ledger peers during Genesis bulk sync (default: 40, matching cardano-node).
     #[serde(default = "default_sync_established_blp")]
     pub sync_target_number_of_established_big_ledger_peers: usize,
     /// Known big ledger peers during Genesis bulk sync (default: 100).
@@ -266,17 +281,26 @@ pub struct NodeConfig {
     #[serde(default)]
     pub accepted_connections_limit: Option<AcceptedConnectionsLimit>,
     /// Time before idle mini-protocol connection is pruned (seconds, default: 5).
+    ///
+    /// Accepts fractional seconds, matching Haskell's `DiffTime` type.
     #[serde(default = "default_protocol_idle_timeout")]
-    pub protocol_idle_timeout: u64,
+    pub protocol_idle_timeout: f64,
     /// Connection TIME_WAIT duration after close (seconds, default: 60).
+    ///
+    /// Accepts fractional seconds, matching Haskell's `DiffTime` type.
     #[serde(default = "default_time_wait_timeout")]
-    pub time_wait_timeout: u64,
-    /// Outbound governor poll interval (seconds, default: 10).
+    pub time_wait_timeout: f64,
+    /// Outbound governor poll interval (seconds, default: 0).
+    ///
+    /// 0 means the governor runs as fast as events arrive (Haskell default).
+    /// Accepts fractional seconds, matching Haskell's `DiffTime` type.
     #[serde(default = "default_egress_poll_interval")]
-    pub egress_poll_interval: u64,
+    pub egress_poll_interval: f64,
     /// ChainSync-specific idle timeout (seconds, 0 = no timeout).
+    ///
+    /// Accepts fractional seconds, matching Haskell's `DiffTime` type.
     #[serde(default)]
-    pub chain_sync_idle_timeout: Option<u64>,
+    pub chain_sync_idle_timeout: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -314,15 +338,15 @@ fn default_root_peers() -> usize {
 }
 
 fn default_active_peers() -> usize {
-    15
+    20 // Haskell cardano-node default
 }
 
 fn default_established_peers() -> usize {
-    40
+    30 // Haskell cardano-node default
 }
 
 fn default_known_peers() -> usize {
-    85
+    150 // Haskell cardano-node default
 }
 
 fn default_active_big_ledger_peers() -> usize {
@@ -361,8 +385,20 @@ fn default_soft_limit() -> u32 {
     384
 }
 
-fn default_conn_delay() -> u32 {
-    5
+fn default_conn_delay() -> f64 {
+    5.0
+}
+
+fn default_sync_active_peers() -> usize {
+    5 // Haskell cardano-node default
+}
+
+fn default_sync_established_peers() -> usize {
+    10 // Haskell cardano-node default
+}
+
+fn default_sync_known_peers() -> usize {
+    150 // Haskell cardano-node default
 }
 
 fn default_sync_active_blp() -> usize {
@@ -370,7 +406,7 @@ fn default_sync_active_blp() -> usize {
 }
 
 fn default_sync_established_blp() -> usize {
-    50
+    40 // Haskell cardano-node default
 }
 
 fn default_sync_known_blp() -> usize {
@@ -381,16 +417,17 @@ fn default_min_blp_trusted() -> usize {
     5
 }
 
-fn default_protocol_idle_timeout() -> u64 {
-    5
+fn default_protocol_idle_timeout() -> f64 {
+    5.0
 }
 
-fn default_time_wait_timeout() -> u64 {
-    60
+fn default_time_wait_timeout() -> f64 {
+    60.0
 }
 
-fn default_egress_poll_interval() -> u64 {
-    10
+/// Haskell default is 0 — governor runs on-demand without a fixed poll interval.
+fn default_egress_poll_interval() -> f64 {
+    0.0
 }
 
 fn default_min_severity() -> String {
@@ -427,6 +464,105 @@ where
     }
 
     deserializer.deserialize_any(ProtocolVisitor)
+}
+
+/// Validate peer selection target consistency for one target set.
+///
+/// Mirrors Haskell's `sanePeerSelectionTargets` from
+/// `Ouroboros.Network.PeerSelection.Governor.Types`.  The function is called
+/// for **both** the deadline and the Genesis sync target sets, unconditionally
+/// (i.e. without checking `ConsensusMode`).
+///
+/// The 14 predicates checked are:
+///
+/// Ordering invariants (cold ≥ warm ≥ hot):
+///   1.  active     <= established
+///   2.  established<= known
+///   3.  root       <= known
+///   4.  active_blp <= established_blp
+///   5.  established_blp <= known_blp
+///
+/// Upper-bound safety limits (prevent runaway resource usage):
+///   6.  active     <= 100
+///   7.  established <= 1000
+///   8.  known      <= 10000
+///   9.  active_blp <= 100
+///   10. established_blp <= 1000
+///   11. known_blp  <= 10000
+///
+/// (The ≥ 0 checks are implicit because all fields are `usize`.)
+///
+/// `label` is a short prefix used in the error message ("deadline" or "sync").
+#[allow(clippy::too_many_arguments)]
+fn sane_peer_selection_targets(
+    label: &str,
+    active: usize,
+    established: usize,
+    known: usize,
+    root: usize,
+    active_blp: usize,
+    established_blp: usize,
+    known_blp: usize,
+) -> Result<()> {
+    // ── Ordering invariants ───────────────────────────────────────────────────
+    if active > established {
+        anyhow::bail!("[{label}] active ({active}) must be <= established ({established})");
+    }
+    if established > known {
+        anyhow::bail!("[{label}] established ({established}) must be <= known ({known})");
+    }
+    if root > known {
+        anyhow::bail!("[{label}] root ({root}) must be <= known ({known})");
+    }
+    if active_blp > established_blp {
+        anyhow::bail!(
+            "[{label}] active_big_ledger_peers ({active_blp}) must be <= \
+             established_big_ledger_peers ({established_blp})"
+        );
+    }
+    if established_blp > known_blp {
+        anyhow::bail!(
+            "[{label}] established_big_ledger_peers ({established_blp}) must be <= \
+             known_big_ledger_peers ({known_blp})"
+        );
+    }
+
+    // ── Upper-bound safety limits ─────────────────────────────────────────────
+    const MAX_ACTIVE: usize = 100;
+    const MAX_ESTABLISHED: usize = 1000;
+    const MAX_KNOWN: usize = 10_000;
+
+    if active > MAX_ACTIVE {
+        anyhow::bail!("[{label}] active ({active}) exceeds maximum allowed ({MAX_ACTIVE})");
+    }
+    if established > MAX_ESTABLISHED {
+        anyhow::bail!(
+            "[{label}] established ({established}) exceeds maximum allowed ({MAX_ESTABLISHED})"
+        );
+    }
+    if known > MAX_KNOWN {
+        anyhow::bail!("[{label}] known ({known}) exceeds maximum allowed ({MAX_KNOWN})");
+    }
+    if active_blp > MAX_ACTIVE {
+        anyhow::bail!(
+            "[{label}] active_big_ledger_peers ({active_blp}) exceeds maximum allowed \
+             ({MAX_ACTIVE})"
+        );
+    }
+    if established_blp > MAX_ESTABLISHED {
+        anyhow::bail!(
+            "[{label}] established_big_ledger_peers ({established_blp}) exceeds maximum \
+             allowed ({MAX_ESTABLISHED})"
+        );
+    }
+    if known_blp > MAX_KNOWN {
+        anyhow::bail!(
+            "[{label}] known_big_ledger_peers ({known_blp}) exceeds maximum allowed \
+             ({MAX_KNOWN})"
+        );
+    }
+
+    Ok(())
 }
 
 impl NodeConfig {
@@ -500,71 +636,34 @@ impl NodeConfig {
     /// `config_dir` is the directory containing the config file, used to resolve
     /// relative genesis file paths.
     pub fn validate(&self, config_dir: &Path) -> Result<()> {
-        // ── Peer target ordering ──────────────────────────────────────
-        // Haskell cardano-node validates at startup that:
-        //   known >= established >= active >= 0
-        // Violation causes a startup failure with explicit error message.
+        // ── Peer target sanity checks (Haskell: sanePeerSelectionTargets) ─────
+        //
+        // Haskell cardano-node calls `sanePeerSelectionTargets` at startup for
+        // BOTH the deadline targets and the Genesis sync targets, regardless of
+        // consensus mode.  Violation causes a startup failure.
+        //
+        // Reference: ouroboros-network/src/Ouroboros/Network/PeerSelection/Governor/Types.hs
+        sane_peer_selection_targets(
+            "deadline",
+            self.target_number_of_active_peers,
+            self.target_number_of_established_peers,
+            self.target_number_of_known_peers,
+            self.target_number_of_root_peers,
+            self.target_number_of_active_big_ledger_peers,
+            self.target_number_of_established_big_ledger_peers,
+            self.target_number_of_known_big_ledger_peers,
+        )?;
 
-        // Regular peer targets.
-        if self.target_number_of_known_peers < self.target_number_of_established_peers {
-            anyhow::bail!(
-                "TargetNumberOfKnownPeers ({}) must be >= TargetNumberOfEstablishedPeers ({})",
-                self.target_number_of_known_peers,
-                self.target_number_of_established_peers,
-            );
-        }
-        if self.target_number_of_established_peers < self.target_number_of_active_peers {
-            anyhow::bail!(
-                "TargetNumberOfEstablishedPeers ({}) must be >= TargetNumberOfActivePeers ({})",
-                self.target_number_of_established_peers,
-                self.target_number_of_active_peers,
-            );
-        }
-
-        // Big Ledger Peer targets.
-        if self.target_number_of_known_big_ledger_peers
-            < self.target_number_of_established_big_ledger_peers
-        {
-            anyhow::bail!(
-                "TargetNumberOfKnownBigLedgerPeers ({}) must be >= \
-                 TargetNumberOfEstablishedBigLedgerPeers ({})",
-                self.target_number_of_known_big_ledger_peers,
-                self.target_number_of_established_big_ledger_peers,
-            );
-        }
-        if self.target_number_of_established_big_ledger_peers
-            < self.target_number_of_active_big_ledger_peers
-        {
-            anyhow::bail!(
-                "TargetNumberOfEstablishedBigLedgerPeers ({}) must be >= \
-                 TargetNumberOfActiveBigLedgerPeers ({})",
-                self.target_number_of_established_big_ledger_peers,
-                self.target_number_of_active_big_ledger_peers,
-            );
-        }
-
-        // Sync targets (when Genesis mode is configured).
-        if self.consensus_mode == ConsensusMode::GenesisMode {
-            if self.sync_target_number_of_known_peers < self.sync_target_number_of_established_peers
-            {
-                anyhow::bail!(
-                    "SyncTargetNumberOfKnownPeers ({}) must be >= \
-                     SyncTargetNumberOfEstablishedPeers ({})",
-                    self.sync_target_number_of_known_peers,
-                    self.sync_target_number_of_established_peers,
-                );
-            }
-            if self.sync_target_number_of_established_peers
-                < self.sync_target_number_of_active_peers
-            {
-                anyhow::bail!(
-                    "SyncTargetNumberOfEstablishedPeers ({}) must be >= \
-                     SyncTargetNumberOfActivePeers ({})",
-                    self.sync_target_number_of_established_peers,
-                    self.sync_target_number_of_active_peers,
-                );
-            }
-        }
+        sane_peer_selection_targets(
+            "sync",
+            self.sync_target_number_of_active_peers,
+            self.sync_target_number_of_established_peers,
+            self.sync_target_number_of_known_peers,
+            self.sync_target_number_of_root_peers,
+            self.sync_target_number_of_active_big_ledger_peers,
+            self.sync_target_number_of_established_big_ledger_peers,
+            self.sync_target_number_of_known_big_ledger_peers,
+        )?;
 
         let genesis_files: &[(&str, &Option<String>, &Option<String>)] = &[
             ("Byron", &self.byron_genesis_file, &self.byron_genesis_hash),
@@ -627,9 +726,9 @@ impl Default for NodeConfig {
             diffusion_mode: DiffusionMode::default(),
             peer_sharing: None,
             target_number_of_root_peers: 60,
-            target_number_of_active_peers: 15,
-            target_number_of_established_peers: 40,
-            target_number_of_known_peers: 85,
+            target_number_of_active_peers: 20,
+            target_number_of_established_peers: 30,
+            target_number_of_known_peers: 150,
             target_number_of_active_big_ledger_peers: 5,
             target_number_of_established_big_ledger_peers: 10,
             target_number_of_known_big_ledger_peers: 15,
@@ -643,9 +742,9 @@ impl Default for NodeConfig {
             error_demotion_threshold: default_error_demotion_threshold(),
             experimental_hard_forks_enabled: false,
             consensus_mode: ConsensusMode::default(),
-            sync_target_number_of_active_peers: 0,
-            sync_target_number_of_established_peers: 0,
-            sync_target_number_of_known_peers: 0,
+            sync_target_number_of_active_peers: 5,
+            sync_target_number_of_established_peers: 10,
+            sync_target_number_of_known_peers: 150,
             sync_target_number_of_root_peers: 0,
             sync_target_number_of_active_big_ledger_peers: default_sync_active_blp(),
             sync_target_number_of_established_big_ledger_peers: default_sync_established_blp(),
@@ -950,18 +1049,36 @@ mod tests {
 
     #[test]
     fn test_accepted_connections_limit_from_json() {
+        // Short keys matching Haskell's hand-written FromJSON instance.
         let json = r#"{
             "AcceptedConnectionsLimit": {
-                "acceptedConnectionsHardLimit": 256,
-                "acceptedConnectionsSoftLimit": 200,
-                "acceptedConnectionsDelay": 2
+                "hardLimit": 256,
+                "softLimit": 200,
+                "delay": 2.0
             }
         }"#;
         let config: NodeConfig = serde_json::from_str(json).unwrap();
         let limit = config.accepted_connections_limit.unwrap();
-        assert_eq!(limit.accepted_connections_hard_limit, 256);
-        assert_eq!(limit.accepted_connections_soft_limit, 200);
-        assert_eq!(limit.accepted_connections_delay, 2);
+        assert_eq!(limit.hard_limit, 256);
+        assert_eq!(limit.soft_limit, 200);
+        assert!((limit.delay - 2.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_accepted_connections_limit_backward_compat_aliases() {
+        // Old long camelCase keys must still parse via serde aliases.
+        let json = r#"{
+            "AcceptedConnectionsLimit": {
+                "acceptedConnectionsHardLimit": 300,
+                "acceptedConnectionsSoftLimit": 250,
+                "acceptedConnectionsDelay": 3
+            }
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        let limit = config.accepted_connections_limit.unwrap();
+        assert_eq!(limit.hard_limit, 300);
+        assert_eq!(limit.soft_limit, 250);
+        assert!((limit.delay - 3.0_f64).abs() < f64::EPSILON);
     }
 
     // ── Connection timeouts ─────────────────────────────────────────────────
@@ -974,9 +1091,25 @@ mod tests {
             "EgressPollInterval": 20
         }"#;
         let config: NodeConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.protocol_idle_timeout, 10);
-        assert_eq!(config.time_wait_timeout, 120);
-        assert_eq!(config.egress_poll_interval, 20);
+        assert!((config.protocol_idle_timeout - 10.0_f64).abs() < f64::EPSILON);
+        assert!((config.time_wait_timeout - 120.0_f64).abs() < f64::EPSILON);
+        assert!((config.egress_poll_interval - 20.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_connection_timeouts_fractional() {
+        // Fractional seconds must parse correctly — Haskell uses DiffTime.
+        let json = r#"{
+            "ProtocolIdleTimeout": 5.5,
+            "TimeWaitTimeout": 60.25,
+            "EgressPollInterval": 0.1,
+            "ChainSyncIdleTimeout": 3373.5
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert!((config.protocol_idle_timeout - 5.5_f64).abs() < f64::EPSILON);
+        assert!((config.time_wait_timeout - 60.25_f64).abs() < f64::EPSILON);
+        assert!((config.egress_poll_interval - 0.1_f64).abs() < f64::EPSILON);
+        assert!((config.chain_sync_idle_timeout.unwrap() - 3373.5_f64).abs() < f64::EPSILON);
     }
 
     // ── All new fields absent → defaults ────────────────────────────────────
@@ -989,13 +1122,13 @@ mod tests {
         assert_eq!(config.sync_target_number_of_active_big_ledger_peers, 30);
         assert_eq!(
             config.sync_target_number_of_established_big_ledger_peers,
-            50
+            40
         );
         assert_eq!(config.sync_target_number_of_known_big_ledger_peers, 100);
         assert_eq!(config.min_big_ledger_peers_for_trusted_state, 5);
-        assert_eq!(config.protocol_idle_timeout, 5);
-        assert_eq!(config.time_wait_timeout, 60);
-        assert_eq!(config.egress_poll_interval, 10);
+        assert!((config.protocol_idle_timeout - 5.0_f64).abs() < f64::EPSILON);
+        assert!((config.time_wait_timeout - 60.0_f64).abs() < f64::EPSILON);
+        assert!((config.egress_poll_interval - 0.0_f64).abs() < f64::EPSILON);
         assert!(config.accepted_connections_limit.is_none());
         assert!(config.chain_sync_idle_timeout.is_none());
     }
@@ -1010,7 +1143,12 @@ mod tests {
             ..NodeConfig::default()
         };
         let err = config.validate(Path::new(".")).unwrap_err();
-        assert!(err.to_string().contains("TargetNumberOfKnownPeers"));
+        let msg = err.to_string();
+        // New format: "[deadline] established (20) must be <= known (10)"
+        assert!(
+            msg.contains("[deadline]") && msg.contains("established"),
+            "expected deadline/established in error, got: {msg}"
+        );
     }
 
     #[test]
@@ -1021,7 +1159,12 @@ mod tests {
             ..NodeConfig::default()
         };
         let err = config.validate(Path::new(".")).unwrap_err();
-        assert!(err.to_string().contains("TargetNumberOfEstablishedPeers"));
+        let msg = err.to_string();
+        // New format: "[deadline] active (10) must be <= established (5)"
+        assert!(
+            msg.contains("[deadline]") && msg.contains("active"),
+            "expected deadline/active in error, got: {msg}"
+        );
     }
 
     #[test]
@@ -1032,30 +1175,90 @@ mod tests {
             ..NodeConfig::default()
         };
         let err = config.validate(Path::new(".")).unwrap_err();
-        assert!(err.to_string().contains("BigLedgerPeers"));
+        let msg = err.to_string();
+        // New format: "[deadline] established_big_ledger_peers (10) must be <= known_big_ledger_peers (3)"
+        assert!(
+            msg.contains("[deadline]") && msg.contains("big_ledger_peers"),
+            "expected deadline/big_ledger_peers in error, got: {msg}"
+        );
     }
 
     #[test]
     fn test_validate_genesis_sync_targets() {
+        // Invalid sync targets (established > known) must fail regardless of ConsensusMode.
         let config = NodeConfig {
-            consensus_mode: ConsensusMode::GenesisMode,
             sync_target_number_of_known_peers: 5,
             sync_target_number_of_established_peers: 10,
             ..NodeConfig::default()
         };
         let err = config.validate(Path::new(".")).unwrap_err();
-        assert!(err.to_string().contains("SyncTargetNumberOfKnownPeers"));
+        assert!(
+            err.to_string().contains("[sync]"),
+            "expected [sync] label in error, got: {err}"
+        );
     }
 
     #[test]
-    fn test_validate_sync_targets_skipped_in_praos_mode() {
-        // Same invalid sync targets but in PraosMode — should pass.
+    fn test_validate_sync_targets_always_checked() {
+        // Invalid sync targets must fail in PraosMode too (Haskell validates both
+        // deadline and sync targets unconditionally, not just in GenesisMode).
         let config = NodeConfig {
             consensus_mode: ConsensusMode::PraosMode,
             sync_target_number_of_known_peers: 5,
             sync_target_number_of_established_peers: 10,
             ..NodeConfig::default()
         };
-        assert!(config.validate(Path::new(".")).is_ok());
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("[sync]"),
+            "expected [sync] label in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_root_exceeds_known_fails() {
+        // root > known violates the third ordering invariant.
+        let config = NodeConfig {
+            target_number_of_root_peers: 200,
+            target_number_of_known_peers: 150,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("root"),
+            "expected root in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_active_exceeds_100_fails() {
+        // active > 100 violates the upper-bound safety limit.
+        let config = NodeConfig {
+            target_number_of_active_peers: 101,
+            target_number_of_established_peers: 200,
+            target_number_of_known_peers: 500,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("active") && err.to_string().contains("100"),
+            "expected active/100 in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_blp_upper_bounds() {
+        // established_big_ledger_peers > 1000 violates the upper bound.
+        let config = NodeConfig {
+            target_number_of_active_big_ledger_peers: 5,
+            target_number_of_established_big_ledger_peers: 1001,
+            target_number_of_known_big_ledger_peers: 5000,
+            ..NodeConfig::default()
+        };
+        let err = config.validate(Path::new(".")).unwrap_err();
+        assert!(
+            err.to_string().contains("big_ledger_peers") && err.to_string().contains("1000"),
+            "expected big_ledger_peers/1000 in error, got: {err}"
+        );
     }
 }
