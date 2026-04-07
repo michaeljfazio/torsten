@@ -615,7 +615,7 @@ mod tests {
     #[test]
     fn test_cursor_down_up() {
         let mut app =
-            make_app(r#"{"EnableP2P": true, "MinSeverity": "Info", "Protocol": "Cardano"}"#);
+            make_app(r#"{"TurnOnLogMetrics": true, "MinSeverity": "Info", "Protocol": "Cardano"}"#);
         // All items land in their known sections; at least one section has items.
         let initial_sec = app.cursor_section;
         let initial_item = app.cursor_item;
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn test_toggle_section_collapses_and_expands() {
-        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true}"#);
         assert!(app.sections[0].expanded);
         app.toggle_section();
         assert!(!app.sections[0].expanded);
@@ -644,8 +644,8 @@ mod tests {
 
     #[test]
     fn test_begin_edit_bool_toggles_immediately() {
-        let mut app = make_app(r#"{"EnableP2P": true}"#);
-        // Find EnableP2P.
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true}"#);
+        // Find TurnOnLogMetrics.
         app.begin_edit();
         // The edit should have completed immediately (bool toggle).
         assert_eq!(app.edit_mode, EditMode::None);
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn test_request_quit_with_unsaved_changes() {
-        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true}"#);
         // Modify something.
         app.begin_edit(); // bool toggle
         assert!(app.is_modified());
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_request_quit_clean_quits_immediately() {
-        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true}"#);
         assert!(!app.is_modified());
         app.request_quit();
         assert!(app.should_quit);
@@ -713,9 +713,10 @@ mod tests {
 
     #[test]
     fn test_sections_are_ordered() {
-        let app =
-            make_app(r#"{"EnableP2P": true, "MinSeverity": "Info", "ByronGenesisFile": "b.json"}"#);
-        // EnableP2P -> Network, MinSeverity -> Logging, ByronGenesisFile -> Genesis
+        let app = make_app(
+            r#"{"DiffusionMode": "InitiatorAndResponder", "MinSeverity": "Info", "ByronGenesisFile": "b.json"}"#,
+        );
+        // DiffusionMode -> Network, MinSeverity -> Logging, ByronGenesisFile -> Genesis
         // Expected order: Network, Genesis, Logging
         let names: Vec<&str> = app.sections.iter().map(|s| s.name.as_str()).collect();
         let net_pos = names.iter().position(|n| *n == "Network").unwrap();
@@ -731,7 +732,7 @@ mod tests {
 
     #[test]
     fn test_enter_search_activates_search_mode() {
-        let mut app = make_app(r#"{"EnableP2P": true, "MinSeverity": "Info"}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true, "MinSeverity": "Info"}"#);
         assert!(!app.search_active);
         app.enter_search();
         assert!(app.search_active);
@@ -740,16 +741,17 @@ mod tests {
 
     #[test]
     fn test_search_type_filters_items() {
-        let mut app =
-            make_app(r#"{"EnableP2P": true, "MinSeverity": "Info", "ByronGenesisFile": "b.json"}"#);
+        let mut app = make_app(
+            r#"{"TurnOnLogMetrics": true, "MinSeverity": "Info", "ByronGenesisFile": "b.json"}"#,
+        );
         app.enter_search();
-        app.search_type_char('E');
+        app.search_type_char('T');
+        app.search_type_char('u');
+        app.search_type_char('r');
         app.search_type_char('n');
-        app.search_type_char('a');
-        app.search_type_char('b');
-        app.search_type_char('l');
-        app.search_type_char('e');
-        // "Enable" is a prefix of "EnableP2P" — should appear in filtered items.
+        app.search_type_char('O');
+        app.search_type_char('n');
+        // "TurnOn" is a prefix of "TurnOnLogMetrics" — should appear in filtered items.
         assert!(!app.filtered_items.is_empty());
         // Cursor should have moved to the match.
         let (sec, item) = app.filtered_items[0];
@@ -759,9 +761,9 @@ mod tests {
 
     #[test]
     fn test_clear_search_restores_all() {
-        let mut app = make_app(r#"{"EnableP2P": true, "MinSeverity": "Info"}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true, "MinSeverity": "Info"}"#);
         app.enter_search();
-        app.search_type_char('E');
+        app.search_type_char('T');
         assert!(!app.filtered_items.is_empty());
         app.clear_search();
         assert!(!app.search_active);
@@ -771,14 +773,15 @@ mod tests {
 
     #[test]
     fn test_search_backspace_updates_filter() {
-        let mut app =
-            make_app(r#"{"EnableP2P": true, "MinSeverity": "Info", "ByronGenesisFile": "b.json"}"#);
+        let mut app = make_app(
+            r#"{"TurnOnLogMetrics": true, "MinSeverity": "Info", "ByronGenesisFile": "b.json"}"#,
+        );
         app.enter_search();
-        app.search_type_char('E');
-        let count_after_e = app.filtered_items.len();
-        app.search_type_char('n');
-        app.search_backspace(); // back to "E"
-        assert_eq!(app.filtered_items.len(), count_after_e);
+        app.search_type_char('T');
+        let count_after_t = app.filtered_items.len();
+        app.search_type_char('u');
+        app.search_backspace(); // back to "T"
+        assert_eq!(app.filtered_items.len(), count_after_t);
     }
 
     // -----------------------------------------------------------------------
@@ -787,24 +790,24 @@ mod tests {
 
     #[test]
     fn test_diff_empty_initially() {
-        let app = make_app(r#"{"EnableP2P": true}"#);
+        let app = make_app(r#"{"TurnOnLogMetrics": true}"#);
         assert!(app.diff_entries().is_empty());
     }
 
     #[test]
     fn test_diff_captures_change() {
-        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true}"#);
         app.begin_edit(); // toggle bool: true -> false
         let diff = app.diff_entries();
         assert_eq!(diff.len(), 1);
-        assert_eq!(diff[0].key, "EnableP2P");
+        assert_eq!(diff[0].key, "TurnOnLogMetrics");
         assert_eq!(diff[0].original, "true");
         assert_eq!(diff[0].current, "false");
     }
 
     #[test]
     fn test_toggle_diff_overlay() {
-        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true}"#);
         assert!(!app.show_diff);
         app.toggle_diff();
         assert!(app.show_diff);
@@ -814,7 +817,7 @@ mod tests {
 
     #[test]
     fn test_close_diff_overlay() {
-        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true}"#);
         app.show_diff = true;
         app.close_diff();
         assert!(!app.show_diff);
@@ -822,9 +825,9 @@ mod tests {
 
     #[test]
     fn test_originals_snapshot_is_immutable_after_edits() {
-        let mut app = make_app(r#"{"EnableP2P": true}"#);
+        let mut app = make_app(r#"{"TurnOnLogMetrics": true}"#);
         app.begin_edit(); // toggle: true -> false
                           // The original snapshot must still say "true".
-        assert_eq!(app.originals.get("EnableP2P"), Some("true"));
+        assert_eq!(app.originals.get("TurnOnLogMetrics"), Some("true"));
     }
 }

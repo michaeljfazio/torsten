@@ -85,16 +85,6 @@ pub struct NodeConfig {
     #[serde(default)]
     pub conway_genesis_hash: Option<String>,
 
-    /// Enable P2P networking (default: true, matching cardano-node).
-    ///
-    /// When false, the peer governor is disabled and the node uses static
-    /// topology connections only (no churn, no ledger-based discovery, no
-    /// peer sharing).  The current Haskell cardano-node always runs P2P
-    /// (this field was removed upstream), but we retain it for operators who
-    /// want minimal networking during testing.
-    #[serde(default = "default_enable_p2p")]
-    pub enable_p2_p: bool,
-
     /// Diffusion mode — controls inbound connection acceptance.
     ///
     /// `"InitiatorAndResponder"` (default): full relay mode, accepts inbound.
@@ -231,10 +221,6 @@ pub struct TraceOptions {
 
 fn default_network() -> NetworkId {
     NetworkId::Mainnet
-}
-
-fn default_enable_p2p() -> bool {
-    true
 }
 
 fn default_root_peers() -> usize {
@@ -446,7 +432,6 @@ impl Default for NodeConfig {
             shelley_genesis_hash: None,
             alonzo_genesis_hash: None,
             conway_genesis_hash: None,
-            enable_p2_p: true,
             diffusion_mode: DiffusionMode::default(),
             peer_sharing: None,
             target_number_of_root_peers: 60,

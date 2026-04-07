@@ -1,7 +1,6 @@
 {
   "Network": "Testnet",
   "NetworkMagic": 1,
-  "EnableP2P": true,
   "DiffusionMode": "InitiatorAndResponder",
   "TargetNumberOfRootPeers": 60,
   "TargetNumberOfActivePeers": 15,

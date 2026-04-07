@@ -448,9 +448,6 @@ pub struct NodeMetrics {
     /// native `dugite_*` metrics.  Allows existing cardano-node Grafana dashboards
     /// to work without modification.  Controlled by `--compat-metrics` CLI flag.
     compat_metrics: std::sync::atomic::AtomicBool,
-    /// 1 when P2P networking (peer governor, churn, discovery) is enabled, 0 for
-    /// static topology mode.  Set once at startup from the `EnableP2P` config field.
-    pub p2p_enabled: AtomicU64,
     /// Diffusion mode: 0 = InitiatorAndResponder, 1 = InitiatorOnly.
     /// Set once at startup from the `DiffusionMode` config field.
     pub diffusion_mode: AtomicU64,
@@ -529,7 +526,6 @@ impl NodeMetrics {
             is_block_producer: AtomicU64::new(0),
             pool_id_hex: std::sync::Mutex::new(String::new()),
             compat_metrics: std::sync::atomic::AtomicBool::new(false),
-            p2p_enabled: AtomicU64::new(1),
             diffusion_mode: AtomicU64::new(0),
             peer_sharing_enabled: AtomicU64::new(1),
         }
@@ -743,16 +739,13 @@ impl NodeMetrics {
     /// node configuration.  These are read by the TUI to display the correct
     /// P2P status and diffusion mode.
     ///
-    /// - `p2p`: whether the peer governor is active (`EnableP2P` config field)
     /// - `diffusion_mode`: the `DiffusionMode` config enum
     /// - `peer_sharing`: whether peer sharing mini-protocol is enabled
     pub fn set_p2p_config(
         &self,
-        p2p: bool,
         diffusion_mode: &crate::config::DiffusionMode,
         peer_sharing: bool,
     ) {
-        self.p2p_enabled.store(u64::from(p2p), Ordering::Relaxed);
         self.diffusion_mode.store(
             match diffusion_mode {
                 crate::config::DiffusionMode::InitiatorAndResponder => 0,
@@ -1080,11 +1073,6 @@ impl NodeMetrics {
                 "dugite_is_block_producer",
                 "1 when running as a block producer (forge credentials loaded), 0 for relay",
                 &self.is_block_producer,
-            ),
-            (
-                "dugite_p2p_enabled",
-                "1 when P2P networking (peer governor) is enabled, 0 for static topology mode",
-                &self.p2p_enabled,
             ),
             (
                 "dugite_diffusion_mode",
