@@ -367,6 +367,43 @@ impl Governor {
             }
         }
 
+        // ── aboveTargetLocal hot→warm for local root groups ────────────
+        // When a local root group has MORE hot members than its hotValency,
+        // the excess must be demoted. This is the ONLY path that can demote
+        // topology (local root) peers — all other demotion paths exclude them.
+        // Matches Haskell's `aboveTargetLocal` in `ActivePeers.hs`.
+        //
+        // The worst-scoring peer in the group is demoted first (ascending sort
+        // so index 0 is the lowest score / highest latency).
+        {
+            use super::selection::peer_score;
+            for group in local_root_groups {
+                let mut hot_members: Vec<(SocketAddr, f64)> = group
+                    .members
+                    .iter()
+                    .filter_map(|addr| {
+                        peer_manager.get_peer(addr).and_then(|info| {
+                            if info.state == PeerState::Hot {
+                                Some((*addr, peer_score(info)))
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .collect();
+                if hot_members.len() > group.hot_valency {
+                    let excess = hot_members.len() - group.hot_valency;
+                    // Sort ascending — lowest score (worst peer) first.
+                    hot_members.sort_by(|(_, a), (_, b)| {
+                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    for (addr, _) in hot_members.into_iter().take(excess) {
+                        actions.push(GovernorAction::DemoteToWarm(addr));
+                    }
+                }
+            }
+        }
+
         // ── Hot churn ───────────────────────────────────────────────────
         // Periodically rotate one hot peer to keep the active set fresh.
         // Uses scoring to demote the worst hot peer and promote the best warm.
@@ -1131,5 +1168,70 @@ mod tests {
             .collect();
         assert_eq!(promoted3.len(), 1);
         assert_eq!(promoted3[0], addr_b);
+    }
+
+    /// aboveTargetLocal: when a local root group has more hot members than
+    /// its hotValency, the excess (worst-scoring) must be demoted to warm.
+    /// This is the ONLY path that can demote topology peers.
+    #[test]
+    fn above_target_local_hot_demotes_excess() {
+        let mut pm = PeerManager::new();
+
+        // Two topology peers both promoted to Hot.
+        let good_addr = test_addr(9000); // low latency → high score → keep
+        let bad_addr = test_addr(9001);  // high latency → low score → demote
+
+        pm.add_peer(good_addr, PeerSource::Topology);
+        pm.promote_to_warm(&good_addr);
+        pm.promote_to_hot(&good_addr);
+        pm.get_peer_mut(&good_addr).unwrap().update_latency(5.0);
+        pm.get_peer_mut(&good_addr).unwrap().reputation = 0.9;
+
+        pm.add_peer(bad_addr, PeerSource::Topology);
+        pm.promote_to_warm(&bad_addr);
+        pm.promote_to_hot(&bad_addr);
+        pm.get_peer_mut(&bad_addr).unwrap().update_latency(999.0);
+        pm.get_peer_mut(&bad_addr).unwrap().reputation = 0.1;
+
+        // Group hot_valency=1 → 2 hot members, excess=1.
+        let group = LocalRootGroupTarget {
+            members: [good_addr, bad_addr].iter().copied().collect(),
+            warm_valency: 2,
+            hot_valency: 1,
+        };
+
+        // Aggregate targets high so they don't interfere.
+        let config = GovernorConfig {
+            targets: PeerTargets {
+                target_warm: 10,
+                target_hot: 10,
+                max_cold: 100,
+            },
+            hot_churn_interval: Duration::from_secs(3600),
+            cold_churn_interval: Duration::from_secs(3600),
+            warm_churn_interval: Duration::from_secs(3600),
+        };
+        let mut gov = Governor::new(config);
+        let actions = gov.compute_actions(&pm, &[group]);
+
+        let demoted: Vec<SocketAddr> = actions
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::DemoteToWarm(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+
+        // Exactly one demotion: the worst-scoring peer.
+        assert_eq!(demoted.len(), 1, "should demote exactly 1 excess hot peer");
+        assert_eq!(
+            demoted[0], bad_addr,
+            "the worse-scoring peer should be demoted"
+        );
+        // The good peer must not be demoted.
+        assert!(
+            !demoted.contains(&good_addr),
+            "better-scoring topology peer must be retained"
+        );
     }
 }
