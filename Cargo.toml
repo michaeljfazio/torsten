@@ -42,7 +42,7 @@ dugite-lsm = { path = "crates/dugite-lsm" }
 dugite-monitor = { path = "crates/dugite-monitor" }
 
 # Terminal UI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 
 # Serialization
