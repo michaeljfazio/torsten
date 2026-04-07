@@ -6,7 +6,7 @@
 
 ## Overview
 
-Close the remaining gaps between Dugite's P2P governor, topology handling, and config parsing compared to Haskell cardano-node 10.x. Our governor already has per-group local root promotion (`governor.rs` lines 152-233) and topology demotion exclusions in selection functions (`select_worst_hot`, `select_worst_warm`, `select_lowest_reputation_cold`). The remaining work is: ensuring the aggregate target paths exclude topology peers, adding the `aboveTargetLocal` exception path, wiring per-group `diffusionMode` to handshakes, adding missing config fields, and startup validation. This spec covers 7 work items ordered by priority.
+Close the remaining gaps between Dugite's P2P governor, topology handling, and config parsing compared to Haskell cardano-node 10.x. Our governor already has per-group local root promotion (`governor.rs` lines 152-233) and topology demotion exclusions in selection functions (`select_worst_hot`, `select_worst_warm`, `select_lowest_reputation_cold`). All config fields already exist but several have wrong defaults or types. The remaining work is: ensuring aggregate target paths exclude topology+BLP peers, adding the `aboveTargetLocal` exception path, adding in-progress promotion tracking, fixing config defaults/types to match Haskell exactly, completing startup validation, wiring per-group `diffusionMode` to handshakes, and integrating the `advertise` flag in peer sharing. This spec covers 7 work items ordered by priority.
 
 > **Note on peer selection strategy:** Haskell uses **uniform random selection** for all promotions (`simplePromotionPolicy`) and score-based selection only for hot demotions. Our implementation uses score-based selection throughout. This is a deliberate divergence — our scoring approach (reputation + latency + failure penalty) provides better peer quality optimization while maintaining the same structural guarantees (per-group targets, topology exclusions). This spec does not change the selection strategy.
 
@@ -55,11 +55,20 @@ Same pattern but checks `|membersActive| < hotValency` per group. An additional 
 
 ### Design
 
-1. **Exclude topology peers from aggregate paths:** In Stage 2 (`below_target_other_warm`), filter out `PeerSource::Topology` from the eligible set. In Stage 3 (`below_target_other_hot`), same exclusion. This ensures local roots are ONLY managed by the per-group guards.
+1. **Exclude topology peers from aggregate paths:** In Stage 2 (`below_target_other_warm`), filter out `PeerSource::Topology` from the eligible set. In Stage 3 (`below_target_other_hot`), same exclusion. This matches Haskell's `belowTargetOther` which explicitly excludes `LocalRootPeers.keysSet`.
 
-2. **Add `in_progress_promote_cold: HashSet<SocketAddr>` to `Governor`:** Populated when `PromoteToWarm` actions are emitted, cleared when the promotion completes (success or failure callback). Subtract from candidate sets in both local and aggregate paths. The `numToPromote` calculation per group should subtract `|inProgressPromoteCold ∩ group.members|`.
+2. **Exclude big ledger peers from aggregate paths:** Haskell's `belowTargetOther` in `ActivePeers.hs` (warm→hot) explicitly excludes `bigLedgerPeersSet` — BLPs are promoted only by their own dedicated `belowTargetBigLedgerPeers` path. Our Stage 3 should also exclude BLPs. For Stage 2 (cold→warm), Haskell excludes BLPs indirectly (they have their own cold→warm path); verify our code doesn't double-promote BLPs.
 
-3. **Verify backoff filtering:** Ensure Stage 1 correctly intersects group members with `peers_eligible_to_connect()` results (peers whose `next_connect_after` has elapsed or is None).
+3. **Add in-progress tracking sets to `Governor`:** Haskell's `PeerSelectionState` tracks 5 in-progress sets (all flat global `Set peeraddr`):
+   - `inProgressPromoteCold: HashSet<SocketAddr>` — cold→warm in-flight
+   - `inProgressPromoteWarm: HashSet<SocketAddr>` — warm→hot in-flight
+   - `inProgressDemoteWarm: HashSet<SocketAddr>` — hot→warm in-flight (used in `aboveTargetLocal`)
+   - `inProgressDemoteHot: HashSet<SocketAddr>` — hot→warm in-flight (separate tracking)
+   - `inProgressDemoteToCold: HashSet<SocketAddr>` — any→cold async teardown
+   
+   Our `already_promoted` is per-invocation only (governor.rs line 158). For correctness, at minimum add `in_progress_promote_cold` (prevents double cold→warm across ticks) and `in_progress_promote_warm` (prevents double warm→hot). Populated when actions are emitted, cleared on completion callback. Subtract from candidate sets in both local and aggregate paths. The `numToPromote` per-group calculation should subtract `|inProgressPromoteCold ∩ group.members|`.
+
+4. **Verify backoff filtering:** Ensure Stage 1 correctly intersects group members with `peers_eligible_to_connect()` results (peers whose `next_connect_after` has elapsed or is None). The code review confirmed this is already done (line 193).
 
 ### Acceptance Criteria
 
@@ -113,7 +122,12 @@ Our code **already excludes** topology peers from:
 
 1. **Audit and confirm existing exclusions.** Verify all demotion paths in `compute_actions()` and all selection functions exclude topology peers. The code exploration shows this is already done for the selection functions.
 
-2. **New: `select_excess_local_hot(peer_manager, groups) -> Vec<SocketAddr>`**: For each local root group where `|hot_members| > hot_valency`, select `excess` worst-scoring hot members for demotion. This is the one exception path.
+2. **New: `above_target_local_hot(peer_manager, groups) -> Vec<GovernorAction>`**: For each local root group where `|hot_members| > hot_valency`:
+   - Compute `availableToDemote = (localRootPeers ∩ activePeers) \ inProgressDemoteHot \ inProgressDemoteToCold`
+   - Per group: `membersAvailableToDemote = group.members ∩ availableToDemote`
+   - `numToDemote = |membersActive| - hotValency - |inProgressDemoteHot ∩ group.members|`
+   - Select `numToDemote` worst-scoring hot members from that group for `DemoteToWarm`
+   - Haskell uses `policyPickHotPeersToDemote` (ChainSync + BlockFetch metrics). Our score-based approach is aligned in principle — use `peer_score()` to select lowest-scoring peers.
 
 In `governor.rs`, update the above-target logic:
 
@@ -136,86 +150,82 @@ above_target_warm:
 
 ---
 
-## 3. Missing P2P Config Fields
+## 3. P2P Config Default Corrections
 
-**Priority:** Medium
+**Priority:** High (wrong defaults affect real node behaviour)
 
-### Fields to Add to `NodeConfig`
+### Current State
 
-#### Genesis / Consensus Mode
+All config fields referenced in issue #369 **already exist** in `config.rs`. The structs (`ConsensusMode`, `AcceptedConnectionsLimit`), the sync target fields, and the connection management fields are all present and parse correctly. However, several defaults are **wrong** compared to Haskell.
 
-| JSON Key | Type | Default | Purpose |
-|----------|------|---------|---------|
-| `ConsensusMode` | enum `PraosMode \| GenesisMode` | `PraosMode` | Enables Ouroboros Genesis |
-| `SyncTargetNumberOfActivePeers` | `usize` | `5` | Active peers during Genesis sync |
-| `SyncTargetNumberOfEstablishedPeers` | `usize` | `10` | Established peers during sync |
-| `SyncTargetNumberOfKnownPeers` | `usize` | `150` | Known peers during sync |
-| `SyncTargetNumberOfRootPeers` | `usize` | `0` | Root peers during sync |
-| `SyncTargetNumberOfActiveBigLedgerPeers` | `usize` | `30` | Active BLPs during sync |
-| `SyncTargetNumberOfEstablishedBigLedgerPeers` | `usize` | `40` | Established BLPs during sync |
-| `SyncTargetNumberOfKnownBigLedgerPeers` | `usize` | `100` | Known BLPs during sync |
-| `MinBigLedgerPeersForTrustedState` | `usize` | `5` | Pause sync if active BLPs drop below this |
+### Bugs: Wrong Defaults
 
-> **Source:** `defaultSyncTargets` in `cardano-diffusion/lib/Cardano/Network/Diffusion/Configuration.hs` lines 51-60. Note `SyncTargetNumberOfEstablishedBigLedgerPeers` defaults to 40 (not 50 as stated in the issue).
+#### Deadline target defaults (lines 629-632)
 
-**Haskell `ConsensusMode` type:** Parsed from JSON string literals `"PraosMode"` or `"GenesisMode"` via derived `FromJSON`. Default is `PraosMode`. In `GenesisMode`, the governor switches between "deadline targets" (normal) and "sync targets" (when `LedgerStateJudgement = TooOld`). When `PraosMode`, sync targets are ignored.
+Haskell's `defaultDeadlineTargets` varies by `BlockProducerOrRelay`:
 
-#### Connection Management
+| Field | Our default | Haskell Relay | Haskell BP | Fix |
+|-------|-------------|---------------|------------|-----|
+| `target_number_of_root_peers` | 60 | 60 | 100 | Correct for relay; BP-awareness is future work |
+| `target_number_of_known_peers` | **85** | **150** | 100 | **Fix to 150** |
+| `target_number_of_established_peers` | **40** | **30** | 30 | **Fix to 30** |
+| `target_number_of_active_peers` | **15** | **20** | 20 | **Fix to 20** |
+| BLP targets | Correct | 15/10/5 | 15/10/5 | No change |
 
-| JSON Key | Type | Default | Purpose |
-|----------|------|---------|---------|
-| `AcceptedConnectionsLimit` | struct | `{ hard: 512, soft: 384, delay: 5.0 }` | Inbound connection limits |
-| `ProtocolIdleTimeout` | `f64` (seconds) | `5.0` | Idle mini-protocol pruning |
-| `TimeWaitTimeout` | `f64` (seconds) | `60.0` | Connection TIME_WAIT duration |
-| `EgressPollInterval` | `f64` (seconds) | `0.0` | Outbound governor poll interval |
-| `ChainSyncIdleTimeout` | `Option<f64>` (seconds) | `None` (means use default 3373s) | ChainSync-specific idle timeout |
+> **Source:** `defaultDeadlineTargets` in `ouroboros-network/lib/Ouroboros/Network/Diffusion/Configuration.hs`. Haskell checks `if hasProtocolFile protocolFiles then BlockProducer else Relay`. For now, use Relay defaults; BP-specific defaults are future work (requires detecting operational certificate presence).
 
-**`AcceptedConnectionsLimit` JSON format:** Parsed via a hand-written `FromJSON` instance in `OrphanInstances.hs` (lines 284-305). The JSON keys are **short forms**, NOT the full Haskell field names:
+#### Sync target defaults (lines 646-649)
 
-```json
-"AcceptedConnectionsLimit": {
-  "hardLimit": 512,
-  "softLimit": 384,
-  "delay": 5
-}
-```
+| Field | Our default | Haskell | Fix |
+|-------|-------------|---------|-----|
+| `sync_target_number_of_active_peers` | **0** | **5** | **Fix to 5** |
+| `sync_target_number_of_established_peers` | **0** | **10** | **Fix to 10** |
+| `sync_target_number_of_known_peers` | **0** | **150** | **Fix to 150** |
+| `sync_target_number_of_root_peers` | 0 | 0 | Correct |
+| `sync_target_number_of_active_big_ledger_peers` | 30 | 30 | Correct |
+| `sync_target_number_of_established_big_ledger_peers` | **50** | **40** | **Fix to 40** |
+| `sync_target_number_of_known_big_ledger_peers` | 100 | 100 | Correct |
+| `min_big_ledger_peers_for_trusted_state` | 5 | 5 | Correct |
 
-JSON keys: `"hardLimit"` (Word32), `"softLimit"` (Word32), `"delay"` (DiffTime/seconds). The delay is NOT fixed — it scales linearly from 0 at soft limit to `delay` at hard limit. Above hard limit: block until count drops below, then wait `delay`.
+> **Critical:** Our current sync defaults of `active=0, established=0, known=0` would **fail** `sanePeerSelectionTargets` validation (since `active <= established <= known` requires them all to be 0 or all properly ordered, but the BLP targets are non-zero and fine). Actually 0 <= 0 <= 0 passes the chain, but these zeros mean Genesis mode would be non-functional. Match Haskell.
+
+#### Connection management defaults (lines 392-393)
+
+| Field | Our default | Haskell | Fix |
+|-------|-------------|---------|-----|
+| `egress_poll_interval` | **10** | **0** | **Fix to 0** |
+| `protocol_idle_timeout` | 5 | 5 | Correct |
+| `time_wait_timeout` | 60 | 60 | Correct |
+
+#### Timeout field types (lines 270-276)
+
+| Field | Our type | Haskell type | Fix |
+|-------|----------|-------------|-----|
+| `protocol_idle_timeout` | **`u64`** | `DiffTime` (fractional) | **Change to `f64`** |
+| `time_wait_timeout` | **`u64`** | `DiffTime` (fractional) | **Change to `f64`** |
+| `egress_poll_interval` | **`u64`** | `DiffTime` (fractional) | **Change to `f64`** |
+| `chain_sync_idle_timeout` | `Option<u64>` | `DiffTime` (fractional) | **Change to `Option<f64>`** |
+
+Haskell's `DiffTime` is picosecond-precision `Rational`. Aeson's `FromJSON DiffTime` accepts both integer and fractional JSON numbers (`5`, `5.5`, `0.1`). Our `u64` would reject valid fractional values from real cardano-node configs.
 
 ### Design
 
-Add a `ConsensusMode` enum and `AcceptedConnectionsLimit` struct to `config.rs`:
+Fix all defaults and types in `config.rs`:
 
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConsensusMode {
-    PraosMode,
-    GenesisMode,
-}
-
-/// Matches Haskell JSON format: {"hardLimit": 512, "softLimit": 384, "delay": 5}
-/// Hand-written FromJSON in OrphanInstances.hs uses short key names.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcceptedConnectionsLimit {
-    #[serde(rename = "hardLimit")]
-    pub hard_limit: u32,
-    #[serde(rename = "softLimit")]
-    pub soft_limit: u32,
-    #[serde(rename = "delay")]
-    pub delay: f64,
-}
-```
-
-Add all fields to `NodeConfig` with `#[serde(default)]` using Haskell-matching defaults. All config JSON keys are **PascalCase** (matching Haskell `.:?` key strings from `POM.hs`). **Phase 1** (this issue): parse and store. **Phase 2** (future): wire `AcceptedConnectionsLimit` to the N2N listener, Genesis targets to the governor.
+1. Change deadline target defaults to match Haskell Relay: `known=150, established=30, active=20`
+2. Change sync target defaults: `active=5, established=10, known=150, established_blp=40`
+3. Change `egress_poll_interval` default to `0`
+4. Change timeout types from `u64` to `f64`
+5. Update all `default_*` helper functions accordingly
+6. Update unit tests to reflect corrected defaults
 
 ### Acceptance Criteria
 
-- All fields parse from cardano-node config JSON without errors
-- Missing fields use Haskell-matching defaults
-- `ConsensusMode` accepts exactly `"PraosMode"` and `"GenesisMode"`
-- `AcceptedConnectionsLimit` parses as nested object with short keys (`hardLimit`, `softLimit`, `delay`)
-- `ChainSyncIdleTimeout`: `None` in config → use default 3373s (same for all modes, not mode-specific)
-- Unit tests for parsing valid configs and verifying defaults
+- All defaults match Haskell `defaultDeadlineTargets(Relay)` and `defaultSyncTargets`
+- Timeout fields accept fractional values (e.g., `"ProtocolIdleTimeout": 5.5`)
+- `EgressPollInterval` defaults to 0
+- Existing unit tests updated and passing
+- New unit test: parse config with fractional timeout values
 
 ---
 
@@ -301,83 +311,98 @@ The `effective_diffusion_mode()` method exists but is **not called** from `conne
 
 ## 6. Startup Validation: Peer Target Constraints
 
-**Priority:** Medium
+**Priority:** High (existing validation is incomplete)
 
-### Haskell Behaviour
+### Current State
 
-`sanePeerSelectionTargets` in `Governor/Types.hs` enforces:
+`config.rs` already has a `validate()` method (line 502) that checks:
+- `known >= established` and `established >= active` for regular peers
+- Same ordering for BLP targets
+- Sync targets checked **only when `ConsensusMode::GenesisMode`**
 
+### Bugs vs Haskell
+
+1. **Sync targets validated conditionally.** Haskell validates BOTH deadline AND sync targets **unconditionally** — the check is `unless (sanePeerSelectionTargets deadlineTargets && sanePeerSelectionTargets syncTargets)` with no mode guard. Our code wraps sync validation in `if self.consensus_mode == ConsensusMode::GenesisMode`.
+
+2. **Missing constraints.** Haskell's `sanePeerSelectionTargets` has 14 predicates. Our validation is missing:
+   - `root <= known` (regular peers)
+   - `active <= 100` (regular peers)
+   - `established <= 1000` (regular peers)
+   - `known <= 10000` (regular peers)
+   - `activeBLP <= 100`
+   - `establishedBLP <= 1000`
+   - `knownBLP <= 10000`
+   - All of the above for sync targets
+   - Sync target BLP ordering (`activeBLP <= establishedBLP <= knownBLP`)
+
+3. **Missing sync BLP validation entirely.** Even when GenesisMode is set, our code only validates sync regular targets, not sync BLP targets.
+
+### Haskell Reference
+
+`sanePeerSelectionTargets` in `Governor/Types.hs`:
+
+```haskell
+sanePeerSelectionTargets PeerSelectionTargets{..} =
+                                 0 <= targetNumberOfActivePeers
+ && targetNumberOfActivePeers      <= targetNumberOfEstablishedPeers
+ && targetNumberOfEstablishedPeers <= targetNumberOfKnownPeers
+ &&      targetNumberOfRootPeers   <= targetNumberOfKnownPeers
+ &&                              0 <= targetNumberOfRootPeers
+ &&                                       0 <= targetNumberOfActiveBigLedgerPeers
+ && targetNumberOfActiveBigLedgerPeers      <= targetNumberOfEstablishedBigLedgerPeers
+ && targetNumberOfEstablishedBigLedgerPeers <= targetNumberOfKnownBigLedgerPeers
+ && targetNumberOfActivePeers      <= 100
+ && targetNumberOfEstablishedPeers <= 1000
+ && targetNumberOfKnownPeers       <= 10000
+ && targetNumberOfActiveBigLedgerPeers      <= 100
+ && targetNumberOfEstablishedBigLedgerPeers <= 1000
+ && targetNumberOfKnownBigLedgerPeers       <= 10000
 ```
-0 <= active <= established <= known
-0 <= rootPeers <= known
-active <= 100
-established <= 1000
-known <= 10000
-```
 
-Applied independently to both deadline targets and sync targets (when `GenesisMode`). Called from `makeNodeConfiguration` — node fails to start with an explicit error message if violated.
+Called from `makeNodeConfiguration` unconditionally for both deadline and sync targets.
 
 ### Design
 
-Add `validate_peer_targets()` to `NodeConfig`:
+Replace the existing validation with a complete `sane_peer_selection_targets()` function matching all 14 Haskell predicates. Apply unconditionally to both deadline and sync target sets.
 
 ```rust
-impl NodeConfig {
-    pub fn validate_peer_targets(&self) -> Result<(), String> {
-        Self::check_targets(
-            "deadline",
-            self.target_number_of_active_peers,
-            self.target_number_of_established_peers,
-            self.target_number_of_known_peers,
-            self.target_number_of_root_peers,
-        )?;
-        Self::check_targets_blp(
-            "deadline BLP",
-            self.target_number_of_active_big_ledger_peers,
-            self.target_number_of_established_big_ledger_peers,
-            self.target_number_of_known_big_ledger_peers,
-        )?;
-        if self.consensus_mode == ConsensusMode::GenesisMode {
-            Self::check_targets(
-                "sync",
-                self.sync_target_number_of_active_peers,
-                self.sync_target_number_of_established_peers,
-                self.sync_target_number_of_known_peers,
-                self.sync_target_number_of_root_peers,
-            )?;
-            Self::check_targets_blp(
-                "sync BLP",
-                self.sync_target_number_of_active_big_ledger_peers,
-                self.sync_target_number_of_established_big_ledger_peers,
-                self.sync_target_number_of_known_big_ledger_peers,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn check_targets(label: &str, active: usize, established: usize, known: usize, root: usize) -> Result<(), String> {
-        // 0 <= active <= established <= known
-        // 0 <= root <= known
-        // active <= 100, established <= 1000, known <= 10000
-    }
-
-    fn check_targets_blp(label: &str, active: usize, established: usize, known: usize) -> Result<(), String> {
-        // Same chain: 0 <= active <= established <= known
-        // active <= 100, established <= 1000, known <= 10000
-    }
+fn sane_peer_selection_targets(
+    label: &str,
+    active: usize, established: usize, known: usize, root: usize,
+    active_blp: usize, established_blp: usize, known_blp: usize,
+) -> Result<()> {
+    // 14 predicates matching Haskell exactly:
+    // 1.  0 <= active                          (always true for usize)
+    // 2.  active <= established
+    // 3.  established <= known
+    // 4.  root <= known
+    // 5.  0 <= root                            (always true for usize)
+    // 6.  0 <= active_blp                      (always true for usize)
+    // 7.  active_blp <= established_blp
+    // 8.  established_blp <= known_blp
+    // 9.  active <= 100
+    // 10. established <= 1000
+    // 11. known <= 10000
+    // 12. active_blp <= 100
+    // 13. established_blp <= 1000
+    // 14. known_blp <= 10000
 }
 ```
 
-Call from `node/mod.rs` during startup, before network initialization. Exit with clear error message matching Haskell's format.
+Call unconditionally:
+```rust
+sane_peer_selection_targets("deadline", ...deadline fields...)?;
+sane_peer_selection_targets("sync", ...sync fields...)?;
+```
 
 ### Acceptance Criteria
 
-- Node refuses to start when `known < established` or `established < active`
-- Upper bounds enforced: active ≤ 100, established ≤ 1000, known ≤ 10000
+- Validation covers all 14 predicates for both deadline and sync targets
+- Sync targets validated **unconditionally** (not just in GenesisMode)
+- Upper bounds enforced: active ≤ 100, established ≤ 1000, known ≤ 10000 (both regular and BLP)
 - Root peers validated: `root ≤ known`
-- Validation covers both deadline and sync target sets (sync only when `GenesisMode`)
-- Unit tests for valid and invalid configurations
-- Default config values pass validation
+- Default config values (after §3 fixes) pass validation
+- Unit tests for each individual constraint violation
 
 ---
 
@@ -385,25 +410,28 @@ Call from `node/mod.rs` during startup, before network initialization. Exit with
 
 **Priority:** Medium
 
+### Current State
+
+Need to verify whether `schema.rs` already has `ParamDef` entries for the Genesis/connection management fields, and whether existing deadline target defaults match the corrected Haskell values.
+
 ### Design
 
-Update `crates/dugite-config/src/schema.rs` to add `ParamDef` entries for every new config field. Group them by section:
+1. **Fix existing deadline target defaults** in `default_config_for_network()`: `known=150, established=30, active=20` (matching §3 corrections)
+2. **Verify/add `ParamDef` entries** for all Genesis and connection management fields:
 
 **Network section (existing):**
 - `ConsensusMode` — `ParamType::Enum { values: &["PraosMode", "GenesisMode"] }`
-- `ProtocolIdleTimeout` — `ParamType::U64 { min: 0, max: 3600 }` (seconds)
+- `ProtocolIdleTimeout` — `ParamType::U64 { min: 0, max: 3600 }` (seconds, note: config.rs accepts f64 but schema UI shows integer)
 - `TimeWaitTimeout` — `ParamType::U64 { min: 0, max: 3600 }`
-- `EgressPollInterval` — `ParamType::U64 { min: 0, max: 3600 }`
-- `ChainSyncIdleTimeout` — `ParamType::U64 { min: 0, max: 86400 }`
+- `EgressPollInterval` — `ParamType::U64 { min: 0, max: 3600 }`, default **0** (not 10)
+- `ChainSyncIdleTimeout` — `ParamType::U64 { min: 0, max: 86400 }`, default empty (3373s implicit)
 
 **Connection Limits section (new):**
-- `AcceptedConnectionsLimit` — compound type in config JSON (`{"hardLimit": 512, "softLimit": 384, "delay": 5}`). In the schema, represent as a single `ParamType::String` with description noting the JSON object format, since `dugite-config` doesn't support compound editing. The default JSON representation should be included in `default_config_for_network()`.
+- `AcceptedConnectionsLimit` — compound type; represent in `default_config_for_network()` as nested JSON object with short keys (`hardLimit`, `softLimit`, `delay`)
 
-**Genesis section (new):**
-- All `SyncTargetNumberOf*` fields — `ParamType::U64` with same bounds as their deadline counterparts. **Correct defaults:** active=5, established=10, known=150, root=0, activeBLP=30, establishedBLP=40, knownBLP=100
-- `MinBigLedgerPeersForTrustedState` — `ParamType::U64 { min: 0, max: 100 }`
-
-Update `default_config_for_network()` to include all new fields with Haskell-matching defaults.
+**Genesis section:**
+- All `SyncTargetNumberOf*` fields with corrected defaults: active=5, established=10, known=150, root=0, activeBLP=30, establishedBLP=40, knownBLP=100
+- `MinBigLedgerPeersForTrustedState` — default 5
 
 ### Acceptance Criteria
 
@@ -417,13 +445,13 @@ Update `default_config_for_network()` to include all new fields with Haskell-mat
 
 ## Implementation Order
 
-1. **§1 — Governor local root promotion gaps** (exclude topology from aggregate paths, add `inProgressPromoteCold` tracking)
-2. **§2 — Demotion exclusion audit + `aboveTargetLocal`** (audit existing exclusions, add hot→warm exception for oversubscribed groups)
-3. **§3 — Config fields** (additive, no behaviour change)
-4. **§6 — Startup validation** (depends on §3 for new fields)
-5. **§7 — Schema alignment** (depends on §3 for field names)
-6. **§4 — `diffusionMode` wiring** (one callsite change in connection_lifecycle.rs)
-7. **§5 — Additional topology fields** (advertise integration, parse-only for rest)
+1. **§3 — Config default/type corrections** (fix wrong defaults, change timeout types to f64 — foundational, affects validation)
+2. **§6 — Startup validation** (complete the 14-predicate check, make unconditional — depends on §3 for correct defaults)
+3. **§1 — Governor local root promotion gaps** (exclude topology+BLP from aggregate paths, add `inProgressPromoteCold` tracking)
+4. **§2 — Demotion exclusion audit + `aboveTargetLocal`** (confirm existing exclusions, add hot→warm exception for oversubscribed groups)
+5. **§4 — `diffusionMode` wiring** (one callsite change in connection_lifecycle.rs)
+6. **§7 — Schema alignment** (update defaults in schema to match §3 corrections)
+7. **§5 — Additional topology fields** (advertise integration in peer sharing, parse-only for rest)
 
 ---
 
@@ -451,3 +479,18 @@ The following corrections were identified during spec review against Haskell sou
 6. **Per-group local root promotion (issue §1):** Issue implies this is entirely missing. `governor.rs` already has per-group promotion (Stage 1, lines 152-233). The gap is: aggregate paths don't exclude topology peers, and no `inProgressPromoteCold` tracking.
 7. **Demotion exclusions (issue §2):** Issue implies only cold churn has topology exclusion. `select_worst_hot()`, `select_worst_warm()` already exclude topology peers.
 8. **Haskell promotion strategy:** Haskell uses uniform random selection for promotions (`simplePromotionPolicy`), not score-based. Our score-based approach is a deliberate divergence.
+
+### Additional findings from deep review (not in issue #369)
+
+9. **Deadline target defaults wrong in existing code:** Our defaults `known=85, established=40, active=15` don't match Haskell Relay defaults `known=150, established=30, active=20`. Source: `defaultDeadlineTargets(Relay)` in `ouroboros-network/Diffusion/Configuration.hs`.
+10. **Sync target defaults wrong in existing code:** Our sync defaults `active=0, established=0, known=0, established_blp=50` don't match Haskell `active=5, established=10, known=150, established_blp=40`.
+11. **EgressPollInterval default wrong in existing code:** Our default is 10, Haskell is 0.
+12. **Timeout types wrong:** Our `protocol_idle_timeout`, `time_wait_timeout`, `egress_poll_interval`, `chain_sync_idle_timeout` use `u64`/`Option<u64>`. Haskell uses `DiffTime` which accepts fractional seconds. Should be `f64`/`Option<f64>`.
+13. **Validation is conditional:** Our sync target validation is gated by `consensus_mode == GenesisMode`. Haskell validates BOTH sets unconditionally.
+14. **Validation is incomplete:** Missing `root <= known`, upper bounds (`active <= 100`, `established <= 1000`, `known <= 10000`), BLP upper bounds, and sync BLP ordering checks.
+15. **Big ledger peers not excluded from belowTargetOther:** Haskell's `belowTargetOther` in `ActivePeers.hs` explicitly excludes `bigLedgerPeersSet` from warm→hot promotion candidates. Our aggregate Stage 3 does not.
+16. **BP vs Relay different defaults:** Haskell's `defaultDeadlineTargets` varies by `BlockProducerOrRelay` — BP gets `root=100, known=100`, Relay gets `root=60, known=150`. Our code uses a single default set. Detecting BP mode requires checking for operational certificate presence (`hasProtocolFile`).
+17. **Haskell aboveTargetLocal demotion is metric-based:** Uses `policyPickHotPeersToDemote` — ranks by ChainSync tips + BlockFetch completions, demotes lowest-utility peers. Our score-based approach for demotions is conceptually aligned.
+18. **Churn localRootHotTarget = SUM of group hotValencies:** Not max. Important for the churn floor calculation `max 1 (sum of all hotValencies)`.
+19. **Peer sharing advertise filtering not integrated:** `is_advertisable()` exists in NodePeerManager but is not called from peer sharing response path. Only `is_routable()` filtering is applied.
+20. **Config fields already exist:** Issue §3 says "Fields to Add" but `ConsensusMode`, `AcceptedConnectionsLimit`, all sync targets, and connection management fields are already present in `config.rs`. The work is fixing defaults, types, and validation — not adding fields.
