@@ -2224,7 +2224,6 @@ impl Node {
             .unwrap_or(0.05);
         let lifecycle = ConnectionLifecycleManager::new(
             self.network_magic,
-            self.config.diffusion_mode == crate::config::DiffusionMode::InitiatorOnly,
             self.config
                 .effective_peer_sharing(self.block_producer.is_some()),
             connect_timeout,
@@ -2570,6 +2569,26 @@ impl Node {
                             // Each connect can take up to connect_timeout (default
                             // 10s); doing them sequentially here would starve
                             // fetched_blocks_rx for that entire duration.
+                            // Snapshot per-peer diffusion modes under a single read
+                            // lock before spawning background connect tasks, so each
+                            // peer's per-group InitiatorOnly override is captured
+                            // and forwarded to PeerConnection::connect() as the
+                            // correct `initiator_only` flag in the handshake.
+                            let diffusion_modes: Vec<(SocketAddr, bool)> = {
+                                let pm = peer_manager.read().await;
+                                actions
+                                    .iter()
+                                    .filter_map(|a| {
+                                        if let dugite_network::peer::governor::GovernorAction::PromoteToWarm(addr) = a {
+                                            let initiator_only = pm.effective_diffusion_mode(addr)
+                                                == DiffusionMode::InitiatorOnly;
+                                            Some((*addr, initiator_only))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect()
+                            };
                             for action in &actions {
                                 if let dugite_network::peer::governor::GovernorAction::PromoteToWarm(addr) = action {
                                     // Skip peers that are already connected or
@@ -2579,8 +2598,15 @@ impl Node {
                                     {
                                         continue;
                                     }
+                                    // Look up the per-peer initiator_only flag computed
+                                    // above from the peer's topology group config.
+                                    let initiator_only = diffusion_modes
+                                        .iter()
+                                        .find(|(a, _)| a == addr)
+                                        .map(|(_, io)| *io)
+                                        .unwrap_or(false);
                                     in_flight_connects.insert(*addr);
-                                    lifecycle.spawn_connect(*addr, connect_result_tx.clone());
+                                    lifecycle.spawn_connect(*addr, initiator_only, connect_result_tx.clone());
                                 }
                             }
 
