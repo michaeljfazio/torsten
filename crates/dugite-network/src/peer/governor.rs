@@ -234,11 +234,16 @@ impl Governor {
 
         // ── Target-driven promotions/demotions ──────────────────────────
 
-        // Promote cold → warm if below target.
+        // Promote cold → warm if below target (belowTargetOther cold→warm).
         // Only select peers whose exponential backoff window has elapsed
         // (matches Haskell `availableToConnect` filtered by `nextConnectTimes`).
         // Skip peers already promoted by per-group local root logic above.
+        // Also skip topology (local root) peers — they are managed exclusively
+        // by the per-group belowTargetLocal path above, matching Haskell's
+        // `belowTargetOther` which excludes `LocalRootPeers.keysSet`.
         if warm_count + hot_count < self.config.targets.target_warm {
+            use super::manager::PeerSource;
+
             let needed = self.config.targets.target_warm - (warm_count + hot_count);
             let cold_peers = peer_manager.peers_eligible_to_connect();
             let mut promoted = 0;
@@ -246,17 +251,27 @@ impl Governor {
                 if promoted >= needed {
                     break;
                 }
-                if !already_promoted.contains(&addr) {
-                    actions.push(GovernorAction::PromoteToWarm(addr));
-                    already_promoted.insert(addr);
-                    promoted += 1;
+                if already_promoted.contains(&addr) {
+                    continue;
                 }
+                // Exclude topology peers from aggregate cold→warm promotion.
+                if let Some(info) = peer_manager.get_peer(&addr) {
+                    if info.source == PeerSource::Topology {
+                        continue;
+                    }
+                }
+                actions.push(GovernorAction::PromoteToWarm(addr));
+                already_promoted.insert(addr);
+                promoted += 1;
             }
         }
 
-        // Promote warm → hot if below target.
+        // Promote warm → hot if below target (belowTargetOther warm→hot).
         // Skip peers already promoted by per-group local root logic above.
+        // Also skip topology peers — handled exclusively by belowTargetLocal.
         if hot_count < self.config.targets.target_hot {
+            use super::manager::PeerSource;
+
             let needed = self.config.targets.target_hot - hot_count;
             let warm_peers = peer_manager.peers_in_state(PeerState::Warm);
             let mut promoted = 0;
@@ -264,11 +279,18 @@ impl Governor {
                 if promoted >= needed {
                     break;
                 }
-                if !already_promoted.contains(&addr) {
-                    actions.push(GovernorAction::PromoteToHot(addr));
-                    already_promoted.insert(addr);
-                    promoted += 1;
+                if already_promoted.contains(&addr) {
+                    continue;
                 }
+                // Exclude topology peers from aggregate warm→hot promotion.
+                if let Some(info) = peer_manager.get_peer(&addr) {
+                    if info.source == PeerSource::Topology {
+                        continue;
+                    }
+                }
+                actions.push(GovernorAction::PromoteToHot(addr));
+                already_promoted.insert(addr);
+                promoted += 1;
             }
         }
 
@@ -875,6 +897,61 @@ mod tests {
         assert!(
             group_set.contains(&promote_hot[0]),
             "promoted peer should be a group member"
+        );
+    }
+
+    /// Aggregate cold→warm (belowTargetOther) must NOT promote topology peers —
+    /// they are managed exclusively by the per-group belowTargetLocal path.
+    /// This mirrors Haskell's `belowTargetOther` which excludes
+    /// `LocalRootPeers.keysSet` from its candidate set.
+    #[test]
+    fn aggregate_warm_promotion_excludes_topology_peers() {
+        let mut pm = PeerManager::new();
+
+        // One topology cold peer — must NOT be promoted by aggregate logic.
+        let topo_addr = test_addr(7000);
+        pm.add_peer(topo_addr, PeerSource::Topology);
+
+        // One ledger cold peer — eligible for aggregate promotion.
+        let ledger_addr = test_addr(7001);
+        pm.add_peer(ledger_addr, PeerSource::Ledger);
+
+        // target_warm=2, but aggregate logic must skip topology.
+        // No local root groups supplied → belowTargetLocal emits nothing.
+        let config = GovernorConfig {
+            targets: PeerTargets {
+                target_warm: 2,
+                target_hot: 0,
+                max_cold: 100,
+            },
+            hot_churn_interval: Duration::from_secs(3600),
+            cold_churn_interval: Duration::from_secs(3600),
+            warm_churn_interval: Duration::from_secs(3600),
+        };
+        let mut gov = Governor::new(config);
+        let actions = gov.compute_actions(&pm, &[]);
+
+        let promoted: Vec<SocketAddr> = actions
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::PromoteToWarm(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+
+        // Only the ledger peer may be promoted; the topology peer must be skipped.
+        assert!(
+            !promoted.contains(&topo_addr),
+            "aggregate path must not promote topology peer"
+        );
+        assert!(
+            promoted.contains(&ledger_addr),
+            "aggregate path should promote the ledger peer"
+        );
+        assert_eq!(
+            promoted.len(),
+            1,
+            "exactly 1 promotion: ledger peer only"
         );
     }
 }
