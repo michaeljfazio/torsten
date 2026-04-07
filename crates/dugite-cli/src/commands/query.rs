@@ -2537,9 +2537,9 @@ impl QueryCmd {
                 //
                 // Two formats exist:
                 //   (a) Flat: array(4)[hot_vkey, counter, kes_period, sigma]
-                //       — produced by dugite-cli/cardano-cli node issue-op-cert
+                //       — legacy format (missing cold_vkey)
                 //   (b) Wrapped: array(2)[array(4)[hot_vkey, counter, kes_period, sigma], cold_vkey]
-                //       — full on-chain representation
+                //       — standard format (cardano-cli / dugite-cli)
                 //
                 // We detect the format by checking the first element's type:
                 // if it's bytes → flat (a); if it's an array → wrapped (b).
