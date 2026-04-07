@@ -17,7 +17,7 @@ use crate::node::n2c_query::types::{
 /// Wire format:
 /// ```text
 /// [4, result]                          -- QueryAnytime / QueryHardFork / top-level
-/// [4, [result]]                        -- BlockQuery (EitherMismatch Right wrapper)
+/// [4, [1, result]]                     -- BlockQuery (EitherMismatch Right wrapper)
 /// ```
 #[allow(dead_code)] // used in tests
 pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
@@ -25,8 +25,8 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     let mut enc = minicbor::Encoder::new(&mut buf);
 
     // MsgResult [4, result]
-    // For BlockQuery (era-specific) results: [4, [result]]  (HFC success wrapper)
-    // For QueryAnytime/QueryHardFork results: [4, result]   (no wrapper)
+    // For BlockQuery (era-specific) results: [4, [1, result]]  (HFC success wrapper)
+    // For QueryAnytime/QueryHardFork results: [4, result]      (no wrapper)
     enc.array(2).ok();
     enc.u32(4).ok(); // MsgResult tag
 
@@ -36,8 +36,8 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     //   [4, toCBOR result]  — result directly, no HFC wrapping
     //
     // BlockQuery > QueryIfCurrent results (Shelley era queries):
-    //   [4, array(1), result]  — EitherMismatch Right (success) wrapper
-    //   The array(1) = Right in the Either encoding. No NS era index on results.
+    //   [4, [1, result]]  — EitherMismatch Right (success) wrapper
+    //   Haskell Either CBOR: Left = [0, val], Right = [1, val]. No NS era index on results.
     //
     // BlockQuery > QueryAnytime results (GetCurrentEra, GetEraStart):
     //   [4, result]  — no EitherMismatch wrapping
@@ -59,8 +59,10 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     );
 
     if needs_either_mismatch {
-        // QueryIfCurrent results get EitherMismatch Right wrapper: array(1) = success
-        enc.array(1).ok();
+        // QueryIfCurrent results get EitherMismatch Right wrapper: [1, result]
+        // Haskell Either CBOR: Left = [0, val], Right = [1, val] (2-element arrays)
+        enc.array(2).ok();
+        enc.u64(1).ok(); // Right constructor tag
     }
 
     encode_query_result_value(&mut enc, result);
@@ -89,7 +91,10 @@ pub fn encode_query_result_payload(result: &QueryResult) -> Vec<u8> {
     );
 
     if needs_either_mismatch {
-        enc.array(1).ok();
+        // QueryIfCurrent results get EitherMismatch Right wrapper: [1, result]
+        // Haskell Either CBOR: Left = [0, val], Right = [1, val] (2-element arrays)
+        enc.array(2).ok();
+        enc.u64(1).ok(); // Right constructor tag
     }
 
     encode_query_result_value(&mut enc, result);
@@ -2281,14 +2286,15 @@ mod tests {
     };
     use minicbor::Decoder;
 
-    // ── Helper: strip the MsgResult [4, [result]] wrappers from a full
+    // ── Helper: strip the MsgResult [4, [1, result]] wrappers from a full
     //    encode_query_result() output and return just the inner payload. ──────
     fn strip_wrappers(cbor: &[u8]) -> Vec<u8> {
         let mut dec = Decoder::new(cbor);
-        // [4, [payload]]
+        // [4, [1, payload]]
         dec.array().unwrap();
         dec.u32().unwrap(); // 4 = MsgResult tag
-        dec.array().unwrap(); // HFC EitherMismatch Right wrapper
+        dec.array().unwrap(); // HFC EitherMismatch Right wrapper [1, result]
+        dec.u64().unwrap(); // 1 = Right constructor tag
         cbor[dec.position()..].to_vec()
     }
 
