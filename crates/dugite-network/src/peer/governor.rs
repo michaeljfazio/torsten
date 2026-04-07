@@ -269,11 +269,29 @@ impl Governor {
             }
         }
 
-        // Demote hot → warm if above target
+        // Demote hot → warm if above target.
+        // Topology peers (local roots) are excluded — they must never be
+        // demoted, matching Haskell's `Set.\\ LocalRootPeers.keysSet`.
+        // Remaining candidates are sorted by score so the worst are demoted first.
         if hot_count > self.config.targets.target_hot {
+            use super::manager::PeerSource;
+            use super::selection::peer_score;
+
             let excess = hot_count - self.config.targets.target_hot;
-            let hot_peers = peer_manager.peers_in_state(PeerState::Hot);
-            for &addr in hot_peers.iter().take(excess) {
+            let mut scored: Vec<(SocketAddr, f64)> = peer_manager
+                .peers_in_state(PeerState::Hot)
+                .into_iter()
+                .filter_map(|addr| {
+                    peer_manager.get_peer(&addr).and_then(|info| {
+                        if info.source == PeerSource::Topology {
+                            return None;
+                        }
+                        Some((addr, peer_score(info)))
+                    })
+                })
+                .collect();
+            scored.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            for (addr, _) in scored.into_iter().take(excess) {
                 actions.push(GovernorAction::DemoteToWarm(addr));
             }
         }
@@ -660,6 +678,93 @@ mod tests {
             demoted.contains(&test_addr(3002)),
             "worst hot peer should be demoted during churn"
         );
+    }
+
+    #[test]
+    fn topology_peers_never_demoted_from_hot() {
+        let mut pm = PeerManager::new();
+        // 3 hot topology peers + 2 hot ledger peers. Target hot = 2.
+        for i in 0..3u16 {
+            pm.add_peer(test_addr(4000 + i), PeerSource::Topology);
+            pm.promote_to_warm(&test_addr(4000 + i));
+            pm.promote_to_hot(&test_addr(4000 + i));
+        }
+        for i in 0..2u16 {
+            pm.add_peer(test_addr(5000 + i), PeerSource::Ledger);
+            pm.promote_to_warm(&test_addr(5000 + i));
+            pm.promote_to_hot(&test_addr(5000 + i));
+        }
+
+        let config = GovernorConfig {
+            targets: PeerTargets {
+                target_warm: 10,
+                target_hot: 2,
+                max_cold: 100,
+            },
+            hot_churn_interval: Duration::from_secs(3600),
+            cold_churn_interval: Duration::from_secs(3600),
+            warm_churn_interval: Duration::from_secs(3600),
+        };
+        let mut gov = Governor::new(config);
+        let actions = gov.compute_actions(&pm, &[]);
+
+        let demoted: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::DemoteToWarm(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        for addr in &demoted {
+            let peer = pm.get_peer(addr).unwrap();
+            assert_ne!(
+                peer.source,
+                PeerSource::Topology,
+                "topology peer should never be demoted"
+            );
+        }
+    }
+
+    #[test]
+    fn topology_peers_never_demoted_from_warm() {
+        let mut pm = PeerManager::new();
+        for i in 0..5u16 {
+            pm.add_peer(test_addr(4000 + i), PeerSource::Topology);
+            pm.promote_to_warm(&test_addr(4000 + i));
+        }
+        for i in 0..10u16 {
+            pm.add_peer(test_addr(5000 + i), PeerSource::Ledger);
+            pm.promote_to_warm(&test_addr(5000 + i));
+        }
+
+        let config = GovernorConfig {
+            targets: PeerTargets {
+                target_warm: 5,
+                target_hot: 0,
+                max_cold: 100,
+            },
+            hot_churn_interval: Duration::from_secs(3600),
+            cold_churn_interval: Duration::from_secs(3600),
+            warm_churn_interval: Duration::ZERO,
+        };
+        let mut gov = Governor::new(config);
+        let actions = gov.compute_actions(&pm, &[]);
+
+        let demoted: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                GovernorAction::DemoteToCold(addr) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        for addr in &demoted {
+            let peer = pm.get_peer(addr).unwrap();
+            assert_ne!(
+                peer.source,
+                PeerSource::Topology,
+                "topology peer should never be demoted to cold"
+            );
+        }
     }
 
     #[test]
