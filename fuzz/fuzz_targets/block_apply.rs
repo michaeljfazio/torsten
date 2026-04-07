@@ -122,25 +122,25 @@ fn build_tx(data: &[u8], seed: u8) -> Transaction {
 }
 
 fuzz_target!(|data: &[u8]| {
-    // Need at least 72 bytes: 32 (header_hash) + 32 (prev_hash) + 8 (slot/block_no)
-    if data.len() < 72 {
+    // Need at least 82 bytes: 32 (header_hash) + 32 (prev_hash) + 8 (slot) + 8 (block_no) + 2 (body_size, num_txs)
+    if data.len() < 82 {
         return;
     }
 
     let mut ledger_state = LedgerState::new(ProtocolParameters::mainnet_defaults());
 
-    // Parse block header fields from fuzz data
+    // Parse block header fields from fuzz data (non-overlapping offsets)
     let header_hash = read_hash32(data, 0);
     let prev_hash = read_hash32(data, 32);
     let slot = read_u64(data, 64) % 100_000_000;
-    let block_number = read_u64(data, 64).wrapping_shr(32) % 10_000_000;
-    let body_size = read_u64(data, 72.min(data.len().saturating_sub(8))) % 1_000_000;
+    let block_number = read_u64(data, 72) % 10_000_000;
+    let body_size = read_u64(data, 80.min(data.len().saturating_sub(8))) % 1_000_000;
 
     // Control byte for number of transactions (0-4)
-    let num_txs = (data.get(72).copied().unwrap_or(0) % 5) as usize;
+    let num_txs = (data.get(80).copied().unwrap_or(0) % 5) as usize;
 
     // Build transactions from remaining fuzz data
-    let tx_data_start = 73;
+    let tx_data_start = 81;
     let mut transactions = Vec::new();
     let tx_chunk_size = if num_txs > 0 {
         data.len().saturating_sub(tx_data_start) / num_txs.max(1)

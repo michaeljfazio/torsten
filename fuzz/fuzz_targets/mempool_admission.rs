@@ -160,19 +160,20 @@ fuzz_target!(|data: &[u8]| {
             let _ = mempool.remove_tx(&tx_hash);
         }
 
-        // Invariant checks — must never fail
+        // Invariant checks — must never fail.
+        // The mempool enforces capacity limits before inserting (eviction-then-insert),
+        // so these limits should hold strictly after each operation.
         let len = mempool.len();
         let total = mempool.total_bytes();
 
-        // Length must be non-negative (always true for usize, but verify consistency)
         assert!(
             len <= 32,
             "Mempool length {} exceeds max_transactions 32",
             len
         );
         assert!(
-            total <= 65_536 + 256, // Allow small overshoot from concurrent operations
-            "Mempool total_bytes {} exceeds max_bytes",
+            total <= 65_536,
+            "Mempool total_bytes {} exceeds max_bytes 65536",
             total
         );
     }
