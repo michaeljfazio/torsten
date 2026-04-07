@@ -156,6 +156,12 @@ impl Governor {
         // addressed with highest priority — a block producer's relays must
         // always be reconnected immediately.
         let mut already_promoted: HashSet<SocketAddr> = HashSet::new();
+        // Compute eligible-to-connect set once (expensive — allocates and filters).
+        let eligible_to_connect: HashSet<SocketAddr> = if local_root_groups.is_empty() {
+            HashSet::new()
+        } else {
+            peer_manager.peers_eligible_to_connect().into_iter().collect()
+        };
 
         for group in local_root_groups {
             // Count members that are warm or hot (established).
@@ -173,8 +179,6 @@ impl Governor {
             // Promote cold → warm if below warm_valency.
             if warm_or_hot_count < group.warm_valency {
                 let needed = group.warm_valency - warm_or_hot_count;
-                let eligible_to_connect: HashSet<SocketAddr> =
-                    peer_manager.peers_eligible_to_connect().into_iter().collect();
                 let mut promoted = 0;
                 for addr in &group.members {
                     if promoted >= needed {
@@ -230,20 +234,38 @@ impl Governor {
         // Promote cold → warm if below target.
         // Only select peers whose exponential backoff window has elapsed
         // (matches Haskell `availableToConnect` filtered by `nextConnectTimes`).
+        // Skip peers already promoted by per-group local root logic above.
         if warm_count + hot_count < self.config.targets.target_warm {
             let needed = self.config.targets.target_warm - (warm_count + hot_count);
             let cold_peers = peer_manager.peers_eligible_to_connect();
-            for &addr in cold_peers.iter().take(needed) {
-                actions.push(GovernorAction::PromoteToWarm(addr));
+            let mut promoted = 0;
+            for &addr in &cold_peers {
+                if promoted >= needed {
+                    break;
+                }
+                if !already_promoted.contains(&addr) {
+                    actions.push(GovernorAction::PromoteToWarm(addr));
+                    already_promoted.insert(addr);
+                    promoted += 1;
+                }
             }
         }
 
-        // Promote warm → hot if below target
+        // Promote warm → hot if below target.
+        // Skip peers already promoted by per-group local root logic above.
         if hot_count < self.config.targets.target_hot {
             let needed = self.config.targets.target_hot - hot_count;
             let warm_peers = peer_manager.peers_in_state(PeerState::Warm);
-            for &addr in warm_peers.iter().take(needed) {
-                actions.push(GovernorAction::PromoteToHot(addr));
+            let mut promoted = 0;
+            for &addr in &warm_peers {
+                if promoted >= needed {
+                    break;
+                }
+                if !already_promoted.contains(&addr) {
+                    actions.push(GovernorAction::PromoteToHot(addr));
+                    already_promoted.insert(addr);
+                    promoted += 1;
+                }
             }
         }
 
