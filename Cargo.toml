@@ -48,7 +48,7 @@ crossterm = "0.28"
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-minicbor = { version = "0.25", features = ["std", "derive"] }
+minicbor = { version = "0.26", features = ["std", "derive"] }
 hex = "0.4"
 base64 = "0.22"
 
