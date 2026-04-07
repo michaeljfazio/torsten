@@ -539,6 +539,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             }
         }
     };
+    let blocks_received = app.metrics.get_u64("dugite_blocks_received_total");
     let forks = app.metrics.get_u64("dugite_rollback_count_total");
 
     let density_str = if density > 0.0 {
@@ -580,6 +581,17 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             tip_age >= 120,
         ),
         kv_aligned("Density", &density_str, theme.info, theme, col_w),
+        kv_aligned(
+            "Blocks Recv",
+            App::format_number(blocks_received),
+            if blocks_received > 0 {
+                theme.success
+            } else {
+                theme.muted
+            },
+            theme,
+            col_w,
+        ),
         kv_aligned(
             "Forks",
             App::format_number(forks),
