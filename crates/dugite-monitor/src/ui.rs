@@ -706,20 +706,15 @@ fn render_connections_panel(frame: &mut Frame, app: &App, theme: &Theme, area: R
     // matching Haskell's connectionStateToCounters exactly.
     let conn_unidirectional = app.metrics.get_u64("dugite_conn_unidirectional");
 
-    // Read the authoritative P2P status from the node's config-derived metric.
-    // Falls back to the heuristic (any peer activity) when the metric is missing
-    // (e.g. connecting to an older dugite-node version).
-    let p2p_enabled = if app.metrics.has("dugite_p2p_enabled") {
-        app.metrics.get_u64("dugite_p2p_enabled") == 1
+    // P2P governor always runs (matching Haskell cardano-node). Show
+    // diffusion mode instead: InitiatorAndResponder (relay) vs InitiatorOnly (BP).
+    let diffusion_initiator_only = app.metrics.get_u64("dugite_diffusion_mode") == 1;
+    let p2p_color = theme.success;
+    let p2p_label = if diffusion_initiator_only {
+        "InitiatorOnly"
     } else {
-        outbound > 0 || inbound > 0 || cold > 0 || warm > 0 || hot > 0
+        "Enabled"
     };
-    let p2p_color = if p2p_enabled {
-        theme.success
-    } else {
-        theme.error
-    };
-    let p2p_label = if p2p_enabled { "Enabled" } else { "Disabled" };
 
     let col_w = inner.width.saturating_sub(2) as usize;
 

@@ -174,17 +174,6 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
         tuning_hint: "Use 'RequiresMagic' for all testnets, 'RequiresNoMagic' for mainnet.",
     },
     ParamDef {
-        key: "EnableP2P",
-        section: "Network",
-        param_type: ParamType::Bool,
-        default: "true",
-        description: "Enable the Ouroboros P2P networking stack. When true, Dugite \
-                      uses the diffusion layer for peer discovery and connection management. \
-                      Set to false only for legacy non-P2P relay configurations.",
-        tuning_hint: "Always enable for production. \
-                      Disable only for isolated testing or legacy topology setups.",
-    },
-    ParamDef {
         key: "DiffusionMode",
         section: "Network",
         param_type: ParamType::Enum {
@@ -626,7 +615,7 @@ pub static KNOWN_PARAMS: &[ParamDef] = &[
 pub fn build_lookup() -> HashMap<&'static str, &'static ParamDef> {
     let mut map = HashMap::new();
     for def in KNOWN_PARAMS {
-        // First occurrence wins — avoids duplicates like the EnableP2P one above.
+        // First occurrence wins — avoids duplicates.
         map.entry(def.key).or_insert(def);
     }
     map
@@ -724,7 +713,6 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
     map.insert("RequiresNetworkMagic".into(), json!(req_magic));
 
     // P2P networking.
-    map.insert("EnableP2P".into(), json!(true));
     map.insert("DiffusionMode".into(), json!("InitiatorAndResponder"));
     map.insert("PeerSharing".into(), json!("PeerSharingPublic"));
     map.insert("TargetNumberOfActivePeers".into(), json!(15));

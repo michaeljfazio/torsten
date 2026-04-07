@@ -1240,27 +1240,16 @@ impl Node {
             // Advertise P2P configuration so the TUI can display the real state
             // rather than guessing from peer counts.
             let effective_peer_sharing = args.config.effective_peer_sharing(is_bp);
-            m.set_p2p_config(
-                args.config.enable_p2_p,
-                &args.config.diffusion_mode,
-                effective_peer_sharing,
-            );
+            m.set_p2p_config(&args.config.diffusion_mode, effective_peer_sharing);
             Arc::new(m)
         };
 
         // Log P2P configuration at startup for diagnostics.
         info!(
-            p2p_enabled = args.config.enable_p2_p,
             diffusion_mode = %args.config.diffusion_mode,
             peer_sharing = args.config.effective_peer_sharing(block_producer.is_some()),
             "P2P networking configuration"
         );
-        if !args.config.enable_p2_p {
-            warn!(
-                "P2P is disabled — running in static topology mode \
-                 (no peer governor, no churn, no ledger-based discovery)"
-            );
-        }
 
         // ── Phase 1: Initialize ChainFragment from ImmutableDB tip ──────────
         //
@@ -2025,8 +2014,9 @@ impl Node {
             info!("N2N server skipped (DiffusionMode=InitiatorOnly, outbound connections only)");
         }
 
-        // Start ledger-based peer discovery task (only when P2P is enabled)
-        if self.config.enable_p2_p {
+        // Ledger-based peer discovery — gated by useLedgerAfterSlot in the
+        // topology, matching Haskell's ledgerPeersThread which always runs.
+        {
             let ledger = self.ledger_state.clone();
             let pm = peer_manager.clone();
             let topology = self.topology.clone();
@@ -2546,12 +2536,6 @@ impl Node {
 
                 // ── Governor evaluation (periodic, every 2s) ────────────
                 _ = governor_ticker.tick() => {
-                    // When P2P is disabled, skip governor evaluation entirely —
-                    // static topology connections are maintained without churn.
-                    if !self.config.enable_p2_p {
-                        continue;
-                    }
-
                     // Compute governor actions based on current peer state.
                     let actions = {
                         let pm = peer_manager.read().await;

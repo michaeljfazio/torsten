@@ -4,7 +4,6 @@
   "ByronGenesisHash": "81cf23542e33d64c541699926c2b5e6e9c286583f0c8a3fb5f22ea7b352dd174",
   "ConwayGenesisFile": "preview-conway-genesis.json",
   "DiffusionMode": "InitiatorAndResponder",
-  "EnableP2P": true,
   "MinSeverity": "Info",
   "Network": "Testnet",
   "NetworkMagic": 2,
