@@ -67,7 +67,7 @@ impl N2CClient {
 
         // Subscribe protocol channels
         let mut handshake_channel = mux.subscribe(0, Direction::InitiatorDir, 65536);
-        let state_query_channel = mux.subscribe(7, Direction::InitiatorDir, 1_048_576);
+        let state_query_channel = mux.subscribe(7, Direction::InitiatorDir, 16_777_216);
         let tx_submission_channel = mux.subscribe(6, Direction::InitiatorDir, 65536);
         let tx_monitor_channel = mux.subscribe(9, Direction::InitiatorDir, 65536);
         let chain_sync_channel = mux.subscribe(5, Direction::InitiatorDir, 4_194_304);
