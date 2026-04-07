@@ -57,7 +57,11 @@ Same pattern but checks `|membersActive| < hotValency` per group. An additional 
 
 1. **Exclude topology peers from aggregate paths:** In Stage 2 (`below_target_other_warm`), filter out `PeerSource::Topology` from the eligible set. In Stage 3 (`below_target_other_hot`), same exclusion. This matches Haskell's `belowTargetOther` which explicitly excludes `LocalRootPeers.keysSet`.
 
-2. **Exclude big ledger peers from aggregate paths:** Haskell's `belowTargetOther` in `ActivePeers.hs` (warm→hot) explicitly excludes `bigLedgerPeersSet` — BLPs are promoted only by their own dedicated `belowTargetBigLedgerPeers` path. Our Stage 3 should also exclude BLPs. For Stage 2 (cold→warm), Haskell excludes BLPs indirectly (they have their own cold→warm path); verify our code doesn't double-promote BLPs.
+2. **Exclude big ledger peers from aggregate paths:** Haskell has three mutually-disjoint promotion paths composed with `<>`: `belowTargetBigLedgerPeers <> belowTargetLocal <> belowTargetOther`. BLPs are excluded from `belowTargetOther` at two levels:
+   - **Cold→warm (EstablishedPeers):** BLPs are excluded via the pre-filtered `availableToConnect` view (`availableToConnectSet \\ bigLedgerSet` in Types.hs). Our Stage 2 must similarly filter out BLPs.
+   - **Warm→hot (ActivePeers):** BLPs are excluded explicitly (`Set.\\ bigLedgerPeersSet` in line 382). Our Stage 3 must do the same.
+   - **Warm→cold (EstablishedPeers.aboveTargetOther):** BLPs are excluded via pre-filtered `establishedPeersSet` (`establishedSet \\ establishedBigLedgerPeersSet`). Our warm demotion path should verify this.
+   - Haskell also has separate `belowTargetBigLedgerPeers` in EstablishedPeers for cold→warm BLP promotion — a dedicated path we don't have yet (future work, tracked separately from this issue).
 
 3. **Add in-progress tracking sets to `Governor`:** Haskell's `PeerSelectionState` tracks 5 in-progress sets (all flat global `Set peeraddr`):
    - `inProgressPromoteCold: HashSet<SocketAddr>` — cold→warm in-flight
