@@ -450,7 +450,7 @@ fn render_node_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             App::format_number(blocks_forged)
         },
         if blocks_forged > 0 {
-            theme.warning
+            theme.success
         } else {
             theme.muted
         },
