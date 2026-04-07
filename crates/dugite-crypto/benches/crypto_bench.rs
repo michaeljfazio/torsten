@@ -8,10 +8,10 @@
 //! HTML: target/criterion/report/index.html
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::hint::black_box;
 use dugite_crypto::keys::PaymentSigningKey;
 use dugite_crypto::vrf::verify_vrf_proof;
 use dugite_primitives::hash::blake2b_224;
+use std::hint::black_box;
 
 fn bench_ed25519_verify(c: &mut Criterion) {
     let mut group = c.benchmark_group("ed25519_verify");

@@ -12,9 +12,9 @@
 //! HTML: target/criterion/report/index.html
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use std::hint::black_box;
 use dugite_primitives::hash::Hash32;
 use dugite_primitives::time::{BlockNo, SlotNo};
+use std::hint::black_box;
 
 use dugite_storage::chain_db::ChainDB;
 use dugite_storage::config::{BlockIndexType, ImmutableConfig};

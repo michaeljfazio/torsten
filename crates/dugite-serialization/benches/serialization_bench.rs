@@ -9,7 +9,6 @@
 //! HTML: target/criterion/report/index.html
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use std::hint::black_box;
 use dugite_primitives::address::{Address, EnterpriseAddress};
 use dugite_primitives::block::{BlockHeader, OperationalCert, ProtocolVersion, VrfOutput};
 use dugite_primitives::credentials::Credential;
@@ -25,6 +24,7 @@ use dugite_serialization::encode::{
     encode_block_header_body, encode_transaction, encode_transaction_body, encode_value,
 };
 use std::collections::BTreeMap;
+use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
 // Helpers

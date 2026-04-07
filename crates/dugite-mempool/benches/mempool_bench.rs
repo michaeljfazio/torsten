@@ -9,11 +9,11 @@
 //! HTML: target/criterion/report/index.html
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use std::hint::black_box;
 use dugite_mempool::{Mempool, MempoolConfig};
 use dugite_primitives::hash::Hash32;
 use dugite_primitives::transaction::Transaction;
 use dugite_primitives::value::Lovelace;
+use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
 // Helpers

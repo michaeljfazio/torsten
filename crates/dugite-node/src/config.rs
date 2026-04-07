@@ -266,17 +266,26 @@ pub struct NodeConfig {
     #[serde(default)]
     pub accepted_connections_limit: Option<AcceptedConnectionsLimit>,
     /// Time before idle mini-protocol connection is pruned (seconds, default: 5).
+    ///
+    /// Accepts fractional seconds, matching Haskell's `DiffTime` type.
     #[serde(default = "default_protocol_idle_timeout")]
-    pub protocol_idle_timeout: u64,
+    pub protocol_idle_timeout: f64,
     /// Connection TIME_WAIT duration after close (seconds, default: 60).
+    ///
+    /// Accepts fractional seconds, matching Haskell's `DiffTime` type.
     #[serde(default = "default_time_wait_timeout")]
-    pub time_wait_timeout: u64,
-    /// Outbound governor poll interval (seconds, default: 10).
+    pub time_wait_timeout: f64,
+    /// Outbound governor poll interval (seconds, default: 0).
+    ///
+    /// 0 means the governor runs as fast as events arrive (Haskell default).
+    /// Accepts fractional seconds, matching Haskell's `DiffTime` type.
     #[serde(default = "default_egress_poll_interval")]
-    pub egress_poll_interval: u64,
+    pub egress_poll_interval: f64,
     /// ChainSync-specific idle timeout (seconds, 0 = no timeout).
+    ///
+    /// Accepts fractional seconds, matching Haskell's `DiffTime` type.
     #[serde(default)]
-    pub chain_sync_idle_timeout: Option<u64>,
+    pub chain_sync_idle_timeout: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -381,16 +390,17 @@ fn default_min_blp_trusted() -> usize {
     5
 }
 
-fn default_protocol_idle_timeout() -> u64 {
-    5
+fn default_protocol_idle_timeout() -> f64 {
+    5.0
 }
 
-fn default_time_wait_timeout() -> u64 {
-    60
+fn default_time_wait_timeout() -> f64 {
+    60.0
 }
 
-fn default_egress_poll_interval() -> u64 {
-    10
+/// Haskell default is 0 — governor runs on-demand without a fixed poll interval.
+fn default_egress_poll_interval() -> f64 {
+    0.0
 }
 
 fn default_min_severity() -> String {
@@ -974,9 +984,25 @@ mod tests {
             "EgressPollInterval": 20
         }"#;
         let config: NodeConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.protocol_idle_timeout, 10);
-        assert_eq!(config.time_wait_timeout, 120);
-        assert_eq!(config.egress_poll_interval, 20);
+        assert!((config.protocol_idle_timeout - 10.0_f64).abs() < f64::EPSILON);
+        assert!((config.time_wait_timeout - 120.0_f64).abs() < f64::EPSILON);
+        assert!((config.egress_poll_interval - 20.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_connection_timeouts_fractional() {
+        // Fractional seconds must parse correctly — Haskell uses DiffTime.
+        let json = r#"{
+            "ProtocolIdleTimeout": 5.5,
+            "TimeWaitTimeout": 60.25,
+            "EgressPollInterval": 0.1,
+            "ChainSyncIdleTimeout": 3373.5
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).unwrap();
+        assert!((config.protocol_idle_timeout - 5.5_f64).abs() < f64::EPSILON);
+        assert!((config.time_wait_timeout - 60.25_f64).abs() < f64::EPSILON);
+        assert!((config.egress_poll_interval - 0.1_f64).abs() < f64::EPSILON);
+        assert!((config.chain_sync_idle_timeout.unwrap() - 3373.5_f64).abs() < f64::EPSILON);
     }
 
     // ── All new fields absent → defaults ────────────────────────────────────
@@ -993,9 +1019,9 @@ mod tests {
         );
         assert_eq!(config.sync_target_number_of_known_big_ledger_peers, 100);
         assert_eq!(config.min_big_ledger_peers_for_trusted_state, 5);
-        assert_eq!(config.protocol_idle_timeout, 5);
-        assert_eq!(config.time_wait_timeout, 60);
-        assert_eq!(config.egress_poll_interval, 10);
+        assert!((config.protocol_idle_timeout - 5.0_f64).abs() < f64::EPSILON);
+        assert!((config.time_wait_timeout - 60.0_f64).abs() < f64::EPSILON);
+        assert!((config.egress_poll_interval - 0.0_f64).abs() < f64::EPSILON);
         assert!(config.accepted_connections_limit.is_none());
         assert!(config.chain_sync_idle_timeout.is_none());
     }
