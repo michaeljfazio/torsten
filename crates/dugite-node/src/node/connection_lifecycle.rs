@@ -595,11 +595,6 @@ impl ConnectionLifecycleManager {
             chains.remove(&addr);
         }
 
-        // Decrement active connection counter.
-        self.metrics
-            .n2n_connections_active
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-
         // Update peer manager — removes connection state entirely.
         peer_manager.peer_disconnected(&addr);
 
@@ -710,12 +705,6 @@ impl ConnectionLifecycleManager {
                 let mut chains = self.candidate_chains.write().await;
                 chains.remove(&addr);
             }
-
-            // Decrement active connection counter (balances the increment
-            // in the inbound accept handler or outbound connect path).
-            self.metrics
-                .n2n_connections_active
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
             peer_manager.peer_disconnected(&addr);
             warn!(%addr, "removed dead connection");
