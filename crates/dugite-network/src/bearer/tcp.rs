@@ -44,11 +44,12 @@ impl TcpBearer {
         // TCP_NODELAY=false (Nagle enabled — mux egress batching handles coalescing)
         // SO_KEEPALIVE with 60s interval
         //
-        // Use socket2 for keepalive configuration, then convert back to tokio.
+        // Use socket2 for TCP option configuration, then convert back to tokio.
+        // socket2 0.6 renamed set_nodelay() → set_tcp_nodelay().
         let std_stream = stream.into_std().map_err(BearerError::Io)?;
         let socket = Socket::from(std_stream);
 
-        socket.set_nodelay(false).map_err(BearerError::Io)?;
+        socket.set_tcp_nodelay(false).map_err(BearerError::Io)?;
 
         let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_INTERVAL);
         socket
