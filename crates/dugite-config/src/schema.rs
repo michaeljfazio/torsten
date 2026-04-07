@@ -836,9 +836,9 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
     // P2P networking.
     map.insert("DiffusionMode".into(), json!("InitiatorAndResponder"));
     map.insert("PeerSharing".into(), json!("PeerSharingPublic"));
-    map.insert("TargetNumberOfActivePeers".into(), json!(15));
-    map.insert("TargetNumberOfEstablishedPeers".into(), json!(40));
-    map.insert("TargetNumberOfKnownPeers".into(), json!(85));
+    map.insert("TargetNumberOfActivePeers".into(), json!(20));
+    map.insert("TargetNumberOfEstablishedPeers".into(), json!(30));
+    map.insert("TargetNumberOfKnownPeers".into(), json!(150));
     map.insert("TargetNumberOfRootPeers".into(), json!(60));
     map.insert("TargetNumberOfActiveBigLedgerPeers".into(), json!(5));
     map.insert("TargetNumberOfEstablishedBigLedgerPeers".into(), json!(10));
@@ -848,14 +848,14 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
     map.insert("ConsensusMode".into(), json!("PraosMode"));
 
     // Genesis sync targets.
-    map.insert("SyncTargetNumberOfActivePeers".into(), json!(0));
-    map.insert("SyncTargetNumberOfEstablishedPeers".into(), json!(0));
-    map.insert("SyncTargetNumberOfKnownPeers".into(), json!(0));
+    map.insert("SyncTargetNumberOfActivePeers".into(), json!(5));
+    map.insert("SyncTargetNumberOfEstablishedPeers".into(), json!(10));
+    map.insert("SyncTargetNumberOfKnownPeers".into(), json!(150));
     map.insert("SyncTargetNumberOfRootPeers".into(), json!(0));
     map.insert("SyncTargetNumberOfActiveBigLedgerPeers".into(), json!(30));
     map.insert(
         "SyncTargetNumberOfEstablishedBigLedgerPeers".into(),
-        json!(50),
+        json!(40),
     );
     map.insert("SyncTargetNumberOfKnownBigLedgerPeers".into(), json!(100));
     map.insert("MinBigLedgerPeersForTrustedState".into(), json!(5));
@@ -913,7 +913,7 @@ pub fn network_defaults(network: Network) -> serde_json::Map<String, serde_json:
     // Connection management.
     map.insert("ProtocolIdleTimeout".into(), json!(5));
     map.insert("TimeWaitTimeout".into(), json!(60));
-    map.insert("EgressPollInterval".into(), json!(10));
+    map.insert("EgressPollInterval".into(), json!(0));
     map.insert("ChainSyncIdleTimeout".into(), json!(300));
 
     map
