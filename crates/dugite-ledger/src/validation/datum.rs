@@ -197,3 +197,419 @@ pub(super) fn check_datum_witnesses(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dugite_primitives::address::{Address, BaseAddress};
+    use dugite_primitives::credentials::Credential;
+    use dugite_primitives::hash::{Hash28, Hash32};
+    use dugite_primitives::network::NetworkId;
+    use dugite_primitives::transaction::{
+        OutputDatum, PlutusData, Transaction, TransactionInput, TransactionOutput,
+    };
+    use dugite_primitives::value::Value;
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    /// Build a UTxO set containing a single entry and return it along with the
+    /// `TransactionInput` key that addresses that entry.
+    fn make_utxo(output: TransactionOutput) -> (crate::utxo::UtxoSet, TransactionInput) {
+        let mut utxo_set = crate::utxo::UtxoSet::new();
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xaau8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(input.clone(), output);
+        (utxo_set, input)
+    }
+
+    /// Build a minimal `Transaction` whose only populated fields are those
+    /// examined by `check_datum_witnesses`.
+    fn make_tx(
+        inputs: Vec<TransactionInput>,
+        outputs: Vec<TransactionOutput>,
+        reference_inputs: Vec<TransactionInput>,
+        plutus_data: Vec<PlutusData>,
+    ) -> Transaction {
+        Transaction::empty_with_hash(Hash32::ZERO).with_parts(
+            inputs,
+            outputs,
+            reference_inputs,
+            plutus_data,
+        )
+    }
+
+    // Helper method — attach fields to a `Transaction::empty_with_hash` return
+    // value without requiring the full builder chain.
+    trait WithParts {
+        fn with_parts(
+            self,
+            inputs: Vec<TransactionInput>,
+            outputs: Vec<TransactionOutput>,
+            reference_inputs: Vec<TransactionInput>,
+            plutus_data: Vec<PlutusData>,
+        ) -> Self;
+    }
+
+    impl WithParts for Transaction {
+        fn with_parts(
+            mut self,
+            inputs: Vec<TransactionInput>,
+            outputs: Vec<TransactionOutput>,
+            reference_inputs: Vec<TransactionInput>,
+            plutus_data: Vec<PlutusData>,
+        ) -> Self {
+            self.body.inputs = inputs;
+            self.body.outputs = outputs;
+            self.body.reference_inputs = reference_inputs;
+            self.witness_set.plutus_data = plutus_data;
+            self
+        }
+    }
+
+    /// Build a script-locked `TransactionOutput` with a `DatumHash` attachment.
+    fn script_output_with_datum_hash(datum_hash: Hash32) -> TransactionOutput {
+        TransactionOutput {
+            address: Address::Base(BaseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::Script(Hash28::from_bytes([0xbbu8; 28])),
+                stake: Credential::VerificationKey(Hash28::from_bytes([0xccu8; 28])),
+            }),
+            value: Value::lovelace(2_000_000),
+            datum: OutputDatum::DatumHash(datum_hash),
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }
+    }
+
+    /// Build a script-locked `TransactionOutput` with an `InlineDatum`.
+    fn script_output_with_inline_datum(data: PlutusData) -> TransactionOutput {
+        TransactionOutput {
+            address: Address::Base(BaseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::Script(Hash28::from_bytes([0xbbu8; 28])),
+                stake: Credential::VerificationKey(Hash28::from_bytes([0xccu8; 28])),
+            }),
+            value: Value::lovelace(2_000_000),
+            datum: OutputDatum::InlineDatum {
+                data,
+                raw_cbor: None,
+            },
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }
+    }
+
+    /// Build a VKey-locked `TransactionOutput` (no datum).
+    fn vkey_output_no_datum() -> TransactionOutput {
+        TransactionOutput {
+            address: Address::Base(BaseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0xddu8; 28])),
+                stake: Credential::VerificationKey(Hash28::from_bytes([0xeeu8; 28])),
+            }),
+            value: Value::lovelace(5_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }
+    }
+
+    /// Compute the datum hash that `check_datum_witnesses` will compute for a
+    /// given `PlutusData` (mirrors `hash_plutus_datum` in the production code).
+    fn datum_hash_of(data: &PlutusData) -> Hash32 {
+        hash_plutus_datum(data)
+    }
+
+    /// A simple, unique integer datum suitable for use in tests.
+    fn int_datum(n: i128) -> PlutusData {
+        PlutusData::Integer(n)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 — script-locked input with matching datum witness → no error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_script_input_datum_present() {
+        // Datum to witness
+        let datum = int_datum(42);
+        let hash = datum_hash_of(&datum);
+
+        // UTxO: script-locked, DatumHash in output
+        let utxo_output = script_output_with_datum_hash(hash);
+        let (utxo_set, input) = make_utxo(utxo_output);
+
+        let tx = make_tx(vec![input], vec![], vec![], vec![datum]);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingDatumWitness(_))),
+            "expected no MissingDatumWitness, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 — script-locked input with missing datum witness → error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_script_input_datum_missing() {
+        // Datum NOT supplied in witness
+        let datum = int_datum(99);
+        let hash = datum_hash_of(&datum);
+
+        let utxo_output = script_output_with_datum_hash(hash);
+        let (utxo_set, input) = make_utxo(utxo_output);
+
+        // witness plutus_data is empty — no datum supplied
+        let tx = make_tx(vec![input], vec![], vec![], vec![]);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingDatumWitness(_))),
+            "expected MissingDatumWitness, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 — inline datum: no witness entry needed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_inline_datum_no_witness_needed() {
+        // Output carries an inline datum — no witness required
+        let data = int_datum(7);
+        let utxo_output = script_output_with_inline_datum(data);
+        let (utxo_set, input) = make_utxo(utxo_output);
+
+        // witness plutus_data is empty — none supplied
+        let tx = make_tx(vec![input], vec![], vec![], vec![]);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors.is_empty(),
+            "expected no errors for inline datum, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4 — VKey-locked input: datum not required even without witness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_non_script_input_no_datum() {
+        let utxo_output = vkey_output_no_datum();
+        let (utxo_set, input) = make_utxo(utxo_output);
+
+        let tx = make_tx(vec![input], vec![], vec![], vec![]);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors.is_empty(),
+            "expected no errors for vkey-locked input, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5 — datum in witness not referenced by any input/output → error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extra_datum_is_hard_error() {
+        // UTxO has no datum at all; the witness carries a spurious datum.
+        let utxo_output = vkey_output_no_datum();
+        let (utxo_set, input) = make_utxo(utxo_output);
+
+        let spurious_datum = int_datum(123);
+        let tx = make_tx(vec![input], vec![], vec![], vec![spurious_datum]);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ExtraDatumWitness(_))),
+            "expected ExtraDatumWitness, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6 — output datum hash supplemental: witness is allowed, not extra
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_output_datum_hash_supplemental() {
+        // Transaction output declares a datum hash — the datum in the witness
+        // is "supplemental" (allowed but not required).  Must NOT produce
+        // ExtraDatumWitness.
+        let datum = int_datum(55);
+        let hash = datum_hash_of(&datum);
+
+        // Input is VKey-locked (no datum witness required from input side)
+        let utxo_output = vkey_output_no_datum();
+        let (utxo_set, input) = make_utxo(utxo_output);
+
+        // Transaction output carries that datum hash
+        let tx_output = TransactionOutput {
+            address: Address::Base(BaseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0x11u8; 28])),
+                stake: Credential::VerificationKey(Hash28::from_bytes([0x22u8; 28])),
+            }),
+            value: Value::lovelace(2_000_000),
+            datum: OutputDatum::DatumHash(hash),
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+
+        let tx = make_tx(vec![input], vec![tx_output], vec![], vec![datum]);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ExtraDatumWitness(_))),
+            "expected no ExtraDatumWitness for supplemental output datum, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7 — reference input datum cannot satisfy spending input requirement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ref_input_datum_supplemental_only() {
+        // Both the spending input UTxO and the reference input UTxO carry the
+        // same DatumHash.  The datum is NOT in the witness.
+        //
+        // Because the spending input is script-locked, MissingDatumWitness must
+        // still fire — the reference input datum hash only makes the witness
+        // *allowed*, it does not satisfy the *required* set.
+        let datum = int_datum(77);
+        let hash = datum_hash_of(&datum);
+
+        // Spending input: script-locked, DatumHash
+        let spend_output = script_output_with_datum_hash(hash);
+        let (mut utxo_set, spend_input) = make_utxo(spend_output);
+
+        // Reference input: also carries same DatumHash (but lives at a
+        // different input reference so it is distinct from the spending input)
+        let ref_tx_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x55u8; 32]),
+            index: 0,
+        };
+        let ref_output = TransactionOutput {
+            address: Address::Base(BaseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0x33u8; 28])),
+                stake: Credential::VerificationKey(Hash28::from_bytes([0x44u8; 28])),
+            }),
+            value: Value::lovelace(2_000_000),
+            datum: OutputDatum::DatumHash(hash),
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        utxo_set.insert(ref_tx_input.clone(), ref_output);
+
+        // No witness datum supplied
+        let tx = make_tx(
+            vec![spend_input],
+            vec![],
+            vec![ref_tx_input],
+            vec![], // datum NOT supplied
+        );
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingDatumWitness(_))),
+            "expected MissingDatumWitness even though ref-input carries the same hash, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8 — two script inputs with different hashes; only one datum supplied
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multiple_script_inputs_one_missing() {
+        let datum_a = int_datum(10);
+        let hash_a = datum_hash_of(&datum_a);
+
+        let datum_b = int_datum(20);
+        let hash_b = datum_hash_of(&datum_b);
+
+        // Two distinct UTxOs, both script-locked, each with a different DatumHash
+        let output_a = script_output_with_datum_hash(hash_a);
+        let output_b = script_output_with_datum_hash(hash_b);
+
+        let mut utxo_set = crate::utxo::UtxoSet::new();
+        let input_a = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x01u8; 32]),
+            index: 0,
+        };
+        let input_b = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x02u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(input_a.clone(), output_a);
+        utxo_set.insert(input_b.clone(), output_b);
+
+        // Only datum_a is in the witness; datum_b is absent
+        let tx = make_tx(vec![input_a, input_b], vec![], vec![], vec![datum_a]);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+
+        let missing: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::MissingDatumWitness(_)))
+            .collect();
+
+        assert_eq!(
+            missing.len(),
+            1,
+            "expected exactly one MissingDatumWitness (for datum_b), got: {errors:?}"
+        );
+
+        // Confirm the missing hash is hash_b's hex representation
+        if let ValidationError::MissingDatumWitness(hex) = missing[0] {
+            assert_eq!(
+                hex,
+                &hash_b.to_hex(),
+                "wrong hash in MissingDatumWitness error"
+            );
+        }
+    }
+}
