@@ -1093,3 +1093,575 @@ pub(super) fn run_phase1_rules(
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Inline unit tests for Phase-1 validation rules
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use dugite_primitives::address::{Address, EnterpriseAddress};
+    use dugite_primitives::credentials::Credential;
+    use dugite_primitives::hash::{Hash28, Hash32};
+    use dugite_primitives::network::NetworkId;
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::time::SlotNo;
+    use dugite_primitives::transaction::{
+        ExUnits, OutputDatum, Redeemer, RedeemerTag, Transaction, TransactionBody,
+        TransactionInput, TransactionOutput, TransactionWitnessSet, VKeyWitness,
+    };
+    use dugite_primitives::value::{AssetName, Lovelace, Value};
+
+    use crate::utxo::UtxoSet;
+    use crate::validation::{
+        validate_transaction, validate_transaction_with_pools, ValidationError,
+    };
+
+    // -----------------------------------------------------------------------
+    // Test fixture: a minimal valid Conway transaction
+    //
+    // UTxO:   1 input  → 10_000_000 lovelace
+    // Output: 1 output →  9_800_000 lovelace
+    // Fee:                  200_000 lovelace
+    // -----------------------------------------------------------------------
+
+    /// Build a UTxO set with one entry worth 10M lovelace, plus the corresponding
+    /// [`TransactionInput`] that spends it.  The UTxO output uses a Byron address
+    /// so that Phase-1 witness-completeness checks (Rule 9b) are satisfied
+    /// without requiring a vkey witness.
+    fn make_valid_tx() -> (UtxoSet, Transaction, TransactionInput) {
+        let mut utxo_set = UtxoSet::new();
+
+        // Use a Byron payload so Rule 9b requires no witness for this input.
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+            index: 0,
+        };
+        let utxo_output = TransactionOutput {
+            address: Address::Byron(dugite_primitives::address::ByronAddress {
+                payload: vec![0x82, 0x00, 0x01],
+            }),
+            value: Value::lovelace(10_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        utxo_set.insert(input.clone(), utxo_output);
+
+        let tx = Transaction {
+            era: dugite_primitives::era::Era::Conway,
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input.clone()],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(dugite_primitives::address::ByronAddress {
+                        payload: vec![0x82, 0x00, 0x01],
+                    }),
+                    value: Value::lovelace(9_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        };
+
+        (utxo_set, tx, input)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 — baseline: valid transaction passes all Phase-1 rules
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_valid_tx_passes() {
+        let (utxo_set, tx, _) = make_valid_tx();
+        let params = ProtocolParameters::mainnet_defaults();
+        let result = validate_transaction(&tx, &utxo_set, &params, 100, 300, None);
+        assert!(result.is_ok(), "expected Ok(()), got {result:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 — Rule 1: no inputs
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_no_inputs() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        tx.body.inputs.clear();
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::NoInputs)),
+            "expected NoInputs, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 — Rule 2: input references a UTxO entry that does not exist
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_all_inputs_must_exist() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Overwrite the tx_id so it no longer matches the UTxO.
+        tx.body.inputs[0].transaction_id = Hash32::from_bytes([0xBBu8; 32]);
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InputNotFound(_))),
+            "expected InputNotFound, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4 — Rule 3: ADA value not conserved (output + fee > input)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_value_not_conserved_ada() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Inflate the output so that output(10_000_000) + fee(200_000) > input(10_000_000).
+        tx.body.outputs[0].value = Value::lovelace(10_000_000);
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ValueNotConserved { .. })),
+            "expected ValueNotConserved, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5 — Rule 3b: multi-asset not conserved (minted tokens not in outputs)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_value_not_conserved_multiasset() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        let policy = Hash28::from_bytes([0x11u8; 28]);
+        let asset = AssetName::new(b"COIN".to_vec()).unwrap();
+        // Mint 100 tokens but produce no multi-asset output.
+        tx.body.mint.entry(policy).or_default().insert(asset, 100);
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MultiAssetNotConserved { .. })),
+            "expected MultiAssetNotConserved, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6 — Rule 3c: minting policy present but no matching script witness
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_mint_without_policy_script() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        let policy = Hash28::from_bytes([0x22u8; 28]);
+        let asset = AssetName::new(b"TKN".to_vec()).unwrap();
+        // Mint and output the same amount so Rule 3b passes, but no script
+        // witness is provided so Rule 3c fires.
+        tx.body
+            .mint
+            .entry(policy)
+            .or_default()
+            .insert(asset.clone(), 50);
+        // Mirror the minted tokens in the output so value is conserved.
+        tx.body.outputs[0]
+            .value
+            .multi_asset
+            .entry(policy)
+            .or_default()
+            .insert(asset, 50);
+        let params = ProtocolParameters::mainnet_defaults();
+        // The validation should fail with a script-related error.
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::InvalidMint | ValidationError::MissingScriptWitness(_)
+            )),
+            "expected a script-related minting error, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7 — Rule 4: declared fee is below the computed minimum fee
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_fee_too_small() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Move almost all lovelace to the output, leaving only 1 lovelace as fee.
+        tx.body.outputs[0].value = Value::lovelace(9_999_999);
+        tx.body.fee = Lovelace(1);
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::FeeTooSmall { .. })),
+            "expected FeeTooSmall, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8 — Rule 5: output below minimum UTxO value
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_output_below_min_utxo() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Keep value conservation: output(1) + fee(9_999_999) = input(10_000_000).
+        tx.body.outputs[0].value = Value::lovelace(1);
+        tx.body.fee = Lovelace(9_999_999);
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::OutputTooSmall { .. })),
+            "expected OutputTooSmall, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9 — Rule 5a: output value CBOR size exceeds max_val_size
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_output_value_too_large() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Build a multi-asset output with many policies so the estimated CBOR
+        // size of the value map exceeds max_val_size (5000 bytes in mainnet
+        // defaults).  Each policy+1 asset adds roughly 37 bytes; 140 policies
+        // ≈ 5180 bytes which is safely above the 5000 byte limit.
+        let mut multi_asset_value = Value::lovelace(9_800_000);
+        for i in 0u8..140 {
+            let mut policy_bytes = [0u8; 28];
+            policy_bytes[0] = i;
+            policy_bytes[1] = 0xFF;
+            let policy = Hash28::from_bytes(policy_bytes);
+            let asset = AssetName::new(vec![i; 4]).unwrap();
+            multi_asset_value
+                .multi_asset
+                .entry(policy)
+                .or_default()
+                .insert(asset, 1);
+        }
+        tx.body.outputs[0].value = multi_asset_value;
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::OutputValueTooLarge { .. })),
+            "expected OutputValueTooLarge, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10 — Rule 5c: output address on wrong network (testnet addr, mainnet node)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_network_id_mismatch() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Replace the output address with a testnet enterprise address.
+        tx.body.outputs[0].address = Address::Enterprise(EnterpriseAddress {
+            network: NetworkId::Testnet,
+            payment: Credential::VerificationKey(Hash28::from_bytes([0x33u8; 28])),
+        });
+        let params = ProtocolParameters::mainnet_defaults();
+        // Validate with node_network = Mainnet so Rule 5c fires.
+        let errors = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(NetworkId::Mainnet),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::WrongNetworkInOutput { .. })),
+            "expected WrongNetworkInOutput, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11 — Rule 6: transaction size exceeds max_tx_size
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_tx_size_too_large() {
+        let (utxo_set, tx, _) = make_valid_tx();
+        let params = ProtocolParameters::mainnet_defaults();
+        // Pass a size that exceeds max_tx_size (16384 in mainnet defaults).
+        let too_large = params.max_tx_size + 1;
+        let errors =
+            validate_transaction(&tx, &utxo_set, &params, 100, too_large, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TxTooLarge { .. })),
+            "expected TxTooLarge, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12 — Rule 7: TTL expired
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_ttl_expired() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        tx.body.ttl = Some(SlotNo(50));
+        let params = ProtocolParameters::mainnet_defaults();
+        // current_slot(100) > ttl(50) → TtlExpired
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TtlExpired { .. })),
+            "expected TtlExpired, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13 — Rule 8: validity interval start not yet reached
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_validity_interval_not_started() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        tx.body.validity_interval_start = Some(SlotNo(200));
+        let params = ProtocolParameters::mainnet_defaults();
+        // current_slot(100) < validity_start(200) → NotYetValid
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::NotYetValid { .. })),
+            "expected NotYetValid, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14 — Rule 9: reference input overlaps with regular input
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_ref_inputs_must_be_disjoint() {
+        let (utxo_set, mut tx, input) = make_valid_tx();
+        // Put the same input in both the spending set and the reference set.
+        tx.body.reference_inputs.push(input.clone());
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ReferenceInputOverlapsInput(_))),
+            "expected ReferenceInputOverlapsInput, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15 — Rule 9: reference input does not exist in the UTxO set
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_ref_inputs_must_exist() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Add a reference input that has no UTxO entry.
+        tx.body.reference_inputs.push(TransactionInput {
+            transaction_id: Hash32::from_bytes([0xCCu8; 32]),
+            index: 0,
+        });
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ReferenceInputNotFound(_))),
+            "expected ReferenceInputNotFound, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16 — Rule 10: required signer has no matching vkey witness
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_required_signer_missing() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Declare a required signer whose hash is not present in the witness set.
+        tx.body
+            .required_signers
+            .push(Hash32::from_bytes([0xDDu8; 32]));
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingRequiredSigner(_))),
+            "expected MissingRequiredSigner, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17 — Rule 1c: auxiliary data hash declared but no auxiliary data body
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_auxiliary_data_hash_mismatch() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Declare a hash but provide no auxiliary data.
+        tx.body.auxiliary_data_hash = Some(Hash32::from_bytes([0xEEu8; 32]));
+        tx.auxiliary_data = None;
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::AuxiliaryDataHashWithoutData)),
+            "expected AuxiliaryDataHashWithoutData, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 18 — Conway LEDGER rule: declared treasury value must match ledger
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_treasury_value_mismatch() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Declare 999 lovelace in the tx body, but ledger holds 1000.
+        tx.body.treasury_value = Some(Lovelace(999));
+        let params = ProtocolParameters::mainnet_defaults();
+        // protocol_version_major = 9 in mainnet_defaults() so the check fires.
+        let errors = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None,
+            Some(1000), // current_treasury
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::TreasuryValueMismatch { .. })),
+            "expected TreasuryValueMismatch, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 19 — Rule 12: script data hash missing when Plutus scripts/redeemers present
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_script_integrity_hash_mismatch() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Add a dummy PlutusV2 script byte-string and a redeemer so the
+        // `has_plutus_scripts` guard fires and `check_script_data_hash` runs.
+        // With `script_data_hash = None`, `MissingScriptDataHash` is pushed.
+        tx.witness_set.plutus_v2_scripts.push(vec![0x01u8; 10]);
+        tx.witness_set.redeemers.push(Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: dugite_primitives::transaction::PlutusData::Integer(0),
+            ex_units: ExUnits { mem: 0, steps: 0 },
+        });
+        // Deliberately leave script_data_hash as None → MissingScriptDataHash
+        tx.body.script_data_hash = None;
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::MissingScriptDataHash
+                    | ValidationError::ScriptDataHashMismatch { .. }
+            )),
+            "expected MissingScriptDataHash or ScriptDataHashMismatch, got {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 20 — Rule 14: Ed25519 witness with a corrupt signature is rejected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_ed25519_signature_verification() {
+        let (utxo_set, mut tx, _) = make_valid_tx();
+        // Append a vkey witness whose signature bytes are all zeros — this will
+        // fail Ed25519 verification (or key parsing) and trigger the error.
+        // Using `[1u8; 32]` as the vkey matches the pattern already verified in
+        // the existing test suite (validation/tests.rs test_witness_signature_verification).
+        tx.witness_set.vkey_witnesses.push(VKeyWitness {
+            vkey: vec![1u8; 32],
+            signature: vec![0u8; 64],
+        });
+        let params = ProtocolParameters::mainnet_defaults();
+        let errors = validate_transaction(&tx, &utxo_set, &params, 100, 300, None).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InvalidWitnessSignature(_))),
+            "expected InvalidWitnessSignature, got {errors:?}"
+        );
+    }
+}
