@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-08
 **Issue:** #337
-**Status:** Approved
+**Status:** Approved (cross-validated against Haskell cardano-ledger)
 
 ## Summary
 
@@ -10,7 +10,7 @@ Add inline `#[cfg(test)] mod tests` blocks to 10 source files in `dugite-ledger/
 
 ## Scope
 
-### In Scope (10 files, ~110 tests)
+### In Scope (10 files, ~120 tests)
 
 **Tier 1 — Highest impact (~5,500 lines):**
 
@@ -18,8 +18,8 @@ Add inline `#[cfg(test)] mod tests` blocks to 10 source files in `dugite-ledger/
 |------|-------|-------|-------|
 | `state/apply.rs` | 1,330 | ~15 | Block application, era dispatch, epoch detection, limits |
 | `state/certificates.rs` | 1,225 | ~15 | Certificate processing, deposits, pointer tracking |
-| `state/epoch.rs` | 1,098 | ~12 | Epoch transitions, rewards, snapshots, retirements |
-| `validation/phase1.rs` | 1,095 | ~15 | All Phase-1 validation rules |
+| `state/epoch.rs` | 1,098 | ~14 | Epoch transitions, rewards, snapshots, retirements |
+| `validation/phase1.rs` | 1,095 | ~18 | All Phase-1 validation rules (UTXOW + UTXO layers) |
 | `validation/collateral.rs` | 798 | ~12 | Collateral checks, redeemer indices, ex-units |
 
 **Tier 2 — Important but smaller (~1,500 lines):**
@@ -28,7 +28,7 @@ Add inline `#[cfg(test)] mod tests` blocks to 10 source files in `dugite-ledger/
 |------|-------|-------|-------|
 | `validation/scripts.rs` | 854 | ~12 | Native scripts, hash computation, tiered fees |
 | `state/snapshot.rs` | 300 | ~8 | Save/load, checksums, legacy compat |
-| `validation/datum.rs` | 199 | ~8 | Datum witness completeness |
+| `validation/datum.rs` | 199 | ~9 | Datum witness completeness, CIP-0069 |
 | `state/protocol_params.rs` | 194 | ~6 | Param updates, threshold validation |
 | `validation/conway.rs` | 177 | ~8 | Era gating, deposit/refund calculation |
 
@@ -46,64 +46,103 @@ Add inline `#[cfg(test)] mod tests` blocks to 10 source files in `dugite-ledger/
 - Reuse existing helpers from `state/tests.rs` and `validation/tests.rs` where they exist as `pub(crate)`
 - Create minimal local helpers within each test module as needed
 
+## Cross-Validation Notes
+
+All test conditions below have been verified against the Haskell cardano-ledger source
+(IntersectMBO/cardano-ledger). Key Haskell references:
+
+- BBODY: `eras/alonzo/impl/.../Alonzo/Rules/Bbody.hs`, `eras/conway/impl/.../Conway/Rules/Bbody.hs`
+- LEDGER: `eras/conway/impl/.../Conway/Rules/Ledger.hs`
+- UTXOW: `eras/conway/impl/.../Conway/Rules/Utxow.hs`
+- UTXO: `eras/babbage/impl/.../Babbage/Rules/Utxo.hs`
+- DELEG: `eras/conway/impl/.../Conway/Rules/Deleg.hs`
+- POOL: `eras/shelley/impl/.../Shelley/Rules/Pool.hs`
+- GOVCERT: `eras/conway/impl/.../Conway/Rules/GovCert.hs`
+- NEWEPOCH: `eras/conway/impl/.../Conway/Rules/NewEpoch.hs`
+- EPOCH: `eras/conway/impl/.../Conway/Rules/Epoch.hs`
+- SNAP: `eras/shelley/impl/.../Shelley/Rules/Snap.hs`
+
 ## Test Plan by Module
 
 ### state/apply.rs (~15 tests)
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_apply_byron_block` | Byron era block applies correctly, UTxO updated |
-| `test_apply_shelley_block` | Shelley+ block applies, certificates/withdrawals processed |
-| `test_apply_empty_block` | Block with no transactions applies cleanly |
-| `test_invalid_tx_skipped` | `is_valid: false` tx: collateral consumed, regular I/O skipped |
-| `test_epoch_transition_detected` | Block in new epoch triggers `process_epoch_transition` |
-| `test_multi_epoch_gap` | Block skipping multiple epochs triggers transitions for each |
-| `test_body_size_exceeds_max` | Oversized block body rejected |
-| `test_ref_script_size_per_tx_limit` | Single tx with >200 KiB ref scripts rejected |
-| `test_ref_script_size_per_block_limit` | Block total ref scripts >1 MiB rejected |
-| `test_ex_units_memory_exceeded` | Block exceeds max memory budget |
-| `test_ex_units_steps_exceeded` | Block exceeds max steps budget |
-| `test_multiple_txs_in_block` | Multiple valid transactions all applied |
-| `test_conway_hfc_pointer_exclusion` | Pointer address stake excluded at Conway boundary |
-| `test_apply_only_mode_skips_validation` | `BlockValidationMode::ApplyOnly` bypasses Phase-1 |
-| `test_certificate_processing_order` | Certificates processed in tx order within block |
+Haskell references: BBODY (block-level), LEDGERS (tx sequencing), UTXOS (state mutation).
+
+| Test | What it verifies | Haskell rule |
+|------|-----------------|--------------|
+| `test_apply_byron_block` | Byron era block applies correctly, UTxO updated | BBODY/LEDGERS |
+| `test_apply_shelley_block` | Shelley+ block applies, certificates/withdrawals processed | BBODY/LEDGERS |
+| `test_apply_empty_block` | Block with no transactions applies cleanly | BBODY |
+| `test_invalid_tx_collateral_consumed` | `is_valid: false` tx: collateral consumed + return added; regular I/O, certs, withdrawals, governance all skipped | UTXOS `updateUTxOStateByTxValidity` |
+| `test_epoch_transition_detected` | Block in new epoch triggers `process_epoch_transition` | TICK/NEWEPOCH |
+| `test_multi_epoch_gap` | Block skipping multiple epochs triggers transitions for each | TICK |
+| `test_body_size_header_mismatch` | Block body actual size ≠ header-claimed size → rejected (equality check, not <= maxBBSize) | BBODY `WrongBlockBodySizeBBODY` |
+| `test_ref_script_size_per_tx_limit` | Single valid tx with >204,800 bytes ref scripts rejected (only for is_valid=true) | LEDGER `ConwayTxRefScriptsSizeTooBig` |
+| `test_ref_script_size_per_block_limit` | Block total ref scripts >1,048,576 bytes rejected | BBODY `BodyRefScriptsSizeTooBig` |
+| `test_block_ex_units_memory_exceeded` | Sum of all tx ExUnits across block exceeds `maxBlockExUnits.mem` | BBODY `TooManyExUnits` |
+| `test_block_ex_units_steps_exceeded` | Sum of all tx ExUnits across block exceeds `maxBlockExUnits.steps` | BBODY `TooManyExUnits` |
+| `test_multiple_txs_sequential_utxo` | Txs applied left-to-right via foldM; each sees prior tx's UTxO changes | LEDGERS `foldM` |
+| `test_conway_pointer_stake_structural_exclusion` | Conway `InstantStake` has no ptrStake field; `StakeRefPtr` discarded structurally | Conway `addConwayInstantStake` |
+| `test_apply_only_mode_skips_validation` | `BlockValidationMode::ApplyOnly` (Haskell `ValidateNone`) executes state changes but skips predicate checks | `applyBlockNoValidaton` |
+| `test_certificate_processing_order` | Certificates processed in tx order within block | LEDGERS `foldM` |
 
 ### state/certificates.rs (~15 tests)
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_stake_registration` | Creates stake_map, reward_account, deposit entry |
-| `test_stake_deregistration` | Removes delegation/rewards, keeps stake_map, refunds deposit |
-| `test_stake_delegation` | Updates delegations map to target pool |
-| `test_pool_registration` | Creates pool_params entry, charges deposit |
-| `test_pool_reregistration_free` | Existing pool update doesn't charge deposit |
-| `test_pool_retirement` | Adds to pending retirements |
-| `test_conway_stake_registration` | Inline deposit amount stored per-credential |
-| `test_conway_stake_deregistration` | Returns remaining reward balance in refund |
-| `test_drep_registration` | Creates DRep entry, charges deposit |
-| `test_drep_unregistration` | Removes DRep, refunds deposit |
-| `test_drep_update` | Updates DRep metadata without deposit change |
-| `test_vote_delegation` | Updates vote_delegations map |
-| `test_committee_hot_auth` | Authorizes hot key for cold committee member |
-| `test_committee_cold_resign` | Records committee member resignation |
-| `test_pointer_address_tracking` | Certificate creates pointer entry (slot/tx/cert index) |
+Haskell references: DELEG (stake), POOL (pools), GOVCERT (DReps/committee).
 
-### state/epoch.rs (~12 tests)
+| Test | What it verifies | Haskell rule |
+|------|-----------------|--------------|
+| `test_stake_registration` | Creates reward_account with 0 balance, stores per-credential deposit | DELEG `ConwayRegCert` |
+| `test_stake_deregistration` | Removes from delegations, reward_accounts, vote_delegations; refunds stored per-credential deposit | DELEG `ConwayUnRegCert` |
+| `test_stake_delegation` | Updates delegations map to target pool | DELEG `ConwayDelegCert` |
+| `test_pool_registration` | Creates pool_params entry, charges `poolDeposit` | POOL |
+| `test_pool_reregistration_free` | Existing pool: params staged to `psFutureStakePoolParams`, pending retirement cancelled, no deposit charged | POOL (re-registration) |
+| `test_pool_retirement` | Adds to pending retirements, processed at epoch boundary | POOL |
+| `test_conway_stake_registration` | Tag 7: inline deposit amount stored per-credential (may differ from current `keyDeposit`) | DELEG |
+| `test_conway_stake_deregistration_requires_zero_balance` | Tag 8: reward balance must be zero; refund is deposit only (NOT deposit+rewards) | DELEG `StakeKeyHasNonZeroAccountBalanceDELEG` |
+| `test_drep_registration` | Creates DRep entry, charges `dRepDeposit` (separate from `keyDeposit`, PParams pos 27/key 31) | GOVCERT `ConwayRegDRep` |
+| `test_drep_unregistration` | Removes DRep, refunds stored per-credential DRep deposit | GOVCERT `ConwayUnRegDRep` |
+| `test_drep_update` | Updates DRep metadata without deposit change | GOVCERT `ConwayUpdateDRep` |
+| `test_vote_delegation` | Updates vote_delegations map | DELEG `ConwayDelegCert` |
+| `test_committee_hot_auth` | Authorizes hot key for cold committee member (tag 14) | GOVCERT `ConwayAuthCommitteeHotKey` |
+| `test_committee_cold_resign` | Records committee member resignation; permanent — cannot re-authorize (tag 15) | GOVCERT `ConwayResignCommitteeColdKey` |
+| `test_pointer_address_tracking` | Registration certs (tags 0, 7, 11, 12, 13) create pointer entry (slot/tx_index/cert_index) | Pointer map |
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_snapshot_rotation` | Mark→set→go rotation occurs |
-| `test_fee_capture_into_ss_fee` | Accumulated epoch fees captured in snapshot |
-| `test_reward_distribution_monetary_expansion` | Rho/tau split between pools and treasury |
-| `test_unregistered_rewards_to_treasury` | Rewards for deregistered accounts go to treasury |
-| `test_pool_retirement_processing` | Pending retirements applied, params removed |
-| `test_pool_retirement_deposit_refund` | Pool deposit refunded to reward account |
-| `test_treasury_donation_flush` | Pending donations added to treasury |
-| `test_nonce_evolution` | Next-epoch nonce computed from VRF output |
-| `test_genesis_epoch_transition` | Epoch 0→1 with empty snapshots |
-| `test_stake_rebuild` | Full UTxO walk rebuilds stake_map |
-| `test_bprev_block_count_update` | Block counts from previous epoch captured |
-| `test_governance_ratification` | Approved proposals enacted at epoch boundary |
+### state/epoch.rs (~14 tests)
+
+Haskell references: NEWEPOCH, EPOCH (internal sub-rules), SNAP, POOLREAP.
+
+**Correct NEWEPOCH sequence** (verified against Haskell):
+1. Complete PulsingRewUpdate (force reward pulsing to finish)
+2. **applyRUpd** — distribute rewards to accounts (BEFORE EPOCH)
+3. **EPOCH sub-rule:**
+   - 3a. SNAP — rotate snapshots, capture new mark
+   - 3b. POOLREAP — retire scheduled pools
+   - 3c. RATIFY — extract governance ratification result
+   - 3d-3f. Apply treasury withdrawals, enact proposals, return deposits
+   - 3g. Apply donations + unclaimed rewards to treasury
+   - 3h. HARDFORK sub-rule
+4. Set `nesPd` = `ssStakeMarkPoolDistr` from PRE-EPOCH state
+5. Reset block counts: `nesBprev = old nesBcur`, `nesBcur = empty`
+
+**Correct snapshot rotation:** go ← set, set ← mark, mark ← newly computed
+
+| Test | What it verifies | Haskell rule |
+|------|-----------------|--------------|
+| `test_snapshot_rotation_direction` | go←set, set←mark, new mark computed (NOT mark→set→go) | SNAP |
+| `test_rewards_applied_before_snap` | applyRUpd fires BEFORE EPOCH/SNAP; credited rewards visible in new mark snapshot | NEWEPOCH step 2 |
+| `test_fee_capture_at_snap` | `utxosFees` read into mark snapshot's ssFee during SNAP, then reset | SNAP |
+| `test_reward_distribution_formula` | `rewardPot = floor(rho*reserves) + ssFee(go)`; `deltaT1 = floor(tau*rewardPot)`; pools get `R = rewardPot - deltaT1`; undistributed R → reserves (deltaR2) | `RewardUpdate` |
+| `test_unregistered_rewards_to_treasury` | Rewards for deregistered accounts go to treasury | applyRUpd |
+| `test_pool_retirement_processing` | Pending retirements for current epoch applied, pool removed from pool_params | POOLREAP |
+| `test_pool_retirement_missing_reward_account` | Pool deposit goes to treasury if reward account no longer exists | POOLREAP |
+| `test_treasury_donation_in_epoch` | `utxosDonation + unclaimed` added to treasury inside EPOCH (step 3g, NOT first step) | EPOCH step 10 |
+| `test_governance_ratification_after_snap` | RATIFY result extracted AFTER SNAP (step 3c), not before | EPOCH ordering |
+| `test_genesis_epoch_transition` | Epoch 0→1: all snapshots empty, no rewards distributed, bprev empty | NEWEPOCH genesis |
+| `test_bprev_block_count_rotation` | `nesBprev = old nesBcur`, `nesBcur = empty` at epoch boundary | NEWEPOCH step 5 |
+| `test_nesPd_from_pre_epoch_mark` | Pool distribution set from ssStakeMarkPoolDistr BEFORE EPOCH overwrites mark | NEWEPOCH step 4 |
+| `test_ss_fee_from_go_snapshot` | Reward calculation uses go snapshot's ssFee (2 epochs old), not current | RewardUpdate |
+| `test_reward_params_from_go_epoch` | rho/tau come from go snapshot's epoch PParams, not current | RewardUpdate |
 
 ### state/protocol_params.rs (~6 tests)
 
@@ -129,85 +168,103 @@ Add inline `#[cfg(test)] mod tests` blocks to 10 source files in `dugite-ledger/
 | `test_version_in_header` | Current SNAPSHOT_VERSION written to header |
 | `test_atomic_write` | Writes to `.tmp` then renames |
 
-### validation/phase1.rs (~15 tests)
+### validation/phase1.rs (~18 tests)
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_valid_tx_passes` | Well-formed transaction passes all rules |
-| `test_no_inputs` | Rule 1: at least one input required |
-| `test_duplicate_inputs` | Rule 1b: duplicate inputs rejected |
-| `test_missing_input` | Rule 2: input not in UTxO set |
-| `test_value_not_conserved_ada` | Rule 3: ADA value conservation |
-| `test_value_not_conserved_multiasset` | Rule 3b: multi-asset conservation |
-| `test_mint_without_policy_script` | Rule 3c: minting policy missing |
-| `test_fee_too_small` | Rule 4: fee below minimum |
-| `test_output_below_min_utxo` | Rule 5: output below minimum UTxO |
-| `test_output_value_too_large` | Rule 5a: CBOR size exceeds max_val_size |
-| `test_network_id_mismatch` | Rule 5b: output network ID wrong |
-| `test_tx_size_too_large` | Rule 6: transaction size limit |
-| `test_ttl_expired` | Rule 7: TTL past current slot |
-| `test_validity_interval_not_started` | Rule 8: validity start in future |
-| `test_required_signer_missing` | Rule 10: required signer without witness |
+Haskell pipeline per transaction: LEDGER → CERTS → GOV → UTXOW → UTXO → UTXOS.
+Tests cover all three layers where Phase-1 checks live.
+
+| Test | What it verifies | Haskell failure |
+|------|-----------------|----------------|
+| `test_valid_tx_passes` | Well-formed transaction passes all rules | — |
+| `test_no_inputs` | At least one input required | `InputSetEmptyUTxO` (UTXO) |
+| `test_all_inputs_must_exist` | inputs ∪ collateralInputs ∪ referenceInputs must all exist in UTxO | `BadInputsUTxO` (UTXO) |
+| `test_value_not_conserved_ada` | `consumed = inputs + withdrawals + refunds`; `produced = outputs + fee + deposits + mint` | `ValueNotConservedUTxO` (UTXO) |
+| `test_value_not_conserved_multiasset` | Multi-asset conservation (mint on produced side) | `ValueNotConservedUTxO` (UTXO) |
+| `test_fee_too_small` | `fee >= txFeeFixed + txFeePerByte*txSize + tierRefScriptFee + exUnitFee` | `FeeTooSmallUTxO` (UTXO) |
+| `test_output_below_min_utxo` | Output below minimum UTxO value | `BabbageOutputTooSmallUTxO` (UTXO) |
+| `test_output_value_too_large` | CBOR size exceeds max_val_size | `OutputTooBigUTxO` (UTXO) |
+| `test_network_id_mismatch` | Output network ID wrong | `WrongNetwork` (UTXO) |
+| `test_tx_size_too_large` | Transaction size limit | `MaxTxSizeUTxO` (UTXO) |
+| `test_validity_interval_bounds` | `invalidBefore <= slot < invalidHereafter` (single check covers TTL + start) | `OutsideValidityIntervalUTxO` (UTXO) |
+| `test_required_signer_missing` | Required signer without matching vkey witness | `MissingVKeyWitnessesUTXOW` (UTXOW) |
+| `test_ref_inputs_must_be_disjoint` | Reference inputs must not overlap regular inputs | `BabbageNonDisjointRefInputs` (UTXO) |
+| `test_missing_script_witness` | Script hash referenced but not provided in witness or ref inputs | `MissingScriptWitnessesUTXOW` (UTXOW) |
+| `test_extraneous_script_witness` | Script supplied but not needed by this tx | `ExtraneousScriptWitnessesUTXOW` (UTXOW) |
+| `test_tx_ex_units_too_big` | Sum of all redeemer ExUnits > `maxTxExUnits` | `ExUnitsTooBigUTxO` (UTXO) |
+| `test_auxiliary_data_hash_mismatch` | Aux data hash present but doesn't match / aux data missing | `MissingTxBodyMetadataHash` / `MissingTxMetadata` (UTXOW) |
+| `test_mint_without_policy_script` | Minting policy has no matching script | `MissingScriptWitnessesUTXOW` (UTXOW) |
+
+Note: duplicate inputs (Rule 1b) are structurally rejected at CBOR deserialization (Set with tag 258),
+not by a named ledger predicate failure. This is tested at the serialization layer, not here.
 
 ### validation/collateral.rs (~12 tests)
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_valid_collateral` | Plutus tx with sufficient collateral passes |
-| `test_missing_collateral_inputs` | No collateral inputs for Plutus tx |
-| `test_too_many_collateral_inputs` | Exceeds max_collateral_inputs |
-| `test_insufficient_collateral_value` | Below percentage threshold |
-| `test_collateral_return_multiasset` | Babbage+ collateral return subtracts correctly |
-| `test_non_ada_in_net_collateral` | Net collateral contains tokens → error |
-| `test_total_collateral_mismatch` | Declared total_collateral ≠ computed |
-| `test_ex_units_memory_exceeded` | Tx exceeds max_tx_ex_units.mem |
-| `test_ex_units_steps_exceeded` | Tx exceeds max_tx_ex_units.steps |
-| `test_missing_spend_redeemer` | Script-locked input without spend redeemer |
-| `test_missing_mint_redeemer` | Plutus minting policy without redeemer |
-| `test_redeemer_index_out_of_bounds` | Spend redeemer index ≥ input count |
+Collateral checks gate on **redeemers map being non-empty** (not "has Plutus scripts").
+The pass/fail comparison uses cross-multiplication: `bal * 100 >= fee * collPerc` (not ceiling division).
+
+| Test | What it verifies | Haskell failure |
+|------|-----------------|----------------|
+| `test_valid_collateral` | Tx with redeemers + sufficient collateral passes | — |
+| `test_no_collateral_inputs` | Empty collateral inputs when redeemers present | `NoCollateralInputs` |
+| `test_too_many_collateral_inputs` | Exceeds `maxCollateralInputs` | `TooManyCollateralInputs` |
+| `test_insufficient_collateral_cross_multiply` | `bal * 100 < fee * collPerc` fails (exact integer comparison, no division) | `InsufficientCollateral` |
+| `test_collateral_return_multiasset` | Babbage+ collateral return subtracts correctly | `collAdaBalance` |
+| `test_non_ada_in_net_collateral` | Net collateral (inputs minus return) contains tokens | `CollateralContainsNonADA` |
+| `test_total_collateral_field_mismatch` | Declared `totalCollateral` ≠ computed balance | `IncorrectTotalCollateralField` |
+| `test_collateral_must_be_vkey` | Collateral inputs at script addresses rejected | `ScriptsNotPaidUTxO` |
+| `test_ex_units_memory_exceeded` | Tx redeemer sum > `maxTxExUnits.mem` | `ExUnitsTooBigUTxO` |
+| `test_ex_units_steps_exceeded` | Tx redeemer sum > `maxTxExUnits.steps` | `ExUnitsTooBigUTxO` |
+| `test_redeemer_index_out_of_bounds` | Spend redeemer index ≥ input count | `ExtraRedeemers` (UTXOW) |
+| `test_vote_redeemer_ordering` | Vote index follows `Voter` Ord: CC(Script) < CC(Key) < DRep(Script) < DRep(Key) < SPO(Key) | Conway `getConwayScriptsNeeded` |
+
+Note: "scripts needed" checks (missing/extra redeemers) are UTXOW-level (`hasExactSetOfRedeemers`),
+not inside the UTXO collateral block. Tests for `MissingRedeemers`/`ExtraRedeemers` belong in phase1.rs.
 
 ### validation/scripts.rs (~12 tests)
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_native_script_pubkey_match` | ScriptPubkey with matching signer |
-| `test_native_script_pubkey_no_match` | ScriptPubkey without matching signer |
-| `test_native_script_all` | ScriptAll requires all sub-scripts |
-| `test_native_script_any` | ScriptAny requires one sub-script |
-| `test_native_script_n_of_k` | ScriptNOfK threshold logic |
-| `test_native_script_time_locks` | InvalidBefore/InvalidHereafter with slot |
-| `test_script_hash_type_tags` | Type tags 0x00-0x03 for native/V1/V2/V3 |
-| `test_available_scripts_from_witnesses` | Collects hashes from witness set |
-| `test_available_scripts_from_ref_inputs` | Collects hashes from reference input UTxOs |
-| `test_tiered_fee_single_tier` | ≤25 KiB uses base rate |
-| `test_tiered_fee_multiple_tiers` | >25 KiB applies 1.2× multiplier per tier |
-| `test_min_fee_computation` | Base + ref_script + ex_unit fees combined |
+| Test | What it verifies | Haskell reference |
+|------|-----------------|-------------------|
+| `test_native_script_pubkey_match` | ScriptPubkey with matching signer → true | `evalNativeScript` |
+| `test_native_script_pubkey_no_match` | ScriptPubkey without matching signer → false | `evalNativeScript` |
+| `test_native_script_all` | ScriptAll: all sub-scripts must be true | `evalNativeScript` |
+| `test_native_script_any` | ScriptAny: at least one sub-script true | `evalNativeScript` |
+| `test_native_script_n_of_k` | ScriptNOfK: at least N of K true | `evalNativeScript` |
+| `test_native_script_time_locks` | InvalidBefore: `slot >= n` (inclusive). InvalidHereafter: `slot < n` (strictly less) | Allegra timelocks |
+| `test_script_hash_type_tags` | Native: `blake2b-224(0x00 \|\| CBOR(script))`. Plutus V1/V2/V3: `blake2b-224(0x0N \|\| flat_bytes)` (raw, not CBOR-wrapped) | `hashScript` |
+| `test_available_scripts_from_witnesses` | Collects hashes from witness set (native + Plutus V1/V2/V3) | `scriptsProvided` |
+| `test_available_scripts_from_ref_inputs` | Collects hashes from reference input UTxOs (both spending + reference inputs) | `scriptsProvided` |
+| `test_tiered_fee_single_tier` | ≤25,600 bytes uses base rate (`minFeeRefScriptCostPerByte` PParams pos 29/key 33) | `tierRefScriptFee` |
+| `test_tiered_fee_multiple_tiers` | >25,600 bytes: 6/5 rational multiplier per tier (hardcoded stride=25600, multiplier=6/5). Result is ceiling of exact rational sum. | `tierRefScriptFee` |
+| `test_min_fee_computation` | `txFeeFixed + txFeePerByte*txSize + tierRefScriptFee + prSteps*totalSteps + prMem*totalMem` | `getMinFeeTxUtxo` |
 
-### validation/datum.rs (~8 tests)
+### validation/datum.rs (~9 tests)
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_script_input_datum_present` | DatumHash input with matching witness passes |
-| `test_script_input_datum_missing` | DatumHash input without witness → error |
-| `test_inline_datum_no_witness_needed` | InlineDatum bypasses witness requirement |
-| `test_non_script_input_no_datum` | Non-script input needs no datum |
-| `test_extra_datum_rejected` | Witness datum not in needed set → error |
-| `test_output_datum_hash_allowed` | Output DatumHash allowed as supplemental |
-| `test_ref_input_datum_allowed` | Reference input DatumHash allowed |
-| `test_multiple_script_inputs` | Multiple script inputs each need their datum |
+| Test | What it verifies | Haskell failure |
+|------|-----------------|----------------|
+| `test_script_input_datum_present` | PlutusV1/V2 script-locked input with DatumHash: matching datum in witness passes | `MissingRequiredDatums` |
+| `test_script_input_datum_missing` | PlutusV1/V2 script-locked input with DatumHash: no datum in witness → error | `MissingRequiredDatums` |
+| `test_inline_datum_no_witness_needed` | InlineDatum: pulled from UTxO directly, no witness entry required | `getBabbageSpendingDatum` |
+| `test_non_script_input_no_datum` | Non-script (VKey) input needs no datum | — |
+| `test_extra_datum_is_hard_error` | Witness datum not in needed set → hard predicate failure (not warning) | `NotAllowedSupplementalDatums` |
+| `test_output_datum_hash_supplemental` | Output DatumHash allowed as supplemental in witness set | `getBabbageSupplementalDataHashes` |
+| `test_ref_input_datum_supplemental_only` | Reference input DatumHash is supplemental (allowed in witness) but CANNOT satisfy spending input requirement | `getBabbageSupplementalDataHashes` |
+| `test_multiple_script_inputs` | Multiple script inputs each need their own datum hash in witness | `MissingRequiredDatums` |
+| `test_plutusv3_no_datum_required` | CIP-0069: PlutusV3 spending inputs do not require datum (no `UnspendableUTxONoDatumHash`) | Conway `getInputDataHashesTxBody` |
 
 ### validation/conway.rs (~8 tests)
 
-| Test | What it verifies |
-|------|-----------------|
-| `test_conway_cert_in_conway_era` | Conway cert allowed when PV ≥ 9 |
-| `test_conway_cert_in_pre_conway_era` | Conway cert rejected when PV < 9 |
-| `test_governance_in_pre_conway` | Governance features rejected pre-Conway |
-| `test_deposit_new_registration` | New key/DRep registration charges deposit |
-| `test_deposit_pool_reregistration_free` | Existing pool re-reg charges nothing |
-| `test_refund_deregistration` | Key/DRep deregistration refunds deposit |
-| `test_combined_reg_deleg_deposit` | Registration+delegation cert charges deposit |
-| `test_per_credential_deposit_map` | Uses stored deposit when key_deposit has changed |
+Conway-only certificate types: **12** (not 13). Tags: 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18.
+
+| Test | What it verifies | Haskell reference |
+|------|-----------------|-------------------|
+| `test_conway_cert_in_conway_era` | All 12 Conway cert types allowed when PV ≥ 9 | `conwayTxCertGovCert` |
+| `test_conway_cert_in_pre_conway_era` | Conway certs rejected when PV < 9 | Era gating |
+| `test_governance_features_era_gated` | Voting procedures + proposal procedures rejected pre-Conway | Era gating |
+| `test_deposit_new_key_registration` | New key registration charges current `keyDeposit` | DELEG |
+| `test_deposit_new_drep_registration` | New DRep charges `dRepDeposit` (PParams pos 27/key 31, separate from keyDeposit) | GOVCERT |
+| `test_deposit_pool_reregistration_free` | Existing pool re-reg: no deposit, checks `pool_params.contains_key()` | POOL |
+| `test_refund_deregistration` | Key/DRep deregistration refunds stored per-credential deposit amount | DELEG/GOVCERT |
+| `test_per_credential_deposit_map` | After governance changes keyDeposit, old credentials refund at their original rate | Per-credential tracking |
 
 ## Test Infrastructure
 
