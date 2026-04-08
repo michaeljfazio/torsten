@@ -2,7 +2,7 @@
 //!
 //! # Snapshot format
 //!
-//! All snapshots use bincode serialization of [`LedgerState`].  The on-disk
+//! All snapshots use bincode serialization of [`LedgerStateSnapshot`](super::snapshot_format::LedgerStateSnapshot).  The on-disk
 //! layout is:
 //!
 //! ```text
@@ -59,7 +59,8 @@ impl LedgerState {
         let tmp_path = path.with_extension("tmp");
 
         // Serialize the ledger state to bincode.
-        let data = bincode::serialize(self).map_err(|e| {
+        let snapshot = super::snapshot_format::LedgerStateSnapshot::from(self);
+        let data = bincode::serialize(&snapshot).map_err(|e| {
             LedgerError::EpochTransition(format!("Failed to serialize ledger state: {e}"))
         })?;
 
@@ -192,7 +193,7 @@ impl LedgerState {
         // malicious payloads that encode enormous internal allocations.
         // Must use with_fixint_encoding() to match bincode::serialize() defaults.
         use bincode::Options;
-        let mut state: LedgerState = bincode::options()
+        let snapshot: super::snapshot_format::LedgerStateSnapshot = bincode::options()
             .with_fixint_encoding()
             .allow_trailing_bytes()
             .with_limit(MAX_SNAPSHOT_SIZE as u64)
@@ -200,6 +201,7 @@ impl LedgerState {
             .map_err(|e| {
                 LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
             })?;
+        let mut state = LedgerState::from(snapshot);
         state.utxo_set.rebuild_address_index();
         // Re-enable indexing so subsequent insert/remove operations maintain the index.
         // The #[serde(skip)] on indexing_enabled defaults to false after deserialization.

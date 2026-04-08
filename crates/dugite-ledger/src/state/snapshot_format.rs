@@ -341,4 +341,26 @@ mod tests {
             state.protocol_params.protocol_version_major
         );
     }
+
+    #[test]
+    fn test_bincode_roundtrip_through_snapshot_format() {
+        let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        // Serialize via snapshot format
+        let snapshot = LedgerStateSnapshot::from(&state);
+        let bytes = bincode::serialize(&snapshot).expect("serialize");
+
+        // Deserialize back through snapshot format
+        let restored_snapshot: LedgerStateSnapshot =
+            bincode::deserialize(&bytes).expect("deserialize");
+        let restored = LedgerState::from(restored_snapshot);
+
+        // Verify key fields
+        assert_eq!(restored.epoch, state.epoch);
+        assert_eq!(restored.era, state.era);
+        assert_eq!(
+            restored.protocol_params.protocol_version_major,
+            state.protocol_params.protocol_version_major
+        );
+    }
 }
