@@ -1328,3 +1328,722 @@ impl LedgerState {
         Ok(delta)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dugite_primitives::address::{Address, ByronAddress, EnterpriseAddress};
+    use dugite_primitives::block::{BlockHeader, OperationalCert, ProtocolVersion, VrfOutput};
+    use dugite_primitives::credentials::Credential;
+    use dugite_primitives::era::Era;
+    use dugite_primitives::hash::{Hash28, Hash32};
+    use dugite_primitives::network::NetworkId;
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::time::{BlockNo, SlotNo};
+    use dugite_primitives::transaction::{
+        ExUnits, OutputDatum, Redeemer, RedeemerTag, ScriptRef, Transaction, TransactionInput,
+        TransactionOutput,
+    };
+    use dugite_primitives::value::{Lovelace, Value};
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// Build a minimal `Block` for the given era, slot, and block number.
+    ///
+    /// `prev_hash` is set to zero so the ledger tip check is skipped (the
+    /// state starts at `Point::Origin` so the prev-hash validation is
+    /// bypassed entirely for the first block applied).
+    fn make_test_block(
+        era: Era,
+        slot: u64,
+        block_no: u64,
+        protocol_major: u64,
+        body_size: u64,
+        txs: Vec<Transaction>,
+    ) -> Block {
+        Block {
+            header: BlockHeader {
+                header_hash: Hash32::from_bytes({
+                    let mut b = [0u8; 32];
+                    b[..8].copy_from_slice(&block_no.to_be_bytes());
+                    b
+                }),
+                prev_hash: Hash32::ZERO,
+                issuer_vkey: vec![],
+                vrf_vkey: vec![],
+                vrf_result: VrfOutput {
+                    output: vec![],
+                    proof: vec![],
+                },
+                nonce_vrf_output: vec![],
+                nonce_vrf_proof: vec![],
+                block_number: BlockNo(block_no),
+                slot: SlotNo(slot),
+                epoch_nonce: Hash32::ZERO,
+                body_size,
+                body_hash: Hash32::ZERO,
+                operational_cert: OperationalCert {
+                    hot_vkey: vec![],
+                    sequence_number: 0,
+                    kes_period: 0,
+                    sigma: vec![],
+                },
+                protocol_version: ProtocolVersion {
+                    major: protocol_major,
+                    minor: 0,
+                },
+                kes_signature: vec![],
+            },
+            transactions: txs,
+            era,
+            raw_cbor: None,
+        }
+    }
+
+    /// Build a minimal Shelley+ `TransactionOutput` with an enterprise address
+    /// and ADA-only value.  No datum, no script_ref.
+    fn make_output(coin: u64) -> TransactionOutput {
+        TransactionOutput {
+            address: Address::Enterprise(EnterpriseAddress {
+                network: NetworkId::Mainnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0xABu8; 28])),
+            }),
+            value: Value {
+                coin: Lovelace(coin),
+                multi_asset: Default::default(),
+            },
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }
+    }
+
+    /// Build a minimal valid-looking transaction in ApplyOnly style.
+    ///
+    /// `tx_id_byte` is used to uniquely distinguish the transaction hash so
+    /// that sequential UTxO spending tests can reference specific outputs by
+    /// their parent tx hash.
+    fn make_simple_tx(
+        tx_id_byte: u8,
+        inputs: Vec<TransactionInput>,
+        outputs: Vec<TransactionOutput>,
+        fee: u64,
+    ) -> Transaction {
+        let hash = Hash32::from_bytes([tx_id_byte; 32]);
+        let mut tx = Transaction::empty_with_hash(hash);
+        tx.body.inputs = inputs;
+        tx.body.outputs = outputs;
+        tx.body.fee = Lovelace(fee);
+        tx
+    }
+
+    /// Seed a UTxO entry in the ledger state.
+    fn seed_utxo(state: &mut LedgerState, input: TransactionInput, output: TransactionOutput) {
+        state.utxo_set.insert(input, output);
+    }
+
+    // ── Test 1: Byron-era block with one tx consuming a UTxO ─────────────────
+
+    #[test]
+    fn test_apply_byron_block() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        // Seed the UTxO that the Byron tx will spend.
+        let genesis_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x01u8; 32]),
+            index: 0,
+        };
+        let genesis_output = TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value {
+                coin: Lovelace(10_000_000),
+                multi_asset: Default::default(),
+            },
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: true,
+            raw_cbor: None,
+        };
+        seed_utxo(&mut state, genesis_input.clone(), genesis_output);
+
+        // Build a Byron tx that spends the genesis UTxO.
+        // Fee > 0 satisfies the value-conservation check (no minimum fee check
+        // when raw_cbor is None → tx_size_bytes = 0 → min_fee = min_fee_b).
+        // We set fee to min_fee_b (155381) so conservation holds:
+        // input 10_000_000 = output 9_844_619 + fee 155_381.
+        let fee: u64 = state.protocol_params.min_fee_b;
+        let output_value = 10_000_000u64 - fee;
+
+        let _out_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x10u8; 32]),
+            index: 0,
+        };
+        let out_output = TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![1u8; 32],
+            }),
+            value: Value {
+                coin: Lovelace(output_value),
+                multi_asset: Default::default(),
+            },
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: true,
+            raw_cbor: None,
+        };
+
+        let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x10u8; 32]));
+        tx.body.inputs = vec![genesis_input.clone()];
+        tx.body.outputs = vec![out_output];
+        tx.body.fee = Lovelace(fee);
+
+        // Byron slots: 208 epochs × 21600 slots/epoch = 4,492,800.
+        // Slot 100 is firmly in the Byron era.
+        let block = make_test_block(Era::Byron, 100, 1, 1, 0, vec![tx]);
+
+        // ApplyOnly skips fee-policy validation while still applying UTxO changes.
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Byron block should apply");
+
+        // The genesis UTxO must have been consumed.
+        assert!(
+            state.utxo_set.lookup(&genesis_input).is_none(),
+            "Spent Byron input must be removed"
+        );
+        // The new output at index 0 of the tx hash must exist.
+        let new_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x10u8; 32]),
+            index: 0,
+        };
+        assert!(
+            state.utxo_set.lookup(&new_input).is_some(),
+            "Byron output must be created"
+        );
+        // Tip was advanced.
+        assert_ne!(state.tip, dugite_primitives::block::Tip::origin());
+    }
+
+    // ── Test 2: Shelley+ block with one valid tx ──────────────────────────────
+
+    #[test]
+    fn test_apply_shelley_block() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x02u8; 32]),
+            index: 0,
+        };
+        seed_utxo(&mut state, input.clone(), make_output(5_000_000));
+
+        let output = make_output(4_500_000);
+        let tx = make_simple_tx(0x20, vec![input.clone()], vec![output], 500_000);
+
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, vec![tx.clone()]);
+
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Shelley+ block should apply");
+
+        // Input was consumed.
+        assert!(state.utxo_set.lookup(&input).is_none());
+        // New output at index 0 exists.
+        let new_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x20u8; 32]),
+            index: 0,
+        };
+        assert!(state.utxo_set.lookup(&new_input).is_some());
+        // Tip updated.
+        assert_eq!(state.tip.block_number, BlockNo(1));
+    }
+
+    // ── Test 3: Empty block ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_empty_block() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        // Seed one UTxO — it must survive the empty block.
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x03u8; 32]),
+            index: 0,
+        };
+        seed_utxo(&mut state, input.clone(), make_output(1_000_000));
+
+        let block = make_test_block(Era::Conway, 2_000, 1, 9, 0, vec![]);
+
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Empty block should apply");
+
+        // UTxO untouched.
+        assert!(state.utxo_set.lookup(&input).is_some());
+        // Tip updated.
+        assert_eq!(state.tip.point.slot().unwrap(), SlotNo(2_000));
+    }
+
+    // ── Test 4: invalid tx — collateral consumed, regular input untouched ────
+
+    #[test]
+    fn test_invalid_tx_collateral_consumed() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        // Regular input (must NOT be consumed).
+        let regular_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x04u8; 32]),
+            index: 0,
+        };
+        seed_utxo(&mut state, regular_input.clone(), make_output(2_000_000));
+
+        // Collateral input (MUST be consumed).
+        let collateral_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x04u8; 32]),
+            index: 1,
+        };
+        seed_utxo(&mut state, collateral_input.clone(), make_output(3_000_000));
+
+        let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x40u8; 32]));
+        tx.body.inputs = vec![regular_input.clone()];
+        tx.body.collateral = vec![collateral_input.clone()];
+        tx.body.fee = Lovelace(0);
+        tx.is_valid = false;
+
+        let block = make_test_block(Era::Conway, 3_000, 1, 9, 0, vec![tx]);
+
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Block with invalid tx should apply");
+
+        // Collateral was spent.
+        assert!(
+            state.utxo_set.lookup(&collateral_input).is_none(),
+            "Collateral input must be consumed"
+        );
+        // Regular input survived.
+        assert!(
+            state.utxo_set.lookup(&regular_input).is_some(),
+            "Regular input of invalid tx must not be consumed"
+        );
+    }
+
+    // ── Test 5: Epoch transition detected ────────────────────────────────────
+
+    #[test]
+    fn test_epoch_transition_detected() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        // Zero out Byron transition so epoch_of_slot is just slot/epoch_length.
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
+        assert_eq!(state.epoch, EpochNo(0));
+
+        // First slot of epoch 1 triggers the transition.
+        let slot = state.epoch_length; // 432000
+        let block = make_test_block(Era::Conway, slot, 1, 9, 0, vec![]);
+
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Block should apply");
+
+        assert_eq!(state.epoch, EpochNo(1));
+    }
+
+    // ── Test 6: Multi-epoch gap ───────────────────────────────────────────────
+
+    #[test]
+    fn test_multi_epoch_gap() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.shelley_transition_epoch = 0;
+        state.byron_epoch_length = 0;
+        assert_eq!(state.epoch, EpochNo(0));
+
+        // Jump directly to epoch 3.
+        let slot = state.epoch_length * 3; // first slot of epoch 3
+        let block = make_test_block(Era::Conway, slot, 1, 9, 0, vec![]);
+
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Block should apply after multi-epoch gap");
+
+        // All three epoch transitions (1, 2, 3) must have been processed.
+        assert_eq!(state.epoch, EpochNo(3));
+    }
+
+    // ── Test 7: body_size exceeds max — only a warning, not an error ─────────
+    //
+    // `apply_block` logs a warning but deliberately does NOT return Err when
+    // `body_size > max_block_body_size`.  This mirrors the Haskell node's
+    // behaviour for confirmed on-chain blocks: if the canonical chain accepted
+    // the block, we must accept it too.
+
+    #[test]
+    fn test_body_size_exceeds_max_warns_not_errors() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        assert!(state.protocol_params.max_block_body_size > 0);
+
+        // body_size is strictly greater than the protocol limit.
+        let oversized = state.protocol_params.max_block_body_size + 1;
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, oversized, vec![]);
+
+        // Must succeed — the oversized body_size only triggers a log warning.
+        state
+            .apply_block(&block, BlockValidationMode::ValidateAll)
+            .expect("Oversized body_size must not be an error in apply_block");
+
+        // The block was still applied: tip advanced.
+        assert_eq!(state.tip.block_number, BlockNo(1));
+    }
+
+    // ── Test 8: Per-tx ref-script size limit (Conway ValidateAll) ─────────────
+
+    #[test]
+    fn test_ref_script_size_per_tx_limit() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Must be Conway (protocol_version_major >= 9).
+        params.protocol_version_major = 9;
+        let mut state = LedgerState::new(params);
+
+        // A UTxO whose script_ref exceeds the 200 KiB per-tx limit.
+        let big_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x08u8; 32]),
+            index: 0,
+        };
+        let big_output = TransactionOutput {
+            address: Address::Enterprise(EnterpriseAddress {
+                network: NetworkId::Mainnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0x08u8; 28])),
+            }),
+            value: Value {
+                coin: Lovelace(5_000_000),
+                multi_asset: Default::default(),
+            },
+            datum: OutputDatum::None,
+            // 205_000 bytes > 200 * 1024 (204_800) per-tx limit.
+            script_ref: Some(ScriptRef::PlutusV2(vec![0u8; 205_000])),
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        seed_utxo(&mut state, big_input.clone(), big_output);
+
+        // A valid tx that spends the large-script UTxO.
+        let tx = make_simple_tx(0x80, vec![big_input], vec![make_output(4_000_000)], 0);
+
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, vec![tx]);
+
+        let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+        assert!(
+            result.is_err(),
+            "Per-tx ref-script size limit must be enforced in ValidateAll mode"
+        );
+        if let Err(LedgerError::BlockTxValidationFailed { errors, .. }) = result {
+            assert!(
+                errors.contains("TxRefScriptSizeTooLarge"),
+                "Error must mention TxRefScriptSizeTooLarge, got: {errors}"
+            );
+        }
+    }
+
+    // ── Test 9: Per-block ref-script size limit ───────────────────────────────
+
+    #[test]
+    fn test_ref_script_size_per_block_limit() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+        let mut state = LedgerState::new(params);
+
+        // Create multiple UTxOs each with a script_ref that individually fits
+        // within the 200 KiB per-tx limit but together exceed the 1 MiB
+        // per-block limit.  6 × 200 KiB = 1,200 KiB > 1,048,576 bytes.
+        let script_bytes = vec![0u8; 200 * 1024];
+        let mut txs = Vec::new();
+        for i in 0u8..6 {
+            let inp = TransactionInput {
+                transaction_id: Hash32::from_bytes([0x09u8 + i; 32]),
+                index: 0,
+            };
+            let out = TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    network: NetworkId::Mainnet,
+                    payment: Credential::VerificationKey(Hash28::from_bytes([0x09u8 + i; 28])),
+                }),
+                value: Value {
+                    coin: Lovelace(2_000_000),
+                    multi_asset: Default::default(),
+                },
+                datum: OutputDatum::None,
+                script_ref: Some(ScriptRef::PlutusV2(script_bytes.clone())),
+                is_legacy: false,
+                raw_cbor: None,
+            };
+            seed_utxo(&mut state, inp.clone(), out);
+
+            let tx = make_simple_tx(0x90 + i, vec![inp], vec![make_output(1_000_000)], 0);
+            txs.push(tx);
+        }
+
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, txs);
+
+        let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+        assert!(
+            result.is_err(),
+            "Per-block ref-script size limit must be enforced"
+        );
+        if let Err(LedgerError::BlockTxValidationFailed { errors, .. }) = result {
+            assert!(
+                errors.contains("BodyRefScriptsSizeTooBig"),
+                "Error must mention BodyRefScriptsSizeTooBig, got: {errors}"
+            );
+        }
+    }
+
+    // ── Test 10: Block ExUnits memory budget exceeded ─────────────────────────
+
+    #[test]
+    fn test_block_ex_units_memory_exceeded() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Lower the per-block limit to make it easy to exceed with two txs.
+        params.max_block_ex_units.mem = 10;
+        let mut state = LedgerState::new(params);
+
+        // Two valid txs each consuming 6 memory units → total 12 > limit 10.
+        let mut txs = Vec::new();
+        for i in 0u8..2 {
+            let inp = TransactionInput {
+                transaction_id: Hash32::from_bytes([0x0Au8 + i; 32]),
+                index: 0,
+            };
+            seed_utxo(&mut state, inp.clone(), make_output(2_000_000));
+
+            let mut tx = make_simple_tx(0xA0 + i, vec![inp], vec![make_output(1_000_000)], 0);
+            tx.witness_set.redeemers = vec![Redeemer {
+                tag: RedeemerTag::Spend,
+                index: 0,
+                data: dugite_primitives::transaction::PlutusData::Integer(0),
+                ex_units: ExUnits { mem: 6, steps: 1 },
+            }];
+            txs.push(tx);
+        }
+
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, txs);
+
+        let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+        assert!(result.is_err(), "Exceeded memory budget must be rejected");
+        if let Err(LedgerError::BlockTxValidationFailed { errors, .. }) = result {
+            assert!(
+                errors.contains("BlockExUnitsExceeded") && errors.contains("memory"),
+                "Error must mention BlockExUnitsExceeded (memory), got: {errors}"
+            );
+        }
+    }
+
+    // ── Test 11: Block ExUnits steps budget exceeded ───────────────────────────
+
+    #[test]
+    fn test_block_ex_units_steps_exceeded() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.max_block_ex_units.steps = 10;
+        let mut state = LedgerState::new(params);
+
+        let mut txs = Vec::new();
+        for i in 0u8..2 {
+            let inp = TransactionInput {
+                transaction_id: Hash32::from_bytes([0x0Bu8 + i; 32]),
+                index: 0,
+            };
+            seed_utxo(&mut state, inp.clone(), make_output(2_000_000));
+
+            let mut tx = make_simple_tx(0xB0 + i, vec![inp], vec![make_output(1_000_000)], 0);
+            tx.witness_set.redeemers = vec![Redeemer {
+                tag: RedeemerTag::Spend,
+                index: 0,
+                data: dugite_primitives::transaction::PlutusData::Integer(0),
+                ex_units: ExUnits { mem: 1, steps: 6 },
+            }];
+            txs.push(tx);
+        }
+
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, txs);
+
+        let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+        assert!(result.is_err(), "Exceeded steps budget must be rejected");
+        if let Err(LedgerError::BlockTxValidationFailed { errors, .. }) = result {
+            assert!(
+                errors.contains("BlockExUnitsExceeded") && errors.contains("step"),
+                "Error must mention BlockExUnitsExceeded (steps), got: {errors}"
+            );
+        }
+    }
+
+    // ── Test 12: Sequential UTxO — tx1 creates, tx2 spends in same block ─────
+
+    #[test]
+    fn test_multiple_txs_sequential_utxo() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        // Genesis UTxO consumed by tx1.
+        let genesis_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x0Cu8; 32]),
+            index: 0,
+        };
+        seed_utxo(&mut state, genesis_input.clone(), make_output(5_000_000));
+
+        // tx1: spends genesis_input, creates a new output.
+        let tx1_hash = Hash32::from_bytes([0xC0u8; 32]);
+        let mut tx1 = Transaction::empty_with_hash(tx1_hash);
+        tx1.body.inputs = vec![genesis_input.clone()];
+        tx1.body.outputs = vec![make_output(4_500_000)];
+        tx1.body.fee = Lovelace(500_000);
+
+        // tx2: spends tx1's output (index 0).
+        let tx1_output_input = TransactionInput {
+            transaction_id: tx1_hash,
+            index: 0,
+        };
+        let tx2_hash = Hash32::from_bytes([0xC1u8; 32]);
+        let mut tx2 = Transaction::empty_with_hash(tx2_hash);
+        tx2.body.inputs = vec![tx1_output_input.clone()];
+        tx2.body.outputs = vec![make_output(4_000_000)];
+        tx2.body.fee = Lovelace(500_000);
+
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, vec![tx1, tx2]);
+
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Sequential within-block spending should succeed");
+
+        // Genesis input consumed.
+        assert!(state.utxo_set.lookup(&genesis_input).is_none());
+        // tx1's intermediate output was consumed by tx2.
+        assert!(state.utxo_set.lookup(&tx1_output_input).is_none());
+        // tx2's output exists.
+        let tx2_out = TransactionInput {
+            transaction_id: tx2_hash,
+            index: 0,
+        };
+        assert!(state.utxo_set.lookup(&tx2_out).is_some());
+    }
+
+    // ── Test 13: Conway pointer-stake exclusion ───────────────────────────────
+
+    #[test]
+    fn test_conway_pointer_stake_exclusion() {
+        use dugite_primitives::credentials::Pointer;
+
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        // Pre-seed ptr_stake entries that should be cleared on first Conway block.
+        state.ptr_stake.insert(
+            Pointer {
+                slot: 1,
+                tx_index: 0,
+                cert_index: 0,
+            },
+            1_000_000,
+        );
+        state.ptr_stake.insert(
+            Pointer {
+                slot: 2,
+                tx_index: 0,
+                cert_index: 0,
+            },
+            2_000_000,
+        );
+        assert_eq!(state.ptr_stake.len(), 2);
+        assert!(!state.ptr_stake_excluded);
+
+        // Apply a Conway-era block (era == Era::Conway triggers exclusion).
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, vec![]);
+
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Conway block should apply");
+
+        // The one-time exclusion flag must be set after the first Conway block.
+        assert!(
+            state.ptr_stake_excluded,
+            "ptr_stake_excluded must be true after first Conway block"
+        );
+    }
+
+    // ── Test 14: ApplyOnly mode skips per-tx ref-script validation ────────────
+
+    #[test]
+    fn test_apply_only_mode_skips_validation() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+        let mut state = LedgerState::new(params);
+
+        // Same setup as test 8 — a UTxO with a script_ref that exceeds the
+        // 200 KiB per-tx limit.  In ValidateAll mode this returns Err; in
+        // ApplyOnly mode the check is skipped.
+        let big_input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x0Eu8; 32]),
+            index: 0,
+        };
+        let big_output = TransactionOutput {
+            address: Address::Enterprise(EnterpriseAddress {
+                network: NetworkId::Mainnet,
+                payment: Credential::VerificationKey(Hash28::from_bytes([0x0Eu8; 28])),
+            }),
+            value: Value {
+                coin: Lovelace(5_000_000),
+                multi_asset: Default::default(),
+            },
+            datum: OutputDatum::None,
+            script_ref: Some(ScriptRef::PlutusV2(vec![0u8; 205_000])),
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        seed_utxo(&mut state, big_input.clone(), big_output);
+
+        let tx = make_simple_tx(0xE0, vec![big_input], vec![make_output(4_000_000)], 0);
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, vec![tx]);
+
+        // ApplyOnly must skip the per-tx ref-script size check.
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("ApplyOnly must succeed even with oversized ref-script");
+
+        // Block was applied — tip advanced.
+        assert_eq!(state.tip.block_number, BlockNo(1));
+    }
+
+    // ── Test 15: Certificate processing — StakeRegistration per tx ───────────
+
+    #[test]
+    fn test_certificate_processing_order() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+        // Two credentials to register via StakeRegistration certs.
+        let cred1 = Credential::VerificationKey(Hash28::from_bytes([0x0Fu8; 28]));
+        let cred2 = Credential::VerificationKey(Hash28::from_bytes([0x1Fu8; 28]));
+        let key1 = cred1.to_typed_hash32();
+        let key2 = cred2.to_typed_hash32();
+
+        // tx1 registers cred1; tx2 registers cred2.
+        let mut tx1 = Transaction::empty_with_hash(Hash32::from_bytes([0xF0u8; 32]));
+        tx1.body.certificates = vec![Certificate::StakeRegistration(cred1)];
+
+        let mut tx2 = Transaction::empty_with_hash(Hash32::from_bytes([0xF1u8; 32]));
+        tx2.body.certificates = vec![Certificate::StakeRegistration(cred2)];
+
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, vec![tx1, tx2]);
+
+        state
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Block with stake-registration certs should apply");
+
+        // Both credentials must now have a reward-account entry.
+        let reward_accounts = &*state.reward_accounts;
+        assert!(
+            reward_accounts.contains_key(&key1),
+            "cred1 must be registered in reward_accounts"
+        );
+        assert!(
+            reward_accounts.contains_key(&key2),
+            "cred2 must be registered in reward_accounts"
+        );
+    }
+}
