@@ -183,3 +183,162 @@ pub struct LedgerStateSnapshot {
     #[serde(default)]
     pub pool_deposits: HashMap<Hash28, u64>,
 }
+
+// ── From conversions for snapshot roundtrip ─────────────────────────
+
+impl From<&super::LedgerState> for LedgerStateSnapshot {
+    fn from(s: &super::LedgerState) -> Self {
+        LedgerStateSnapshot {
+            utxo_set: s.utxo_set.clone(),
+            tip: s.tip.clone(),
+            era: s.era,
+            pending_era_transition: s.pending_era_transition,
+            epoch: s.epoch,
+            epoch_length: s.epoch_length,
+            shelley_transition_epoch: s.shelley_transition_epoch,
+            byron_epoch_length: s.byron_epoch_length,
+            protocol_params: s.protocol_params.clone(),
+            prev_protocol_params: s.prev_protocol_params.clone(),
+            prev_d: s.prev_d,
+            prev_protocol_version_major: s.prev_protocol_version_major,
+            stake_distribution: s.stake_distribution.clone(),
+            treasury: s.treasury,
+            pending_donations: s.pending_donations,
+            reserves: s.reserves,
+            delegations: Arc::clone(&s.delegations),
+            pool_params: Arc::clone(&s.pool_params),
+            future_pool_params: s.future_pool_params.clone(),
+            pending_retirements: s.pending_retirements.clone(),
+            snapshots: s.snapshots.clone(),
+            reward_accounts: Arc::clone(&s.reward_accounts),
+            pointer_map: s.pointer_map.clone(),
+            genesis_delegates: s.genesis_delegates.clone(),
+            epoch_fees: s.epoch_fees,
+            epoch_blocks_by_pool: Arc::clone(&s.epoch_blocks_by_pool),
+            epoch_block_count: s.epoch_block_count,
+            evolving_nonce: s.evolving_nonce,
+            candidate_nonce: s.candidate_nonce,
+            epoch_nonce: s.epoch_nonce,
+            lab_nonce: s.lab_nonce,
+            last_epoch_block_nonce: s.last_epoch_block_nonce,
+            randomness_stabilisation_window: s.randomness_stabilisation_window,
+            stability_window_3kf: s.stability_window_3kf,
+            genesis_hash: s.genesis_hash,
+            // Legacy fields: access private fields from parent module
+            rolling_nonce: s.rolling_nonce,
+            stability_window: s.stability_window,
+            first_block_hash_of_epoch: s.first_block_hash_of_epoch,
+            prev_epoch_first_block_hash: s.prev_epoch_first_block_hash,
+            pending_pp_updates: s.pending_pp_updates.clone(),
+            future_pp_updates: s.future_pp_updates.clone(),
+            update_quorum: s.update_quorum,
+            governance: Arc::clone(&s.governance),
+            slot_config: s.slot_config,
+            needs_stake_rebuild: s.needs_stake_rebuild,
+            ptr_stake: s.ptr_stake.clone(),
+            ptr_stake_excluded: s.ptr_stake_excluded,
+            pending_reward_update: s.pending_reward_update.clone(),
+            total_stake_key_deposits: s.total_stake_key_deposits,
+            script_stake_credentials: s.script_stake_credentials.clone(),
+            diff_seq: s.diff_seq.clone(),
+            node_network: s.node_network,
+            opcert_counters: s.opcert_counters.clone(),
+            stake_key_deposits: s.stake_key_deposits.clone(),
+            pool_deposits: s.pool_deposits.clone(),
+        }
+    }
+}
+
+impl From<LedgerStateSnapshot> for super::LedgerState {
+    fn from(s: LedgerStateSnapshot) -> Self {
+        super::LedgerState {
+            utxo_set: s.utxo_set,
+            tip: s.tip,
+            era: s.era,
+            pending_era_transition: s.pending_era_transition,
+            epoch: s.epoch,
+            epoch_length: s.epoch_length,
+            shelley_transition_epoch: s.shelley_transition_epoch,
+            byron_epoch_length: s.byron_epoch_length,
+            protocol_params: s.protocol_params,
+            prev_protocol_params: s.prev_protocol_params,
+            prev_d: s.prev_d,
+            prev_protocol_version_major: s.prev_protocol_version_major,
+            stake_distribution: s.stake_distribution,
+            treasury: s.treasury,
+            pending_donations: s.pending_donations,
+            reserves: s.reserves,
+            delegations: s.delegations,
+            pool_params: s.pool_params,
+            future_pool_params: s.future_pool_params,
+            pending_retirements: s.pending_retirements,
+            snapshots: s.snapshots,
+            reward_accounts: s.reward_accounts,
+            pointer_map: s.pointer_map,
+            genesis_delegates: s.genesis_delegates,
+            epoch_fees: s.epoch_fees,
+            epoch_blocks_by_pool: s.epoch_blocks_by_pool,
+            epoch_block_count: s.epoch_block_count,
+            evolving_nonce: s.evolving_nonce,
+            candidate_nonce: s.candidate_nonce,
+            epoch_nonce: s.epoch_nonce,
+            lab_nonce: s.lab_nonce,
+            last_epoch_block_nonce: s.last_epoch_block_nonce,
+            randomness_stabilisation_window: s.randomness_stabilisation_window,
+            stability_window_3kf: s.stability_window_3kf,
+            genesis_hash: s.genesis_hash,
+            // Legacy fields: access private fields from parent module
+            rolling_nonce: s.rolling_nonce,
+            stability_window: s.stability_window,
+            first_block_hash_of_epoch: s.first_block_hash_of_epoch,
+            prev_epoch_first_block_hash: s.prev_epoch_first_block_hash,
+            pending_pp_updates: s.pending_pp_updates,
+            future_pp_updates: s.future_pp_updates,
+            update_quorum: s.update_quorum,
+            governance: s.governance,
+            slot_config: s.slot_config,
+            needs_stake_rebuild: s.needs_stake_rebuild,
+            ptr_stake: s.ptr_stake,
+            ptr_stake_excluded: s.ptr_stake_excluded,
+            pending_reward_update: s.pending_reward_update,
+            total_stake_key_deposits: s.total_stake_key_deposits,
+            script_stake_credentials: s.script_stake_credentials,
+            diff_seq: s.diff_seq,
+            node_network: s.node_network,
+            opcert_counters: s.opcert_counters,
+            stake_key_deposits: s.stake_key_deposits,
+            pool_deposits: s.pool_deposits,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::LedgerState;
+
+    #[test]
+    fn test_ledger_state_snapshot_roundtrip() {
+        // Create a LedgerState with non-default values to catch field mismatches
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch = EpochNo(42);
+        state.treasury = Lovelace(1_000_000);
+        state.reserves = Lovelace(999_000_000);
+
+        // Convert to snapshot format
+        let snapshot = LedgerStateSnapshot::from(&state);
+
+        // Convert back
+        let restored = LedgerState::from(snapshot);
+
+        // Verify key fields survive the roundtrip
+        assert_eq!(restored.epoch, state.epoch);
+        assert_eq!(restored.treasury, state.treasury);
+        assert_eq!(restored.reserves, state.reserves);
+        assert_eq!(restored.era, state.era);
+        assert_eq!(
+            restored.protocol_params.protocol_version_major,
+            state.protocol_params.protocol_version_major
+        );
+    }
+}
