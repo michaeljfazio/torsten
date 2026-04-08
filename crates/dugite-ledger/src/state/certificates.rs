@@ -1223,3 +1223,584 @@ impl LedgerState {
         Hash32::from_bytes(key_bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{credential_to_hash, LedgerState};
+    use dugite_primitives::credentials::{Credential, Pointer};
+    use dugite_primitives::hash::{Hash28, Hash32};
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::time::EpochNo;
+    use dugite_primitives::transaction::{Anchor, Certificate, DRep, PoolParams, Rational};
+    use dugite_primitives::value::Lovelace;
+    use std::sync::Arc;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// A deterministic 28-byte key credential for use in tests.
+    fn test_credential() -> Credential {
+        Credential::VerificationKey(Hash28::from_bytes([0x01u8; 28]))
+    }
+
+    /// A second credential used when a test needs two distinct credentials.
+    fn test_credential_2() -> Credential {
+        Credential::VerificationKey(Hash28::from_bytes([0x02u8; 28]))
+    }
+
+    /// A deterministic pool hash used in pool-related tests.
+    fn test_pool_hash() -> Hash28 {
+        Hash28::from_bytes([0xAAu8; 28])
+    }
+
+    /// Minimal valid PoolParams for pool registration tests.
+    fn test_pool_params(operator: Hash28) -> PoolParams {
+        PoolParams {
+            operator,
+            vrf_keyhash: Hash32::from_bytes([0xBBu8; 32]),
+            pledge: Lovelace(500_000_000),
+            cost: Lovelace(340_000_000),
+            margin: Rational {
+                numerator: 1,
+                denominator: 20,
+            },
+            reward_account: vec![0xe0u8; 29], // key-type reward address placeholder
+            pool_owners: vec![],
+            relays: vec![],
+            pool_metadata: None,
+        }
+    }
+
+    /// Create a fresh `LedgerState` with mainnet default protocol parameters.
+    fn make_state() -> LedgerState {
+        LedgerState::new(ProtocolParameters::mainnet_defaults())
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1 — StakeRegistration
+    // -----------------------------------------------------------------------
+
+    /// Processing a StakeRegistration certificate must:
+    ///  - insert the credential hash into `reward_accounts` with a zero balance;
+    ///  - insert the same hash into `stake_key_deposits` with the current
+    ///    `key_deposit` amount (2 ADA = 2_000_000 lovelace on mainnet).
+    #[test]
+    fn test_stake_registration() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+
+        state.process_certificate(&Certificate::StakeRegistration(cred));
+
+        // reward_accounts: key present, balance = 0
+        assert_eq!(
+            state.reward_accounts.get(&key).copied(),
+            Some(Lovelace(0)),
+            "reward_accounts should contain the registered credential with zero balance"
+        );
+        // stake_key_deposits: key present, amount = key_deposit
+        assert_eq!(
+            state.stake_key_deposits.get(&key).copied(),
+            Some(state.protocol_params.key_deposit.0),
+            "stake_key_deposits should record the 2 ADA deposit"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2 — StakeDeregistration
+    // -----------------------------------------------------------------------
+
+    /// Deregistering a previously-registered credential must:
+    ///  - remove the entry from `delegations`;
+    ///  - remove the entry from `reward_accounts`;
+    ///  - leave `stake_distribution.stake_map` intact (UTxOs may still exist);
+    ///  - remove the entry from `stake_key_deposits`.
+    #[test]
+    fn test_stake_deregistration() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+
+        // Pre-register
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+        // Also add a delegation so we can verify it gets removed
+        Arc::make_mut(&mut state.delegations).insert(key, test_pool_hash());
+        // Manually plant a stake_map entry (simulating a UTxO at this credential)
+        state
+            .stake_distribution
+            .stake_map
+            .insert(key, Lovelace(5_000_000));
+
+        // Now deregister
+        state.process_certificate(&Certificate::StakeDeregistration(cred));
+
+        // delegations: removed
+        assert!(
+            !state.delegations.contains_key(&key),
+            "delegation should be removed on deregistration"
+        );
+        // reward_accounts: removed
+        assert!(
+            !state.reward_accounts.contains_key(&key),
+            "reward_accounts entry should be removed on deregistration"
+        );
+        // stake_map: NOT removed — UTxOs can still exist
+        assert!(
+            state.stake_distribution.stake_map.contains_key(&key),
+            "stake_map should NOT be removed on deregistration (UTxOs may still exist)"
+        );
+        // stake_key_deposits: removed
+        assert!(
+            !state.stake_key_deposits.contains_key(&key),
+            "stake_key_deposits should be removed after deregistration"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3 — StakeDelegation
+    // -----------------------------------------------------------------------
+
+    /// A StakeDelegation certificate must insert `pool_hash` into
+    /// `delegations` keyed by the credential hash.
+    #[test]
+    fn test_stake_delegation() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let pool = test_pool_hash();
+        let key = credential_to_hash(&cred);
+
+        state.process_certificate(&Certificate::StakeDelegation {
+            credential: cred,
+            pool_hash: pool,
+        });
+
+        assert_eq!(
+            state.delegations.get(&key).copied(),
+            Some(pool),
+            "delegations should map the credential hash to the target pool"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4 — PoolRegistration (first registration)
+    // -----------------------------------------------------------------------
+
+    /// Registering a pool for the first time must:
+    ///  - insert the pool into `pool_params` immediately;
+    ///  - record the pool deposit in `pool_deposits`.
+    #[test]
+    fn test_pool_registration() {
+        let mut state = make_state();
+        let operator = test_pool_hash();
+        let params = test_pool_params(operator);
+
+        state.process_certificate(&Certificate::PoolRegistration(params));
+
+        assert!(
+            state.pool_params.contains_key(&operator),
+            "pool_params should contain the newly registered pool"
+        );
+        assert_eq!(
+            state.pool_deposits.get(&operator).copied(),
+            Some(state.protocol_params.pool_deposit.0),
+            "pool_deposits should record the 500 ADA deposit"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5 — PoolRegistration re-registration (staged)
+    // -----------------------------------------------------------------------
+
+    /// Re-registering an existing pool must defer the new parameters to
+    /// `future_pool_params` (applied at the next epoch boundary) and must
+    /// NOT record an additional deposit entry.
+    #[test]
+    fn test_pool_reregistration_staged() {
+        let mut state = make_state();
+        let operator = test_pool_hash();
+        let params = test_pool_params(operator);
+
+        // First registration — goes to pool_params directly
+        state.process_certificate(&Certificate::PoolRegistration(params.clone()));
+        let initial_deposit = state.pool_deposits.get(&operator).copied();
+
+        // Second registration — must be deferred
+        let mut updated_params = params;
+        updated_params.pledge = Lovelace(1_000_000_000);
+        state.process_certificate(&Certificate::PoolRegistration(updated_params.clone()));
+
+        // New params must appear in future_pool_params
+        assert!(
+            state.future_pool_params.contains_key(&operator),
+            "re-registration should stage params in future_pool_params"
+        );
+        // pool_deposits must not gain a new entry (deposit was already paid)
+        assert_eq!(
+            state.pool_deposits.get(&operator).copied(),
+            initial_deposit,
+            "re-registration should not record a second deposit"
+        );
+        // The staged pledge must match what we submitted
+        assert_eq!(
+            state.future_pool_params.get(&operator).map(|r| r.pledge),
+            Some(Lovelace(1_000_000_000)),
+            "future_pool_params should hold the updated pledge"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6 — PoolRetirement
+    // -----------------------------------------------------------------------
+
+    /// A PoolRetirement certificate must add the pool to `pending_retirements`
+    /// at the requested epoch.
+    #[test]
+    fn test_pool_retirement() {
+        let mut state = make_state();
+        let pool = test_pool_hash();
+        let retirement_epoch: u64 = 500;
+
+        state.process_certificate(&Certificate::PoolRetirement {
+            pool_hash: pool,
+            epoch: retirement_epoch,
+        });
+
+        assert_eq!(
+            state.pending_retirements.get(&pool).copied(),
+            Some(EpochNo(retirement_epoch)),
+            "pending_retirements should contain the pool at the requested epoch"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7 — ConwayStakeRegistration (deposit from cert, not key_deposit)
+    // -----------------------------------------------------------------------
+
+    /// A ConwayStakeRegistration with an explicit deposit must store the
+    /// current `key_deposit` in `stake_key_deposits`, NOT the explicit cert
+    /// deposit amount.  (The production code stores `protocol_params.key_deposit`
+    /// for this cert variant, matching Haskell's Conway DELEG rule: the deposit
+    /// recorded in the UMap is always the current key_deposit, independent of
+    /// the explicit cert field.)
+    #[test]
+    fn test_conway_stake_registration() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+
+        // Emit a Conway registration cert with a different explicit deposit
+        state.process_certificate(&Certificate::ConwayStakeRegistration {
+            credential: cred,
+            deposit: Lovelace(3_000_000),
+        });
+
+        // The deposit stored is key_deposit (2 ADA), not the cert's 3 ADA
+        assert_eq!(
+            state.stake_key_deposits.get(&key).copied(),
+            Some(state.protocol_params.key_deposit.0),
+            "stake_key_deposits should store key_deposit, not the cert's explicit deposit"
+        );
+        // reward_accounts must be populated
+        assert!(
+            state.reward_accounts.contains_key(&key),
+            "reward_accounts should contain the registered credential"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8 — ConwayStakeDeregistration
+    // -----------------------------------------------------------------------
+
+    /// Deregistering via a Conway cert must behave identically to classic
+    /// deregistration: delegations and reward_accounts are removed.
+    #[test]
+    fn test_conway_stake_deregistration() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+
+        // Pre-register using Conway cert
+        state.process_certificate(&Certificate::ConwayStakeRegistration {
+            credential: cred.clone(),
+            deposit: Lovelace(2_000_000),
+        });
+        Arc::make_mut(&mut state.delegations).insert(key, test_pool_hash());
+
+        // Deregister
+        state.process_certificate(&Certificate::ConwayStakeDeregistration {
+            credential: cred,
+            refund: Lovelace(2_000_000),
+        });
+
+        assert!(
+            !state.delegations.contains_key(&key),
+            "delegation should be removed after ConwayStakeDeregistration"
+        );
+        assert!(
+            !state.reward_accounts.contains_key(&key),
+            "reward_accounts entry should be removed after ConwayStakeDeregistration"
+        );
+        assert!(
+            !state.stake_key_deposits.contains_key(&key),
+            "stake_key_deposits should be removed after ConwayStakeDeregistration"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9 — RegDRep (DRep registration)
+    // -----------------------------------------------------------------------
+
+    /// Registering a DRep must insert a DRepRegistration entry into
+    /// `governance.dreps` with the correct deposit.
+    #[test]
+    fn test_drep_registration() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+        let deposit = Lovelace(500_000_000);
+
+        state.process_certificate(&Certificate::RegDRep {
+            credential: cred,
+            deposit,
+            anchor: None,
+        });
+
+        let gov = &state.governance;
+        let drep = gov
+            .dreps
+            .get(&key)
+            .expect("governance.dreps should contain the registered DRep");
+
+        assert_eq!(
+            drep.deposit, deposit,
+            "DRep deposit should match the cert value"
+        );
+        assert!(drep.active, "newly-registered DRep should be active");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10 — UnregDRep (DRep deregistration)
+    // -----------------------------------------------------------------------
+
+    /// Deregistering a DRep must remove the entry from `governance.dreps` and
+    /// credit the deposit back to the credential's reward account.
+    #[test]
+    fn test_drep_unregistration() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+        let deposit = Lovelace(500_000_000);
+
+        // Register first
+        state.process_certificate(&Certificate::RegDRep {
+            credential: cred.clone(),
+            deposit,
+            anchor: None,
+        });
+        // Also register as a stake key so the reward_accounts entry exists
+        state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
+
+        // Deregister DRep
+        state.process_certificate(&Certificate::UnregDRep {
+            credential: cred,
+            refund: deposit,
+        });
+
+        // dreps entry must be gone
+        assert!(
+            !state.governance.dreps.contains_key(&key),
+            "governance.dreps should not contain the deregistered DRep"
+        );
+        // deposit must be refunded to reward account
+        let balance = state
+            .reward_accounts
+            .get(&key)
+            .copied()
+            .unwrap_or(Lovelace(0));
+        assert_eq!(
+            balance, deposit,
+            "deposit should be credited back to the DRep's reward account"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11 — UpdateDRep
+    // -----------------------------------------------------------------------
+
+    /// UpdateDRep must update the anchor on the DRep's registration record
+    /// without changing the deposit.
+    #[test]
+    fn test_drep_update() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+        let deposit = Lovelace(500_000_000);
+
+        // Register first
+        state.process_certificate(&Certificate::RegDRep {
+            credential: cred.clone(),
+            deposit,
+            anchor: None,
+        });
+
+        let new_anchor = Anchor {
+            url: "https://example.com/drep-metadata.json".to_string(),
+            data_hash: Hash32::from_bytes([0xCCu8; 32]),
+        };
+
+        state.process_certificate(&Certificate::UpdateDRep {
+            credential: cred,
+            anchor: Some(new_anchor.clone()),
+        });
+
+        let drep = state
+            .governance
+            .dreps
+            .get(&key)
+            .expect("DRep should still be registered after UpdateDRep");
+
+        assert_eq!(
+            drep.anchor.as_ref(),
+            Some(&new_anchor),
+            "DRep anchor should be updated"
+        );
+        assert_eq!(
+            drep.deposit, deposit,
+            "DRep deposit must be unchanged after update"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12 — VoteDelegation
+    // -----------------------------------------------------------------------
+
+    /// A VoteDelegation cert must insert the DRep into
+    /// `governance.vote_delegations` keyed by the credential hash.
+    #[test]
+    fn test_vote_delegation() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+
+        state.process_certificate(&Certificate::VoteDelegation {
+            credential: cred,
+            drep: DRep::Abstain,
+        });
+
+        assert_eq!(
+            state.governance.vote_delegations.get(&key).cloned(),
+            Some(DRep::Abstain),
+            "governance.vote_delegations should map the credential to DRep::Abstain"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13 — CommitteeHotAuth
+    // -----------------------------------------------------------------------
+
+    /// A CommitteeHotAuth cert must insert the hot credential hash into
+    /// `governance.committee_hot_keys` keyed by the cold credential hash.
+    #[test]
+    fn test_committee_hot_auth() {
+        let mut state = make_state();
+        let cold_cred = test_credential();
+        let hot_cred = test_credential_2();
+        let cold_key = credential_to_hash(&cold_cred);
+        let hot_key = credential_to_hash(&hot_cred);
+
+        state.process_certificate(&Certificate::CommitteeHotAuth {
+            cold_credential: cold_cred,
+            hot_credential: hot_cred,
+        });
+
+        assert_eq!(
+            state.governance.committee_hot_keys.get(&cold_key).copied(),
+            Some(hot_key),
+            "committee_hot_keys should map cold credential hash to hot credential hash"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14 — CommitteeColdResign
+    // -----------------------------------------------------------------------
+
+    /// A CommitteeColdResign cert must insert the cold credential hash into
+    /// `governance.committee_resigned` and remove any hot key mapping.
+    #[test]
+    fn test_committee_cold_resign() {
+        let mut state = make_state();
+        let cold_cred = test_credential();
+        let hot_cred = test_credential_2();
+        let cold_key = credential_to_hash(&cold_cred);
+
+        // First authorize a hot key so we can verify it gets cleared
+        state.process_certificate(&Certificate::CommitteeHotAuth {
+            cold_credential: cold_cred.clone(),
+            hot_credential: hot_cred,
+        });
+        assert!(
+            state.governance.committee_hot_keys.contains_key(&cold_key),
+            "hot key should be present before resignation"
+        );
+
+        // Now resign
+        state.process_certificate(&Certificate::CommitteeColdResign {
+            cold_credential: cold_cred,
+            anchor: None,
+        });
+
+        // committee_resigned must contain the cold key
+        assert!(
+            state.governance.committee_resigned.contains_key(&cold_key),
+            "governance.committee_resigned should contain the cold credential hash"
+        );
+        // committee_hot_keys must no longer contain the cold key
+        assert!(
+            !state.governance.committee_hot_keys.contains_key(&cold_key),
+            "committee_hot_keys should be cleared on resignation"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15 — process_certificate_with_pointer
+    // -----------------------------------------------------------------------
+
+    /// Processing a StakeRegistration via `process_certificate_with_pointer`
+    /// must create a pointer_map entry for (slot, tx_index, cert_index) →
+    /// credential_hash.
+    #[test]
+    fn test_pointer_address_tracking() {
+        let mut state = make_state();
+        let cred = test_credential();
+        let key = credential_to_hash(&cred);
+
+        let slot: u64 = 100;
+        let tx_index: u64 = 2;
+        let cert_index: u64 = 0;
+
+        state.process_certificate_with_pointer(
+            &Certificate::StakeRegistration(cred),
+            slot,
+            tx_index,
+            cert_index,
+        );
+
+        let expected_pointer = Pointer {
+            slot,
+            tx_index,
+            cert_index,
+        };
+
+        assert_eq!(
+            state.pointer_map.get(&expected_pointer).copied(),
+            Some(key),
+            "pointer_map should map the (slot, tx_index, cert_index) pointer to the credential hash"
+        );
+        // The standard registration side-effects must also occur
+        assert!(
+            state.reward_accounts.contains_key(&key),
+            "reward_accounts should be populated by process_certificate_with_pointer"
+        );
+    }
+}
