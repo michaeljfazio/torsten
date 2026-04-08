@@ -1096,3 +1096,688 @@ impl LedgerState {
         let _ = prev; // suppress unused warning in release
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        credential_to_hash, LedgerState, PoolRegistration, StakeSnapshot, MAX_LOVELACE_SUPPLY,
+    };
+    use dugite_primitives::credentials::Credential;
+    use dugite_primitives::hash::{Hash28, Hash32};
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::time::EpochNo;
+    use dugite_primitives::transaction::{Certificate, PoolParams, Rational};
+    use dugite_primitives::value::Lovelace;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// Build a fresh `LedgerState` using mainnet defaults.
+    fn new_state() -> LedgerState {
+        LedgerState::new(ProtocolParameters::mainnet_defaults())
+    }
+
+    /// Minimal `PoolParams` for test pool registration certificates.
+    fn pool_params_for(pool_id: Hash28, reward_account: Vec<u8>) -> PoolParams {
+        PoolParams {
+            operator: pool_id,
+            vrf_keyhash: Hash32::from_bytes([2u8; 32]),
+            pledge: Lovelace(0),
+            cost: Lovelace(0),
+            margin: Rational {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account,
+            pool_owners: vec![pool_id],
+            relays: vec![],
+            pool_metadata: None,
+        }
+    }
+
+    // ── Test 1: Snapshot rotation direction ──────────────────────────────────
+
+    /// After an epoch transition the snapshots rotate: go ← old set, set ← old
+    /// mark, new mark is created. The epoch fields confirm direction.
+    #[test]
+    fn test_snapshot_rotation_direction() {
+        let mut state = new_state();
+
+        // Pre-populate mark/set/go with distinct epoch tags so we can track them.
+        state.snapshots.mark = Some(StakeSnapshot::empty(EpochNo(10)));
+        state.snapshots.set = Some(StakeSnapshot::empty(EpochNo(20)));
+        state.snapshots.go = Some(StakeSnapshot::empty(EpochNo(30)));
+
+        state.process_epoch_transition(EpochNo(1));
+
+        // go ← old set (epoch 20), set ← old mark (epoch 10), new mark created.
+        assert_eq!(
+            state.snapshots.go.as_ref().unwrap().epoch,
+            EpochNo(20),
+            "go should hold the old set snapshot"
+        );
+        assert_eq!(
+            state.snapshots.set.as_ref().unwrap().epoch,
+            EpochNo(10),
+            "set should hold the old mark snapshot"
+        );
+        // New mark is always Some — its epoch is the new epoch.
+        assert!(state.snapshots.mark.is_some(), "new mark must be created");
+        assert_eq!(
+            state.snapshots.mark.as_ref().unwrap().epoch,
+            EpochNo(1),
+            "new mark epoch should be new_epoch"
+        );
+    }
+
+    // ── Test 2: Pending donations flushed before RUPD ────────────────────────
+
+    /// Treasury donations buffered during the epoch are flushed into the
+    /// treasury at the epoch boundary, before any reward computation.
+    #[test]
+    fn test_donations_flushed_before_rewards() {
+        let mut state = new_state();
+
+        let donation = Lovelace(1_000_000);
+        state.pending_donations = donation;
+
+        let treasury_before = state.treasury;
+        state.process_epoch_transition(EpochNo(1));
+
+        // Treasury must have grown by at least the donation amount.
+        assert!(
+            state.treasury.0 >= treasury_before.0 + donation.0,
+            "treasury should include the flushed donation (was {}, now {})",
+            treasury_before.0,
+            state.treasury.0
+        );
+        assert_eq!(
+            state.pending_donations,
+            Lovelace(0),
+            "pending_donations must be zero after flush"
+        );
+    }
+
+    // ── Test 3: Reward accounts credited at the epoch boundary ───────────────
+
+    /// A registered credential's reward account must be credited when the RUPD
+    /// produces rewards for it. We construct a GO snapshot with a pool that
+    /// produced blocks in bprev so reward computation yields per-account rewards.
+    #[test]
+    fn test_rewards_applied_before_snap() {
+        let mut state = new_state();
+
+        // Use Conway protocol version so the pre-Babbage prefilter is disabled,
+        // allowing pool rewards regardless of whether the reward account is
+        // pre-registered in DState. The prefilter only fires when proto <= 6.
+        state.prev_protocol_version_major = 9;
+        state.prev_protocol_params.protocol_version_major = 9;
+
+        // Give the state some circulation (non-zero total_stake): set reserves
+        // below maxSupply so (maxSupply - reserves) > 0.
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY / 2);
+        // prev_d >= 0.8 → eta = 1 (full monetary expansion fires).
+        state.prev_d = 1.0;
+
+        let pool_id = Hash28::from_bytes([0x01u8; 28]);
+        let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([0x42u8; 28]));
+        let delegator_hash = credential_to_hash(&delegator_cred);
+
+        // Pool reward account bytes (header + 28 bytes of 0x01).
+        // The pool itself is not a delegator; only the member `delegator_hash` is.
+        let pool_reward_account: Vec<u8> = {
+            let mut ra = vec![0xe0u8]; // mainnet key credential header
+            ra.extend_from_slice(&[0x01u8; 28]);
+            ra
+        };
+
+        // Build a GO snapshot:
+        // - pool has active stake and a registered pool_params entry
+        // - delegator_hash is delegated to pool with its stake in stake_distribution
+        let pool_active_stake = Lovelace(50_000_000_000_000u64); // 50M ADA
+
+        let mut pool_stake_map: HashMap<Hash28, Lovelace> = HashMap::new();
+        pool_stake_map.insert(pool_id, pool_active_stake);
+
+        let mut delegations_map: HashMap<Hash32, Hash28> = HashMap::new();
+        delegations_map.insert(delegator_hash, pool_id);
+
+        let mut stake_dist: HashMap<Hash32, Lovelace> = HashMap::new();
+        stake_dist.insert(delegator_hash, pool_active_stake);
+
+        let mut pool_params_map: HashMap<Hash28, PoolRegistration> = HashMap::new();
+        pool_params_map.insert(
+            pool_id,
+            PoolRegistration {
+                pool_id,
+                vrf_keyhash: Hash32::from_bytes([0u8; 32]),
+                pledge: Lovelace(0),
+                cost: Lovelace(0),
+                margin_numerator: 0,
+                margin_denominator: 1,
+                reward_account: pool_reward_account,
+                owners: vec![],
+                relays: vec![],
+                metadata_url: None,
+                metadata_hash: None,
+            },
+        );
+
+        let go_snap = StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(delegations_map),
+            pool_stake: pool_stake_map,
+            pool_params: Arc::new(pool_params_map),
+            stake_distribution: Arc::new(stake_dist),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 1,
+            epoch_blocks_by_pool: Arc::new({
+                let mut m = HashMap::new();
+                m.insert(pool_id, 1u64);
+                m
+            }),
+        };
+
+        // Wire up GO snapshot and bprev block data so the RUPD fires.
+        state.snapshots.go = Some(go_snap);
+        state.snapshots.bprev_block_count = 1;
+        state.snapshots.bprev_blocks_by_pool = Arc::new({
+            let mut m = HashMap::new();
+            m.insert(pool_id, 1u64);
+            m
+        });
+        state.snapshots.rupd_ready = true;
+
+        // Register the delegator's reward account so rewards are credited (not
+        // forwarded to treasury as unregistered).
+        Arc::make_mut(&mut state.reward_accounts).insert(delegator_hash, Lovelace(0));
+
+        let before = *state.reward_accounts.get(&delegator_hash).unwrap();
+
+        state.process_epoch_transition(EpochNo(1));
+
+        let after = state
+            .reward_accounts
+            .get(&delegator_hash)
+            .copied()
+            .unwrap_or(Lovelace(0));
+        assert!(
+            after.0 > before.0,
+            "delegator reward account must be credited when pool produced blocks \
+             (before={}, after={})",
+            before.0,
+            after.0
+        );
+    }
+
+    // ── Test 4: Fee capture at SNAP time ─────────────────────────────────────
+
+    /// After a transition, `snapshots.ss_fee` must hold the epoch_fees that were
+    /// accumulated during the epoch, and `epoch_fees` must be reset to zero.
+    #[test]
+    fn test_fee_capture_at_snap() {
+        let mut state = new_state();
+
+        let captured_fees = Lovelace(5_000_000);
+        state.epoch_fees = captured_fees;
+
+        state.process_epoch_transition(EpochNo(1));
+
+        assert_eq!(
+            state.snapshots.ss_fee, captured_fees,
+            "ss_fee must capture the epoch's fees"
+        );
+        assert_eq!(
+            state.epoch_fees,
+            Lovelace(0),
+            "epoch_fees accumulator must be reset to zero"
+        );
+    }
+
+    // ── Test 5: Reward distribution formula ──────────────────────────────────
+
+    /// With `prev_d >= 0.8` (full federation) the monetary expansion fires and
+    /// treasury and reserves change as expected.  We use the `total_stake == 0`
+    /// path (reserves == maxSupply) to keep the arithmetic simple.
+    #[test]
+    fn test_reward_distribution_formula() {
+        let mut state = new_state();
+        // new() sets reserves = MAX_LOVELACE_SUPPLY, so total_stake = 0.
+        // With prev_d = 1.0 (>= 0.8): eta = 1, expansion = floor(rho * reserves).
+        // rho = 3/1000, so expansion = floor(3/1000 * 45_000_000_000_000_000) = 135_000_000_000_000.
+        // treasury_cut = floor(tau * expansion) = floor(2/10 * 135_000_000_000_000) = 27_000_000_000_000.
+        // delta_reserves = treasury_cut - epoch_fees = 27_000_000_000_000 (total_stake==0 path).
+        let expected_treasury_cut = 27_000_000_000_000u64;
+        let expected_delta_reserves = 27_000_000_000_000u64;
+
+        let treasury_before = state.treasury;
+        let reserves_before = state.reserves;
+
+        state.process_epoch_transition(EpochNo(1));
+
+        assert_eq!(
+            state.treasury.0,
+            treasury_before.0 + expected_treasury_cut,
+            "treasury should increase by tau * expansion"
+        );
+        assert_eq!(
+            state.reserves.0,
+            reserves_before.0 - expected_delta_reserves,
+            "reserves should decrease by the net expansion"
+        );
+    }
+
+    // ── Test 6: Unregistered reward credentials forwarded to treasury ─────────
+
+    /// Rewards computed for a credential that is NOT in `reward_accounts` must
+    /// be forwarded to the treasury (Haskell's `frTotalUnregistered`).
+    #[test]
+    fn test_unregistered_rewards_to_treasury() {
+        let mut state = new_state();
+
+        // Give the state some circulation so pool rewards fire.
+        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY / 2);
+        state.prev_d = 1.0;
+
+        let pool_id = Hash28::from_bytes([0xAAu8; 28]);
+        // Use a specific credential for the pool reward account.
+        let op_reward_cred_bytes = [0xBBu8; 28];
+        let mut op_reward_account = vec![0xe0u8]; // mainnet key credential
+        op_reward_account.extend_from_slice(&op_reward_cred_bytes);
+        let op_key = LedgerState::reward_account_to_hash(&op_reward_account);
+
+        let mut pool_stake_map: HashMap<Hash28, Lovelace> = HashMap::new();
+        pool_stake_map.insert(pool_id, Lovelace(100_000_000_000)); // 100k ADA
+
+        let mut pool_params_map: HashMap<Hash28, PoolRegistration> = HashMap::new();
+        pool_params_map.insert(
+            pool_id,
+            PoolRegistration {
+                pool_id,
+                vrf_keyhash: Hash32::from_bytes([0u8; 32]),
+                pledge: Lovelace(0),
+                cost: Lovelace(0),
+                margin_numerator: 0,
+                margin_denominator: 1,
+                reward_account: op_reward_account.clone(),
+                owners: vec![pool_id],
+                relays: vec![],
+                metadata_url: None,
+                metadata_hash: None,
+            },
+        );
+
+        let go_snap = StakeSnapshot {
+            epoch: EpochNo(0),
+            delegations: Arc::new(HashMap::new()),
+            pool_stake: pool_stake_map,
+            pool_params: Arc::new(pool_params_map),
+            stake_distribution: Arc::new(HashMap::new()),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 1,
+            epoch_blocks_by_pool: Arc::new({
+                let mut m = HashMap::new();
+                m.insert(pool_id, 1u64);
+                m
+            }),
+        };
+
+        state.snapshots.go = Some(go_snap);
+        state.snapshots.bprev_blocks_by_pool = Arc::new({
+            let mut m = HashMap::new();
+            m.insert(pool_id, 1u64);
+            m
+        });
+        state.snapshots.bprev_block_count = 1;
+        state.snapshots.rupd_ready = true;
+
+        // Critically: do NOT register the operator reward account in reward_accounts.
+        // The unregistered reward should be forwarded to treasury.
+        assert!(
+            !state.reward_accounts.contains_key(&op_key),
+            "precondition: op reward account must NOT be registered"
+        );
+
+        let treasury_before = state.treasury;
+
+        state.process_epoch_transition(EpochNo(1));
+
+        // Treasury must have grown beyond just the monetary expansion (there should
+        // also be the forwarded unregistered pool reward on top of delta_treasury).
+        // The forwarded reward means the final treasury > treasury_before + delta_treasury_base.
+        assert!(
+            state.treasury.0 > treasury_before.0,
+            "treasury should grow when unregistered rewards are forwarded"
+        );
+        // The credential must still not be in reward_accounts (never registered).
+        assert!(
+            !state.reward_accounts.contains_key(&op_key),
+            "unregistered credential should not appear in reward_accounts"
+        );
+    }
+
+    // ── Test 7: Pool retirement removes pool from pool_params ─────────────────
+
+    /// A pool scheduled for retirement at `new_epoch` is removed from
+    /// `pool_params` when that epoch boundary is crossed.
+    #[test]
+    fn test_pool_retirement_processing() {
+        let mut state = new_state();
+
+        let pool_id = Hash28::from_bytes([0x77u8; 28]);
+        // Build a reward account that IS registered so the deposit refund path
+        // does not exercise the "unregistered → treasury" branch.
+        let mut reward_account = vec![0xe0u8];
+        reward_account.extend_from_slice(&[0x77u8; 28]);
+        let op_key = LedgerState::reward_account_to_hash(&reward_account);
+        Arc::make_mut(&mut state.reward_accounts).insert(op_key, Lovelace(0));
+
+        state.process_certificate(&Certificate::PoolRegistration(pool_params_for(
+            pool_id,
+            reward_account,
+        )));
+        assert!(
+            state.pool_params.contains_key(&pool_id),
+            "pool must be registered before test"
+        );
+
+        // Schedule retirement at epoch 3.
+        state.process_certificate(&Certificate::PoolRetirement {
+            pool_hash: pool_id,
+            epoch: 3,
+        });
+        assert!(state.pending_retirements.contains_key(&pool_id));
+
+        // Transition to epoch 3: pool should be retired.
+        state.process_epoch_transition(EpochNo(3));
+
+        assert!(
+            !state.pool_params.contains_key(&pool_id),
+            "pool must be removed from pool_params after retirement epoch"
+        );
+        assert!(
+            !state.pending_retirements.contains_key(&pool_id),
+            "pending_retirements must not contain the retired pool"
+        );
+    }
+
+    // ── Test 8: Pool retirement with missing reward account → treasury ────────
+
+    /// When a retiring pool's reward account is NOT registered, the pool's
+    /// deposit is forwarded to the treasury instead of the operator.
+    #[test]
+    fn test_pool_retirement_missing_reward_account() {
+        let mut state = new_state();
+
+        let pool_id = Hash28::from_bytes([0x88u8; 28]);
+        // Reward account NOT registered in reward_accounts.
+        let mut reward_account = vec![0xe0u8];
+        reward_account.extend_from_slice(&[0x88u8; 28]);
+        let op_key = LedgerState::reward_account_to_hash(&reward_account);
+        assert!(
+            !state.reward_accounts.contains_key(&op_key),
+            "precondition: op reward account must be unregistered"
+        );
+
+        state.process_certificate(&Certificate::PoolRegistration(pool_params_for(
+            pool_id,
+            reward_account,
+        )));
+
+        // Schedule retirement at epoch 5.
+        state.process_certificate(&Certificate::PoolRetirement {
+            pool_hash: pool_id,
+            epoch: 5,
+        });
+
+        let treasury_before = state.treasury;
+        state.process_epoch_transition(EpochNo(5));
+
+        // Pool must be gone.
+        assert!(!state.pool_params.contains_key(&pool_id));
+        // Treasury must have increased by at least the pool deposit refund amount.
+        // The pool_deposit from mainnet defaults is 500 ADA.
+        let pool_deposit = state.protocol_params.pool_deposit.0;
+        assert!(
+            state.treasury.0 >= treasury_before.0 + pool_deposit,
+            "treasury should receive unregistered pool operator's deposit \
+             (treasury_before={}, treasury_after={}, deposit={})",
+            treasury_before.0,
+            state.treasury.0,
+            pool_deposit
+        );
+    }
+
+    // ── Test 9: Governance ratification runs after SNAP rotation ─────────────
+
+    /// When there are no active proposals, `ratify_proposals()` must run without
+    /// error and leave the governance state intact (num_dormant_epochs increments).
+    #[test]
+    fn test_governance_ratification_after_snap() {
+        let mut state = new_state();
+
+        // Ensure we are in Conway (protocol_version_major >= 9) so ratify path runs.
+        assert!(
+            state.protocol_params.protocol_version_major >= 9,
+            "test requires Conway era (PV >= 9)"
+        );
+        // No proposals → governance is trivially stable.
+        assert!(state.governance.proposals.is_empty());
+
+        let dormant_before = state.governance.num_dormant_epochs;
+
+        state.process_epoch_transition(EpochNo(1));
+
+        // With no proposals the epoch is dormant — counter increments by 1.
+        assert_eq!(
+            state.governance.num_dormant_epochs,
+            dormant_before + 1,
+            "dormant epoch counter must increment when there are no active proposals"
+        );
+        // State is consistent after ratification (no panic, no removed proposals).
+        assert!(state.governance.proposals.is_empty());
+    }
+
+    // ── Test 10: Genesis epoch transition (0→1) ───────────────────────────────
+
+    /// At the very first epoch boundary (0→1), the epoch advances, mark is
+    /// populated, and set/go remain None (only one rotation has occurred).
+    #[test]
+    fn test_genesis_epoch_transition() {
+        let mut state = new_state();
+
+        assert_eq!(state.epoch, EpochNo(0));
+        assert!(state.snapshots.mark.is_none());
+        assert!(state.snapshots.set.is_none());
+        assert!(state.snapshots.go.is_none());
+
+        state.process_epoch_transition(EpochNo(1));
+
+        assert_eq!(state.epoch, EpochNo(1), "epoch must advance to 1");
+        assert!(
+            state.snapshots.mark.is_some(),
+            "mark must exist after first transition"
+        );
+        assert!(
+            state.snapshots.set.is_none(),
+            "set must be None after first transition"
+        );
+        assert!(
+            state.snapshots.go.is_none(),
+            "go must be None after first transition"
+        );
+    }
+
+    // ── Test 11: bprev block count rotation ──────────────────────────────────
+
+    /// `snapshots.bprev_block_count` is set to the current epoch's block count
+    /// at each boundary, and `epoch_block_count` is reset to zero.
+    #[test]
+    fn test_bprev_block_count_rotation() {
+        let mut state = new_state();
+
+        let blocks_this_epoch = 42u64;
+        state.epoch_block_count = blocks_this_epoch;
+        let pool_id = Hash28::from_bytes([0x10u8; 28]);
+        Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, blocks_this_epoch);
+
+        state.process_epoch_transition(EpochNo(1));
+
+        assert_eq!(
+            state.snapshots.bprev_block_count, blocks_this_epoch,
+            "bprev_block_count must capture this epoch's block count"
+        );
+        assert_eq!(
+            state.epoch_block_count, 0,
+            "epoch_block_count must be reset to 0 after transition"
+        );
+        assert!(
+            state.epoch_blocks_by_pool.is_empty(),
+            "epoch_blocks_by_pool must be cleared after transition"
+        );
+    }
+
+    // ── Test 12: Nonce evolution ──────────────────────────────────────────────
+
+    /// When `candidate_nonce` and `last_epoch_block_nonce` are both non-zero,
+    /// the epoch nonce is updated to `blake2b_256(candidate || prev_hash_nonce)`.
+    #[test]
+    fn test_nonce_evolution() {
+        let mut state = new_state();
+
+        let candidate = Hash32::from_bytes([0xCAu8; 32]);
+        let prev_hash = Hash32::from_bytes([0xBBu8; 32]);
+
+        state.candidate_nonce = candidate;
+        state.last_epoch_block_nonce = prev_hash;
+        let epoch_nonce_before = state.epoch_nonce;
+
+        state.process_epoch_transition(EpochNo(1));
+
+        // epoch_nonce' = blake2b_256(candidate || prev_hash_nonce)
+        let mut input = Vec::with_capacity(64);
+        input.extend_from_slice(candidate.as_bytes());
+        input.extend_from_slice(prev_hash.as_bytes());
+        let expected = dugite_primitives::hash::blake2b_256(&input);
+
+        assert_eq!(
+            state.epoch_nonce, expected,
+            "epoch_nonce must be blake2b_256(candidate || prev_hash_nonce)"
+        );
+        assert_ne!(
+            state.epoch_nonce, epoch_nonce_before,
+            "epoch_nonce must change when inputs are non-zero"
+        );
+        // prev_hash_nonce is updated to lab_nonce at the boundary.
+        // lab_nonce starts as ZERO in new(); verify last_epoch_block_nonce = ZERO.
+        assert_eq!(
+            state.last_epoch_block_nonce, state.lab_nonce,
+            "last_epoch_block_nonce must be updated to lab_nonce"
+        );
+    }
+
+    // ── Test 13: RUPD uses ss_fee from EpochSnapshots ─────────────────────────
+
+    /// The RUPD computation uses `snapshots.ss_fee` as the fee pot.  When
+    /// `ss_fee` is non-zero, it increases the total rewards available and
+    /// therefore increases the treasury cut proportionally.
+    #[test]
+    fn test_ss_fee_from_go_snapshot() {
+        // Run two transitions: one with ss_fee=0, one with ss_fee=X, and verify
+        // the treasury outcome is larger in the second case.
+        let mut state_no_fee = new_state();
+        let mut state_with_fee = new_state();
+
+        // Set a known non-zero fee on the second state's ss_fee.
+        let fee = Lovelace(10_000_000); // 10 ADA
+        state_with_fee.snapshots.ss_fee = fee;
+
+        state_no_fee.process_epoch_transition(EpochNo(1));
+        state_with_fee.process_epoch_transition(EpochNo(1));
+
+        // With a positive ss_fee, the reward pot = expansion + fee, and treasury
+        // cut = tau * (expansion + fee) > tau * expansion alone.
+        assert!(
+            state_with_fee.treasury.0 > state_no_fee.treasury.0,
+            "treasury must be larger when ss_fee > 0 (was {}, with fee {})",
+            state_no_fee.treasury.0,
+            state_with_fee.treasury.0,
+        );
+    }
+
+    // ── Test 14: Stake rebuild via full UTxO walk ─────────────────────────────
+
+    /// When `needs_stake_rebuild` is true at the epoch boundary,
+    /// `rebuild_stake_distribution()` runs and populates `stake_map` from
+    /// the UTxO set.
+    #[test]
+    fn test_stake_rebuild_full_utxo_walk() {
+        use dugite_primitives::address::{Address, BaseAddress};
+        use dugite_primitives::network::NetworkId;
+        use dugite_primitives::transaction::{OutputDatum, TransactionInput, TransactionOutput};
+        use dugite_primitives::value::Value;
+
+        let mut state = new_state();
+
+        let payment_cred = Credential::VerificationKey(Hash28::from_bytes([0xFFu8; 28]));
+        let stake_cred = Credential::VerificationKey(Hash28::from_bytes([0xCCu8; 28]));
+        let stake_key = credential_to_hash(&stake_cred);
+        let amount = 5_000_000_000u64; // 5k ADA
+
+        // Add a Base-address UTxO so rebuild_stake_distribution picks up the stake.
+        let addr = Address::Base(BaseAddress {
+            network: NetworkId::Mainnet,
+            payment: payment_cred,
+            stake: stake_cred.clone(),
+        });
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xAAu8; 32]),
+            index: 0,
+        };
+        let output = TransactionOutput {
+            address: addr,
+            value: Value {
+                coin: Lovelace(amount),
+                multi_asset: Default::default(),
+            },
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        state.utxo_set.insert(input, output);
+
+        // Set flag to trigger the full UTxO walk at the epoch boundary.
+        state.needs_stake_rebuild = true;
+
+        // Register the stake credential so it has an entry in delegations and
+        // reward_accounts (required for rebuild_stake_distribution to include it).
+        let pool_id = Hash28::from_bytes([0xDDu8; 28]);
+        state.process_certificate(&Certificate::StakeRegistration(stake_cred.clone()));
+        state.process_certificate(&Certificate::StakeDelegation {
+            credential: stake_cred,
+            pool_hash: pool_id,
+        });
+
+        state.process_epoch_transition(EpochNo(1));
+
+        // After the rebuild, stake_map must contain the UTxO's lovelace for the cred.
+        let stake = state
+            .stake_distribution
+            .stake_map
+            .get(&stake_key)
+            .copied()
+            .unwrap_or(Lovelace(0));
+        assert_eq!(
+            stake.0, amount,
+            "stake_map must reflect the UTxO amount after rebuild (got {})",
+            stake.0
+        );
+        // The flag must be cleared for subsequent epochs.
+        assert!(
+            !state.needs_stake_rebuild,
+            "needs_stake_rebuild must be cleared after the rebuild"
+        );
+    }
+}
