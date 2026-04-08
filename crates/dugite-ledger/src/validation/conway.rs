@@ -175,3 +175,303 @@ pub(super) fn calculate_deposits_and_refunds(
 
     (deposits, refunds)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    use dugite_primitives::credentials::Credential;
+    use dugite_primitives::hash::{Hash28, Hash32};
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::transaction::{
+        Certificate, GovActionId, PoolParams, Rational, TransactionBody, Voter, VotingProcedure,
+    };
+    use dugite_primitives::value::Lovelace;
+
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
+
+    /// Build a minimal `TransactionBody` with the given certificates and
+    /// voting procedures. All other fields are left empty/default so tests
+    /// stay focused on what they actually care about.
+    fn make_body(
+        certificates: Vec<Certificate>,
+        voting_procedures: BTreeMap<Voter, BTreeMap<GovActionId, VotingProcedure>>,
+    ) -> TransactionBody {
+        TransactionBody {
+            inputs: vec![],
+            outputs: vec![],
+            fee: Lovelace(0),
+            ttl: None,
+            certificates,
+            withdrawals: BTreeMap::new(),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: BTreeMap::new(),
+            script_data_hash: None,
+            collateral: vec![],
+            required_signers: vec![],
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: vec![],
+            update: None,
+            voting_procedures,
+            proposal_procedures: vec![],
+            treasury_value: None,
+            donation: None,
+        }
+    }
+
+    /// A `Credential::VerificationKey` backed by a deterministic 28-byte hash.
+    fn test_credential(byte: u8) -> Credential {
+        Credential::VerificationKey(Hash28::from_bytes([byte; 28]))
+    }
+
+    /// A `PoolParams` stub with the given operator hash. Only `operator` is used
+    /// by `calculate_deposits_and_refunds`; the other fields carry no-op values.
+    fn make_pool_params(operator_byte: u8) -> PoolParams {
+        PoolParams {
+            operator: Hash28::from_bytes([operator_byte; 28]),
+            vrf_keyhash: Hash32::from_bytes([0u8; 32]),
+            pledge: Lovelace(0),
+            cost: Lovelace(0),
+            margin: Rational {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: vec![],
+            pool_owners: vec![],
+            relays: vec![],
+            pool_metadata: None,
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // check_era_gating — Conway cert in Conway era (no error)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_conway_cert_in_conway_era() {
+        // Protocol version 9 = Conway era; Conway certs must be accepted.
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+
+        let cert = Certificate::RegDRep {
+            credential: test_credential(0xAA),
+            deposit: Lovelace(500_000_000),
+            anchor: None,
+        };
+        let body = make_body(vec![cert], BTreeMap::new());
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_era_gating(&params, &body, &mut errors);
+
+        // No era-gating violations expected in Conway era.
+        let violations: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::EraGatingViolation { .. }))
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "Conway cert should be accepted in Conway era (pv=9), got: {violations:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // check_era_gating — Conway cert in Babbage era (error expected)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_conway_cert_in_pre_conway_era() {
+        // Protocol version 8 = Babbage era; Conway certs must be rejected.
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8;
+
+        let cert = Certificate::RegDRep {
+            credential: test_credential(0xBB),
+            deposit: Lovelace(500_000_000),
+            anchor: None,
+        };
+        let body = make_body(vec![cert], BTreeMap::new());
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_era_gating(&params, &body, &mut errors);
+
+        let has_violation = errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::EraGatingViolation { .. }));
+        assert!(
+            has_violation,
+            "Expected EraGatingViolation for Conway cert in Babbage (pv=8)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // check_era_gating — voting_procedures in pre-Conway era (error expected)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_governance_features_era_gated() {
+        // Protocol version 8 = Babbage; voting procedures must be rejected.
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 8;
+
+        // Build a non-empty voting_procedures map.
+        let gov_action_id = GovActionId {
+            transaction_id: Hash32::from_bytes([0x01u8; 32]),
+            action_index: 0,
+        };
+        let voting_procedure = VotingProcedure {
+            vote: dugite_primitives::transaction::Vote::Yes,
+            anchor: None,
+        };
+        let voter = Voter::DRep(test_credential(0xCC));
+        let mut inner = BTreeMap::new();
+        inner.insert(gov_action_id, voting_procedure);
+        let mut voting_procedures = BTreeMap::new();
+        voting_procedures.insert(voter, inner);
+
+        let body = make_body(vec![], voting_procedures);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_era_gating(&params, &body, &mut errors);
+
+        let has_gov_error = errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::GovernancePreConway { .. }));
+        assert!(
+            has_gov_error,
+            "Expected GovernancePreConway for voting_procedures in Babbage (pv=8)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // calculate_deposits_and_refunds — StakeRegistration charges key_deposit
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_deposit_new_key_registration() {
+        let params = ProtocolParameters::mainnet_defaults(); // key_deposit = 2_000_000
+        let cert = Certificate::StakeRegistration(test_credential(0x01));
+
+        let (deposits, refunds) = calculate_deposits_and_refunds(&[cert], &params, None, None);
+
+        assert_eq!(
+            deposits, params.key_deposit.0,
+            "StakeRegistration should charge key_deposit"
+        );
+        assert_eq!(refunds, 0, "StakeRegistration should produce no refund");
+    }
+
+    // ---------------------------------------------------------------------------
+    // calculate_deposits_and_refunds — RegDRep charges drep_deposit
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_deposit_new_drep_registration() {
+        let params = ProtocolParameters::mainnet_defaults(); // drep_deposit = 500_000_000
+        let drep_deposit = params.drep_deposit.0;
+
+        let cert = Certificate::RegDRep {
+            credential: test_credential(0x02),
+            deposit: Lovelace(drep_deposit),
+            anchor: None,
+        };
+
+        let (deposits, refunds) = calculate_deposits_and_refunds(&[cert], &params, None, None);
+
+        assert_eq!(
+            deposits, drep_deposit,
+            "RegDRep should charge the inline deposit amount"
+        );
+        assert_eq!(refunds, 0, "RegDRep should produce no refund");
+    }
+
+    // ---------------------------------------------------------------------------
+    // calculate_deposits_and_refunds — PoolRegistration re-registration is free
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_deposit_pool_reregistration_free() {
+        let params = ProtocolParameters::mainnet_defaults(); // pool_deposit = 500_000_000
+        let pool_params = make_pool_params(0x03);
+        let operator = pool_params.operator;
+
+        // Pool is already in the registered set.
+        let mut registered_pools: HashSet<Hash28> = HashSet::new();
+        registered_pools.insert(operator);
+
+        let cert = Certificate::PoolRegistration(pool_params);
+
+        let (deposits, refunds) =
+            calculate_deposits_and_refunds(&[cert], &params, Some(&registered_pools), None);
+
+        assert_eq!(
+            deposits, 0,
+            "Re-registration of an existing pool should charge 0 deposit"
+        );
+        assert_eq!(refunds, 0);
+    }
+
+    // ---------------------------------------------------------------------------
+    // calculate_deposits_and_refunds — StakeDeregistration refunds key_deposit
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_refund_deregistration() {
+        let params = ProtocolParameters::mainnet_defaults(); // key_deposit = 2_000_000
+        let credential = test_credential(0x04);
+        let cert = Certificate::StakeDeregistration(credential.clone());
+
+        // No deposit map provided — should fall back to current key_deposit.
+        let (deposits, refunds) = calculate_deposits_and_refunds(&[cert], &params, None, None);
+
+        assert_eq!(deposits, 0, "StakeDeregistration should produce no deposit");
+        assert_eq!(
+            refunds, params.key_deposit.0,
+            "StakeDeregistration should refund key_deposit when deposit map is absent"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // calculate_deposits_and_refunds — ConwayStakeDeregistration uses stored deposit
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_per_credential_deposit_map() {
+        // current key_deposit = 2_000_000 ADA; original deposit was 1_500_000
+        // (simulates a governance-changed key_deposit after original registration).
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+        let stored_deposit: u64 = 1_500_000;
+
+        let credential = test_credential(0x05);
+
+        // ConwayStakeDeregistration carries the inline refund amount agreed at
+        // registration time.
+        let cert = Certificate::ConwayStakeDeregistration {
+            credential: credential.clone(),
+            refund: Lovelace(stored_deposit),
+        };
+
+        // The deposit map is not consulted for ConwayStakeDeregistration because
+        // the refund amount is encoded inline in the certificate itself.
+        let mut deposit_map: HashMap<Hash32, u64> = HashMap::new();
+        deposit_map.insert(credential.to_typed_hash32(), stored_deposit);
+
+        let (deposits, refunds) =
+            calculate_deposits_and_refunds(&[cert], &params, None, Some(&deposit_map));
+
+        assert_eq!(deposits, 0);
+        assert_eq!(
+            refunds, stored_deposit,
+            "ConwayStakeDeregistration refund must use the inline cert amount, \
+             not the current key_deposit ({}) or deposit map",
+            params.key_deposit.0
+        );
+    }
+}
