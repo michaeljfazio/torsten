@@ -37,7 +37,18 @@ pub use channel::MuxChannel;
 pub use segment::{Direction, SduHeader, HEADER_SIZE};
 
 /// Default ingress channel capacity (number of byte chunks buffered).
-const INGRESS_CHANNEL_CAPACITY: usize = 64;
+/// Per-protocol ingress channel capacity (number of byte chunks buffered).
+///
+/// This must be large enough to absorb pipelined ChainSync MsgRequestNext
+/// bursts (default pipeline depth 300) without blocking the ingress task.
+/// If the ingress task blocks on a full channel, ALL other protocols on the
+/// same mux (KeepAlive, BlockFetch) are starved because the ingress task
+/// cannot read further data from the bearer.
+///
+/// Haskell's network-mux uses a byte-count buffer (maximumIngressQueue ~1MB)
+/// rather than an item-count channel, so it can absorb large bursts. We use
+/// an item-count channel, so capacity must exceed the maximum pipeline depth.
+const INGRESS_CHANNEL_CAPACITY: usize = 512;
 
 /// Ouroboros multiplexer. Owns the bearer and coordinates ingress/egress tasks.
 ///

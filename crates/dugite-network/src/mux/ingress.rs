@@ -181,14 +181,41 @@ impl IngressTask {
                     }
 
                     if !payload.is_empty() {
-                        // Send to protocol channel. MuxChannel::recv() will decrement
-                        // bytes_in_flight after consuming the chunk. If the receiver
-                        // has already been dropped (protocol shut down), undo the
-                        // counter increment and silently discard the payload.
-                        if route.tx.send(Bytes::from(payload)).await.is_err() {
-                            route
-                                .bytes_in_flight
-                                .fetch_sub(payload_len, Ordering::Relaxed);
+                        // Deliver to protocol channel using try_send (non-blocking).
+                        //
+                        // CRITICAL: We must NOT use the blocking `.send().await` here.
+                        // If a protocol's ingress channel is full (e.g. ChainSync server
+                        // blocked at tip waiting for announcements while pipelined
+                        // MsgRequestNext messages fill the buffer), the blocking send
+                        // would stall the ENTIRE ingress task, preventing ALL other
+                        // protocols (KeepAlive, BlockFetch) from receiving data.
+                        //
+                        // This matches Haskell's network-mux demuxer which throws
+                        // IngressQueueOverRun (fatal connection error) when a protocol's
+                        // queue overflows — the demuxer never blocks.
+                        //
+                        // MuxChannel::recv() will decrement bytes_in_flight after
+                        // consuming the chunk.
+                        match route.tx.try_send(Bytes::from(payload)) {
+                            Ok(()) => {} // delivered successfully
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                // Channel full — protocol is not consuming fast enough.
+                                // Revert counter and return fatal overrun error.
+                                route
+                                    .bytes_in_flight
+                                    .fetch_sub(payload_len, Ordering::Relaxed);
+                                return Err(MuxError::IngressQueueOverrun {
+                                    protocol_id: header.protocol_id,
+                                    bytes: new_total,
+                                    limit: route.limit,
+                                });
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                // Receiver dropped (protocol shut down) — undo counter.
+                                route
+                                    .bytes_in_flight
+                                    .fetch_sub(payload_len, Ordering::Relaxed);
+                            }
                         }
                     } else {
                         // Zero-length payload — undo the no-op counter increment.

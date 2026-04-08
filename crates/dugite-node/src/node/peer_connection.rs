@@ -167,6 +167,15 @@ pub type ProtocolTaskFn = Box<
 >;
 
 impl PeerConnection {
+    /// Returns `true` if this connection has server-side (responder) channels.
+    ///
+    /// Server channels are only present when the connection was created in
+    /// duplex mode (`initiator_only=false`). InitiatorOnly connections do
+    /// not have server channels and should not attempt to start server protocols.
+    pub fn has_server_channels(&self) -> bool {
+        self.chainsync_server_channel.is_some()
+    }
+
     /// Establish an outbound connection to a peer.
     ///
     /// Performs TCP connect (with timeout), creates the mux, subscribes all

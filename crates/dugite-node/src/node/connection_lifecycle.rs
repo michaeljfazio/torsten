@@ -1371,6 +1371,12 @@ impl ConnectionLifecycleManager {
         addr: SocketAddr,
         conn: &mut PeerConnection,
     ) -> Result<(), PeerConnectionError> {
+        // InitiatorOnly connections have no server channels — skip server
+        // protocols entirely. This is the correct behaviour: an InitiatorOnly
+        // peer only runs client protocols and does not serve to the remote.
+        if !conn.has_server_channels() {
+            return Ok(());
+        }
         let cs = self.make_chainsync_server_task(addr);
         let bf = self.make_blockfetch_server_task(addr);
         let tx = self.make_txsubmission_server_task(addr);

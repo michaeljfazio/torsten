@@ -36,3 +36,6 @@ epoch-snapshots/
 cstreamer-reference/
 *.bak
 .worktrees/
+*.signed
+*.raw
+.idea/

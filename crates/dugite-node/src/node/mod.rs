@@ -2463,6 +2463,7 @@ impl Node {
             FetchedBlock,
         > = std::collections::HashMap::new();
 
+        info!("Main run loop entered");
         loop {
             tokio::select! {
                 // ── Process fetched blocks from BlockFetch workers ───────
@@ -2557,9 +2558,21 @@ impl Node {
                 // ── Governor evaluation (periodic, every 2s) ────────────
                 _ = governor_ticker.tick() => {
                     // Compute governor actions based on current peer state.
+                    // Build LocalRootGroupTargets from the peer manager's stored
+                    // local root groups so the governor can promote topology peers
+                    // via the per-group belowTargetLocal path.
                     let actions = {
                         let pm = peer_manager.read().await;
-                        governor.compute_actions(&pm.inner, &[])
+                        let local_root_targets: Vec<dugite_network::peer::governor::LocalRootGroupTarget> = pm
+                            .local_root_groups()
+                            .iter()
+                            .map(|g| dugite_network::peer::governor::LocalRootGroupTarget {
+                                members: g.addrs.iter().copied().collect(),
+                                warm_valency: g.warm_valency,
+                                hot_valency: g.hot_valency,
+                            })
+                            .collect();
+                        governor.compute_actions(&pm.inner, &local_root_targets)
                     };
 
                     if !actions.is_empty() {
