@@ -2978,16 +2978,25 @@ pub async fn chainsync_client_task(
                                 header_cbor: header,
                             });
 
-                            // Cap pending_headers to prevent unbounded growth.
-                            // At tip, new headers arrive every ~20s; during catch-up,
-                            // thousands accumulate.  Keep only the most recent 2000
-                            // so the blockfetch worker's O(n) scan stays fast.
-                            // Older headers are safe to drop — they've either been
-                            // fetched already or are below the applied chain tip.
-                            const MAX_PENDING_HEADERS: usize = 2000;
-                            if entry.pending_headers.len() > MAX_PENDING_HEADERS + 500 {
-                                // Drain with hysteresis to avoid re-allocating every push
-                                let excess = entry.pending_headers.len() - MAX_PENDING_HEADERS;
+                            // Prune headers that the ledger has already applied.
+                            //
+                            // We only drop headers whose slot is at or below the
+                            // ledger tip — these have already been fetched and applied.
+                            // Headers above the ledger tip are retained even if there
+                            // are thousands, because BlockFetch needs them to bridge
+                            // the gap (e.g. after fork divergence on restart when the
+                            // volatile chain doesn't connect to the ledger snapshot).
+                            //
+                            // Hard cap at 10_000 as an absolute safety valve against
+                            // unbounded growth during very long catch-ups.
+                            let applied_slot = {
+                                let ls = ledger_state.read().await;
+                                ls.tip.point.slot().map(|s| s.0).unwrap_or(0)
+                            };
+                            entry.pending_headers.retain(|h| h.slot > applied_slot);
+                            const HARD_CAP: usize = 10_000;
+                            if entry.pending_headers.len() > HARD_CAP {
+                                let excess = entry.pending_headers.len() - HARD_CAP;
                                 entry.pending_headers.drain(..excess);
                             }
                         }

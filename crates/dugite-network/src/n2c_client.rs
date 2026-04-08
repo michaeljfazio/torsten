@@ -1403,8 +1403,7 @@ mod tests {
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u32(4).unwrap(); // MsgResult tag
-        enc.array(2).unwrap(); // HFC wrapper [1, result]
-        enc.u64(1).unwrap(); // HFC success tag
+        enc.array(1).unwrap(); // HFC success wrapper: array(1)[result]
         enc.array(2).unwrap(); // [[slot, hash], block_no]
         enc.array(2).unwrap();
         enc.u64(12345).unwrap();
@@ -1442,8 +1441,7 @@ mod tests {
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u32(4).unwrap(); // MsgResult tag
-        enc.array(2).unwrap(); // HFC wrapper [1, result]
-        enc.u64(1).unwrap(); // HFC success tag
+        enc.array(1).unwrap(); // HFC success wrapper: array(1)[result]
         enc.u64(42).unwrap();
 
         let result = parse_epoch_result(&buf).unwrap();
@@ -1462,8 +1460,7 @@ mod tests {
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u32(4).unwrap(); // MsgResult tag
-        enc.array(2).unwrap(); // HFC wrapper [1, result]
-        enc.u64(1).unwrap(); // HFC success tag
+        enc.array(1).unwrap(); // HFC success wrapper: array(1)[result]
         enc.u64(999).unwrap();
 
         let result = parse_u64_result(&buf).unwrap();

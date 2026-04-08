@@ -875,7 +875,7 @@ impl ConnectionLifecycleManager {
     fn make_blockfetch_task(&self, addr: SocketAddr) -> ProtocolTaskFn {
         let fetched_blocks_tx = self.fetched_blocks_tx.clone();
         let candidate_chains = self.candidate_chains.clone();
-        let chain_db_for_fetch = self.chain_db.clone();
+        let ledger_state_for_fetch = self.ledger_state.clone();
         let bel = self.byron_epoch_length;
         // Shared flag: only ONE BlockFetch worker is active at a time.
         // Matches Haskell's bfcMaxConcurrencyBulkSync = 1.
@@ -959,20 +959,21 @@ impl ConnectionLifecycleManager {
                             // another peer's worker).  This prevents both re-fetch
                             // loops and stalls caused by lost headers.
                             //
-                            // Read chain_db tip BEFORE acquiring candidate_chains lock
-                            // to avoid calling blocking_read() inside an async context
-                            // (which panics with "Cannot block the current thread from
-                            // within a runtime").
-                            // Use ChainDB applied tip to filter — NOT max_fetched_slot.
-                            // max_fetched_slot jumps to the chain tip when any worker
-                            // downloads tip blocks, filtering out all gap blocks for
-                            // every worker and causing 10+ minute sync stalls.
-                            // The applied tip only advances when blocks are actually
-                            // applied to the ledger in order, so gap blocks are never
-                            // filtered out.
+                            // Use LEDGER tip slot to filter — NOT ChainDB tip slot.
+                            //
+                            // ChainDB tip includes volatile blocks that may be on a
+                            // divergent fork (e.g. after a restart when the volatile
+                            // chain doesn't connect to the ledger snapshot). Using the
+                            // ChainDB tip would skip re-fetching those gap blocks,
+                            // causing the node to stall forever: fetched blocks connect
+                            // to the divergent ChainDB tip but not the ledger tip, so
+                            // they buffer indefinitely and never get applied.
+                            //
+                            // The ledger tip only advances when blocks are actually
+                            // applied in order, so gap blocks are never filtered out.
                             let applied_slot = {
-                                let db = chain_db_for_fetch.read().await;
-                                db.tip_slot().0
+                                let ls = ledger_state_for_fetch.read().await;
+                                ls.tip.point.slot().map(|s| s.0).unwrap_or(0)
                             };
                             let headers_to_fetch = {
                                 let chains = candidate_chains.read().await;
