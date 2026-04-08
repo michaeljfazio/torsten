@@ -796,3 +796,577 @@ pub(crate) fn redeemer_script_version_map(
 
     result
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use dugite_primitives::address::{Address, ByronAddress};
+    use dugite_primitives::credentials::Credential;
+    use dugite_primitives::era::Era;
+    use dugite_primitives::hash::{Hash28, Hash32};
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::transaction::{
+        ExUnits, GovActionId, OutputDatum, PlutusData, Redeemer, RedeemerTag, Transaction,
+        TransactionBody, TransactionInput, TransactionOutput, TransactionWitnessSet, Vote, Voter,
+        VotingProcedure,
+    };
+    use dugite_primitives::value::{AssetName, Lovelace, Value};
+
+    use crate::utxo::UtxoSet;
+    use crate::validation::ValidationError;
+
+    use super::check_collateral;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal `TransactionInput` from a seed byte.
+    fn input(seed: u8) -> TransactionInput {
+        TransactionInput {
+            transaction_id: Hash32::from_bytes([seed; 32]),
+            index: 0,
+        }
+    }
+
+    /// Build a `TransactionOutput` carrying a pure-ADA value at a Byron address.
+    fn ada_output(coin: u64) -> TransactionOutput {
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(coin),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }
+    }
+
+    /// Build a `TransactionOutput` carrying coin + a single native token.
+    fn multi_asset_output(coin: u64, policy: [u8; 28], token_qty: u64) -> TransactionOutput {
+        let mut ma: BTreeMap<_, BTreeMap<AssetName, u64>> = BTreeMap::new();
+        ma.entry(Hash28::from_bytes(policy))
+            .or_default()
+            .insert(AssetName(b"tok".to_vec()), token_qty);
+        TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value {
+                coin: Lovelace(coin),
+                multi_asset: ma,
+            },
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }
+    }
+
+    /// Build a minimal Plutus transaction skeleton.  The caller patches whichever
+    /// fields are needed for the specific test scenario.
+    fn make_plutus_tx(fee: u64, col_inputs: Vec<TransactionInput>) -> Transaction {
+        Transaction {
+            hash: Hash32::ZERO,
+            era: Era::Conway,
+            body: TransactionBody {
+                inputs: vec![input(0xA0)],
+                outputs: vec![ada_output(0)],
+                fee: Lovelace(fee),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: col_inputs,
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            // Include a V2 script so `has_plutus_scripts()` is satisfied when
+            // the full validate_transaction path is exercised.  For direct
+            // `check_collateral` calls this field is irrelevant but mirrors
+            // real-world transactions for clarity.
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![vec![0x01, 0x02]],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Spend,
+                    index: 0,
+                    data: PlutusData::Integer(0i128),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        }
+    }
+
+    /// Build a default `ProtocolParameters` with sensible collateral settings.
+    fn default_params() -> ProtocolParameters {
+        let mut p = ProtocolParameters::mainnet_defaults();
+        // 150 % collateral percentage, max 3 inputs — same as mainnet defaults.
+        p.collateral_percentage = 150;
+        p.max_collateral_inputs = 3;
+        // Generous per-tx ex-unit limits so normal tests don't trip the budget.
+        p.max_tx_ex_units = ExUnits {
+            mem: 14_000_000,
+            steps: 10_000_000_000,
+        };
+        p
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 1: valid collateral — no collateral-related errors
+    // -----------------------------------------------------------------------
+
+    /// A Plutus transaction with a single collateral input of 10 M lovelace,
+    /// fee of 200 K, and collateral_percentage = 150.
+    ///
+    /// Required collateral = ceil(200_000 * 150 / 100) = 300_000.
+    /// Provided = 10_000_000 → well above required.  No errors expected.
+    #[test]
+    fn test_valid_collateral() {
+        let col = input(0xC0);
+        let mut utxo = UtxoSet::new();
+        utxo.insert(col.clone(), ada_output(10_000_000));
+
+        let tx = make_plutus_tx(200_000, vec![col]);
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        let collateral_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ValidationError::InsufficientCollateral
+                        | ValidationError::TooManyCollateralInputs { .. }
+                        | ValidationError::CollateralHasTokens(_)
+                        | ValidationError::CollateralMismatch { .. }
+                )
+            })
+            .collect();
+        assert!(
+            collateral_errors.is_empty(),
+            "expected no collateral errors, got: {collateral_errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2: no collateral inputs — must error
+    // -----------------------------------------------------------------------
+
+    /// A Plutus transaction with an empty collateral list must produce
+    /// `InsufficientCollateral`.
+    #[test]
+    fn test_no_collateral_inputs() {
+        let utxo = UtxoSet::new();
+        let tx = make_plutus_tx(200_000, vec![]);
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InsufficientCollateral)),
+            "expected InsufficientCollateral, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3: too many collateral inputs
+    // -----------------------------------------------------------------------
+
+    /// 4 collateral inputs when `max_collateral_inputs = 3`.
+    #[test]
+    fn test_too_many_collateral_inputs() {
+        let cols: Vec<TransactionInput> = (0u8..4).map(|i| input(0xC0 + i)).collect();
+
+        let mut utxo = UtxoSet::new();
+        for col in &cols {
+            utxo.insert(col.clone(), ada_output(5_000_000));
+        }
+
+        let mut tx = make_plutus_tx(200_000, cols);
+        // Ensure fee is small so collateral is definitely enough in absolute terms.
+        tx.body.fee = Lovelace(200_000);
+
+        let mut params = default_params();
+        params.max_collateral_inputs = 3;
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::TooManyCollateralInputs { max: 3, actual: 4 }
+            )),
+            "expected TooManyCollateralInputs{{max:3,actual:4}}, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: insufficient collateral value
+    // -----------------------------------------------------------------------
+
+    /// fee = 1_000_000, pct = 150 → required = 1_500_000.
+    /// Provided effective collateral = 1_000_000 → must fail.
+    #[test]
+    fn test_insufficient_collateral_value() {
+        let col = input(0xC1);
+        let mut utxo = UtxoSet::new();
+        // Only 1 M lovelace in collateral; required is 1.5 M.
+        utxo.insert(col.clone(), ada_output(1_000_000));
+
+        let mut tx = make_plutus_tx(1_000_000, vec![col]);
+        tx.body.fee = Lovelace(1_000_000);
+
+        let params = default_params(); // collateral_percentage = 150
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::InsufficientCollateral)),
+            "expected InsufficientCollateral, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: collateral_return absorbs all tokens → net is pure ADA → passes
+    // -----------------------------------------------------------------------
+
+    /// Collateral input carries 5 M ADA + 100 "tok" tokens.
+    /// `collateral_return` sends the 100 tokens back, so the net is pure ADA.
+    /// Must not produce `CollateralHasTokens`.
+    #[test]
+    fn test_collateral_return_multiasset() {
+        let policy = [0xAB; 28];
+        let col = input(0xC2);
+
+        let mut utxo = UtxoSet::new();
+        // Collateral input: 5 M ADA + 100 tokens.
+        utxo.insert(col.clone(), multi_asset_output(5_000_000, policy, 100));
+
+        // collateral_return absorbs the 100 tokens and returns them to the
+        // wallet; only leaves the ADA difference (which must cover the fee).
+        let col_return = multi_asset_output(4_700_000, policy, 100);
+
+        let mut tx = make_plutus_tx(200_000, vec![col]);
+        tx.body.fee = Lovelace(200_000);
+        tx.body.collateral_return = Some(col_return);
+
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::CollateralHasTokens(_))),
+            "expected no CollateralHasTokens, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: non-ADA in net collateral without collateral_return → error
+    // -----------------------------------------------------------------------
+
+    /// Collateral input carries 5 M ADA + 100 tokens.
+    /// No `collateral_return` to absorb the tokens → net collateral has tokens.
+    /// Must produce `CollateralHasTokens`.
+    #[test]
+    fn test_non_ada_in_net_collateral() {
+        let policy = [0xBC; 28];
+        let col = input(0xC3);
+
+        let mut utxo = UtxoSet::new();
+        utxo.insert(col.clone(), multi_asset_output(5_000_000, policy, 50));
+
+        let mut tx = make_plutus_tx(200_000, vec![col]);
+        tx.body.fee = Lovelace(200_000);
+        // No collateral_return → net has tokens.
+
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::CollateralHasTokens(_))),
+            "expected CollateralHasTokens, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: total_collateral field mismatch
+    // -----------------------------------------------------------------------
+
+    /// Effective collateral = 1_000_000, but `total_collateral` is declared as
+    /// 500_000.  Must produce `CollateralMismatch`.
+    #[test]
+    fn test_total_collateral_field_mismatch() {
+        let col = input(0xC4);
+        let mut utxo = UtxoSet::new();
+        utxo.insert(col.clone(), ada_output(1_000_000));
+
+        let mut tx = make_plutus_tx(200_000, vec![col]);
+        tx.body.fee = Lovelace(200_000);
+        // Declare the wrong amount.
+        tx.body.total_collateral = Some(Lovelace(500_000));
+
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::CollateralMismatch {
+                    declared: 500_000,
+                    computed: 1_000_000,
+                }
+            )),
+            "expected CollateralMismatch{{declared:500_000,computed:1_000_000}}, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: ExUnits memory limit exceeded
+    // -----------------------------------------------------------------------
+
+    /// Single redeemer with mem = max + 1 → must produce `ExUnitsExceeded`.
+    #[test]
+    fn test_ex_units_memory_exceeded() {
+        let col = input(0xC5);
+        let mut utxo = UtxoSet::new();
+        utxo.insert(col.clone(), ada_output(10_000_000));
+
+        let mut tx = make_plutus_tx(200_000, vec![col]);
+        let mut params = default_params();
+        let mem_limit = 14_000_000u64;
+        params.max_tx_ex_units = ExUnits {
+            mem: mem_limit,
+            steps: 10_000_000_000,
+        };
+        // Replace the default redeemer with one that exceeds the memory cap.
+        tx.witness_set.redeemers = vec![Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(0i128),
+            ex_units: ExUnits {
+                mem: mem_limit + 1,
+                steps: 100,
+            },
+        }];
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ExUnitsExceeded)),
+            "expected ExUnitsExceeded (mem), got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: ExUnits steps limit exceeded
+    // -----------------------------------------------------------------------
+
+    /// Single redeemer with steps = max + 1 → must produce `ExUnitsExceeded`.
+    #[test]
+    fn test_ex_units_steps_exceeded() {
+        let col = input(0xC6);
+        let mut utxo = UtxoSet::new();
+        utxo.insert(col.clone(), ada_output(10_000_000));
+
+        let mut tx = make_plutus_tx(200_000, vec![col]);
+        let mut params = default_params();
+        let steps_limit = 10_000_000_000u64;
+        params.max_tx_ex_units = ExUnits {
+            mem: 14_000_000,
+            steps: steps_limit,
+        };
+        // Replace the default redeemer with one that exceeds the steps cap.
+        tx.witness_set.redeemers = vec![Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 0,
+            data: PlutusData::Integer(0i128),
+            ex_units: ExUnits {
+                mem: 100,
+                steps: steps_limit + 1,
+            },
+        }];
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ExUnitsExceeded)),
+            "expected ExUnitsExceeded (steps), got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: Spend redeemer index out of bounds
+    // -----------------------------------------------------------------------
+
+    /// The transaction body has 1 input (index 0), but the Spend redeemer
+    /// references index = 5.  Must produce `RedeemerIndexOutOfRange`.
+    #[test]
+    fn test_redeemer_index_out_of_bounds() {
+        let col = input(0xC7);
+        let mut utxo = UtxoSet::new();
+        utxo.insert(col.clone(), ada_output(10_000_000));
+
+        let mut tx = make_plutus_tx(200_000, vec![col]);
+        // Replace the default redeemer with one at a bogus index.
+        tx.witness_set.redeemers = vec![Redeemer {
+            tag: RedeemerTag::Spend,
+            index: 5,
+            data: PlutusData::Integer(0i128),
+            ex_units: ExUnits {
+                mem: 100,
+                steps: 100,
+            },
+        }];
+        // Exactly 1 input in the body (inputs: vec![input(0xA0)] from make_plutus_tx).
+
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::RedeemerIndexOutOfRange {
+                    tag,
+                    index: 5,
+                    max: 1,
+                } if tag == "Spend"
+            )),
+            "expected RedeemerIndexOutOfRange{{tag:Spend,index:5,max:1}}, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Vote redeemer index assignment matches BTreeMap order
+    // -----------------------------------------------------------------------
+
+    /// Three voters in `voting_procedures`:
+    ///   - CC key-credential voter (hash [0x01; 28])
+    ///   - DRep key-credential voter (hash [0x02; 28])
+    ///   - SPO voter (Hash32 [0x03; 32])
+    ///
+    /// Canonical BTreeMap ordering (derived from `Voter: Ord`) is:
+    ///   CC < DRep < StakePool  (discriminant order)
+    ///
+    /// A Vote redeemer at index 3 must be flagged as out of range (max = 3,
+    /// valid range is 0..2), confirming the upper bound is `vote_voter_count`.
+    #[test]
+    fn test_vote_redeemer_ordering() {
+        let col = input(0xC8);
+        let mut utxo = UtxoSet::new();
+        utxo.insert(col.clone(), ada_output(10_000_000));
+
+        // Three distinct voters: CC < DRep < SPO in BTreeMap order.
+        let cc_voter = Voter::ConstitutionalCommittee(Credential::VerificationKey(
+            Hash28::from_bytes([0x01; 28]),
+        ));
+        let drep_voter = Voter::DRep(Credential::VerificationKey(Hash28::from_bytes([0x02; 28])));
+        let spo_voter = Voter::StakePool(Hash32::from_bytes([0x03; 32]));
+
+        let dummy_proc = VotingProcedure {
+            vote: Vote::Yes,
+            anchor: None,
+        };
+        let dummy_action = GovActionId {
+            transaction_id: Hash32::ZERO,
+            action_index: 0,
+        };
+
+        let mut voting_procedures: BTreeMap<Voter, BTreeMap<GovActionId, VotingProcedure>> =
+            BTreeMap::new();
+        voting_procedures
+            .entry(cc_voter)
+            .or_default()
+            .insert(dummy_action.clone(), dummy_proc.clone());
+        voting_procedures
+            .entry(drep_voter)
+            .or_default()
+            .insert(dummy_action.clone(), dummy_proc.clone());
+        voting_procedures
+            .entry(spo_voter)
+            .or_default()
+            .insert(dummy_action, dummy_proc);
+
+        let mut tx = make_plutus_tx(200_000, vec![col]);
+        tx.body.voting_procedures = voting_procedures;
+        // A Vote redeemer at index 3 is out of range (max = 3, valid indices 0..2).
+        tx.witness_set.redeemers = vec![Redeemer {
+            tag: RedeemerTag::Vote,
+            index: 3,
+            data: PlutusData::Integer(0i128),
+            ex_units: ExUnits {
+                mem: 100,
+                steps: 100,
+            },
+        }];
+
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::RedeemerIndexOutOfRange {
+                    tag,
+                    index: 3,
+                    max: 3,
+                } if tag == "Vote"
+            )),
+            "expected RedeemerIndexOutOfRange{{tag:Vote,index:3,max:3}}, got: {errors:?}"
+        );
+    }
+}
