@@ -356,7 +356,9 @@ impl Governor {
                     if local_root_members.contains(&addr) {
                         return None;
                     }
-                    peer_manager.get_peer(&addr).map(|info| (addr, peer_score(info)))
+                    peer_manager
+                        .get_peer(&addr)
+                        .map(|info| (addr, peer_score(info)))
                 })
                 .collect();
             scored.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
