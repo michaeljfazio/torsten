@@ -133,3 +133,136 @@ pub trait EraRules {
         gov: &GovSubState,
     ) -> HashSet<Hash28>;
 }
+
+// ---------------------------------------------------------------------------
+// EraRulesImpl — zero-cost era dispatch enum
+// ---------------------------------------------------------------------------
+
+/// Zero-cost era dispatch enum.
+///
+/// Prefer this over `&dyn EraRules` — it avoids vtable indirection on the hot
+/// path (block application). Each variant wraps a stateless era strategy struct.
+/// The orchestrator calls `EraRulesImpl::for_era(block.era)` once per block and
+/// then dispatches through the enum's `EraRules` forwarding impl.
+pub enum EraRulesImpl {
+    Byron(byron::ByronRules),
+    // Shelley, Alonzo, Babbage, Conway added in later tasks
+}
+
+impl EraRulesImpl {
+    /// Construct the appropriate era rules for the given era.
+    ///
+    /// # Panics
+    /// Panics (via `todo!`) for eras whose rule implementations have not yet
+    /// been wired through the trait.
+    pub fn for_era(era: Era) -> Self {
+        match era {
+            Era::Byron => Self::Byron(byron::ByronRules),
+            _ => todo!("Era rule implementations for {:?} not yet added", era),
+        }
+    }
+}
+
+impl EraRules for EraRulesImpl {
+    fn validate_block_body(
+        &self,
+        block: &Block,
+        ctx: &RuleContext,
+        utxo: &UtxoSubState,
+    ) -> Result<(), LedgerError> {
+        match self {
+            Self::Byron(r) => r.validate_block_body(block, ctx, utxo),
+        }
+    }
+
+    fn apply_valid_tx(
+        &self,
+        tx: &Transaction,
+        mode: BlockValidationMode,
+        ctx: &RuleContext,
+        utxo: &mut UtxoSubState,
+        certs: &mut CertSubState,
+        gov: &mut GovSubState,
+        epochs: &mut EpochSubState,
+    ) -> Result<UtxoDiff, LedgerError> {
+        match self {
+            Self::Byron(r) => r.apply_valid_tx(tx, mode, ctx, utxo, certs, gov, epochs),
+        }
+    }
+
+    fn apply_invalid_tx(
+        &self,
+        tx: &Transaction,
+        mode: BlockValidationMode,
+        ctx: &RuleContext,
+        utxo: &mut UtxoSubState,
+    ) -> Result<UtxoDiff, LedgerError> {
+        match self {
+            Self::Byron(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
+        }
+    }
+
+    fn process_epoch_transition(
+        &self,
+        new_epoch: EpochNo,
+        ctx: &RuleContext,
+        utxo: &mut UtxoSubState,
+        certs: &mut CertSubState,
+        gov: &mut GovSubState,
+        epochs: &mut EpochSubState,
+        consensus: &mut ConsensusSubState,
+    ) -> Result<(), LedgerError> {
+        match self {
+            Self::Byron(r) => {
+                r.process_epoch_transition(new_epoch, ctx, utxo, certs, gov, epochs, consensus)
+            }
+        }
+    }
+
+    fn evolve_nonce(
+        &self,
+        header: &BlockHeader,
+        ctx: &RuleContext,
+        consensus: &mut ConsensusSubState,
+    ) {
+        match self {
+            Self::Byron(r) => r.evolve_nonce(header, ctx, consensus),
+        }
+    }
+
+    fn min_fee(&self, tx: &Transaction, ctx: &RuleContext, utxo: &UtxoSubState) -> u64 {
+        match self {
+            Self::Byron(r) => r.min_fee(tx, ctx, utxo),
+        }
+    }
+
+    fn on_era_transition(
+        &self,
+        from_era: Era,
+        ctx: &RuleContext,
+        utxo: &mut UtxoSubState,
+        certs: &mut CertSubState,
+        gov: &mut GovSubState,
+        consensus: &mut ConsensusSubState,
+        epochs: &mut EpochSubState,
+    ) -> Result<(), LedgerError> {
+        match self {
+            Self::Byron(r) => {
+                r.on_era_transition(from_era, ctx, utxo, certs, gov, consensus, epochs)
+            }
+        }
+    }
+
+    fn required_witnesses(
+        &self,
+        tx: &Transaction,
+        ctx: &RuleContext,
+        utxo: &UtxoSubState,
+        certs: &CertSubState,
+        gov: &GovSubState,
+    ) -> HashSet<Hash28> {
+        match self {
+            Self::Byron(r) => r.required_witnesses(tx, ctx, utxo, certs, gov),
+        }
+    }
+}
