@@ -5,6 +5,7 @@ mod governance;
 mod protocol_params;
 mod rewards;
 mod snapshot;
+pub mod snapshot_format;
 pub mod substates;
 
 // Re-export governance free functions and types for use by tests
@@ -16,6 +17,7 @@ pub(crate) use governance::{
 };
 #[doc(hidden)]
 pub use rewards::Rat;
+pub use snapshot_format::LedgerStateSnapshot;
 pub use substates::{CertSubState, ConsensusSubState, EpochSubState, GovSubState, UtxoSubState};
 
 use crate::plutus::SlotConfig;
