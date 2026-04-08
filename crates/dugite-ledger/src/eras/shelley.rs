@@ -509,8 +509,15 @@ impl EraRules for ShelleyRules {
         consensus: &mut ConsensusSubState,
     ) {
         // Compute the first slot of the next epoch for stability window check.
-        let first_slot_of_next_epoch = (ctx.current_epoch.0 + 1) * ctx.epoch_length
-            + ctx.shelley_transition_epoch * ctx.byron_epoch_length;
+        let first_slot_of_next_epoch = ctx
+            .current_epoch
+            .0
+            .saturating_add(1)
+            .saturating_mul(ctx.epoch_length)
+            .saturating_add(
+                ctx.shelley_transition_epoch
+                    .saturating_mul(ctx.byron_epoch_length),
+            );
 
         // Compute the d value for the block counting overlay check.
         let d_value = if ctx.params.protocol_version_major >= 7 {
@@ -521,11 +528,12 @@ impl EraRules for ShelleyRules {
             d_n / d_d
         };
 
+        // Shelley through Mary use 3k/f stability window (not 4k/f).
         common::compute_shelley_nonce(
             header,
             ctx.current_slot,
             first_slot_of_next_epoch,
-            ctx.stability_window,
+            ctx.stability_window_3kf,
             d_value,
             consensus,
         );
@@ -817,6 +825,7 @@ mod tests {
             shelley_transition_epoch: 0,
             byron_epoch_length: 21600,
             stability_window: 129600,
+            stability_window_3kf: 129600,
             randomness_stabilisation_window: 129600,
             tx_index: 0,
         }

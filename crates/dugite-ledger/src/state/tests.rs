@@ -9461,9 +9461,13 @@ fn test_block_ref_script_size_exceeds_1mib_rejected() {
 
     let block = make_test_block(1, 1, Hash32::ZERO, vec![tx]);
     let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+    // The ref script size violation is caught either by the block-level
+    // BodyRefScriptsSizeTooBig check (in validate_block_body era rule) or by
+    // the per-transaction TxRefScriptSizeTooLarge check — both are valid
+    // rejection reasons for exceeding 1 MiB.
     assert!(
         matches!(result, Err(LedgerError::BlockTxValidationFailed { ref errors, .. })
-            if errors.contains("BodyRefScriptsSizeTooBig")),
+            if errors.contains("BodyRefScriptsSizeTooBig") || errors.contains("TxRefScriptSizeTooLarge")),
         "Block with >1MiB ref scripts must be rejected; got: {result:?}"
     );
 }

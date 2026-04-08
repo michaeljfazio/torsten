@@ -973,6 +973,7 @@ impl LedgerState {
     /// to be subtracted from `stake_map`.
     ///
     /// Called once at the first Conway-era block, before the epoch transition.
+    #[allow(dead_code)]
     pub(crate) fn exclude_pointer_address_stake(&mut self) {
         if self.epochs.ptr_stake.is_empty() {
             return;
@@ -1093,6 +1094,7 @@ impl LedgerState {
     ///   eta = vrfNonceValue block
     ///   evolving_nonce' = updateNonce evolving_nonce eta
     ///   where updateNonce n e = hash (n <> e)
+    #[allow(dead_code)]
     pub(crate) fn update_evolving_nonce(&mut self, nonce_eta: &[u8]) {
         // Combines evolving nonce with a pre-computed 32-byte eta:
         //   evolving' = blake2b_256(evolving || eta)

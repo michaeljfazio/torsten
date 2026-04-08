@@ -3,19 +3,18 @@
 //! This module contains the core block processing pipeline for the Dugite ledger,
 //! implemented as a thin orchestrator that delegates era-specific logic to
 //! [`EraRulesImpl`](crate::eras::EraRulesImpl) while retaining cross-cutting
-//! concerns (validation, epoch transitions, nonce evolution) inline.
+//! concerns (validation, epoch transitions) inline.
 //!
 //! The orchestrator is responsible for:
 //!
 //! - Verifying block connectivity (prev_hash chain)
+//! - Detecting and dispatching HFC era boundary transformations (`on_era_transition`)
 //! - Detecting and triggering epoch transitions (via existing `process_epoch_transition`)
-//! - Conway HFC era boundary transformations (pointer stake exclusion)
-//! - Block body validation (size, ExUnit budgets, reference script limits)
+//! - Dispatching block body validation (`validate_block_body`)
 //! - Phase-1 and Phase-2 (Plutus) transaction validation (ValidateAll mode)
 //! - Dispatching per-transaction apply logic to era rules
 //! - Pre-Conway protocol parameter update proposal collection
-//! - Nonce evolution (evolving, candidate, LAB nonces)
-//! - Block production tracking (pool block counts, d-parameter gating)
+//! - Dispatching nonce evolution and block production tracking (`evolve_nonce`)
 
 use super::{credential_to_hash, BlockValidationMode, LedgerError, LedgerState};
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
@@ -25,8 +24,7 @@ use crate::ledger_seq::{BlockFieldsDelta, LedgerDelta};
 use crate::plutus::evaluate_plutus_scripts;
 use crate::utxo_diff::UtxoDiff;
 use crate::validation::{
-    calculate_ref_script_size, script_ref_byte_size, validate_transaction_with_pools,
-    ValidationError, MAX_REF_SCRIPT_SIZE_TIER_CAP,
+    calculate_ref_script_size, validate_transaction_with_pools, ValidationError,
 };
 use dugite_primitives::block::{Block, Point};
 use dugite_primitives::era::Era;
@@ -35,19 +33,6 @@ use dugite_primitives::transaction::Certificate;
 use dugite_primitives::value::Lovelace;
 use std::sync::Arc;
 use tracing::{debug, trace, warn};
-
-/// Maximum total reference script size allowed across all transactions in a single
-/// Conway+ block.
-///
-/// Source: Haskell `ppMaxRefScriptSizePerBlockG = L.to . const $ 1024 * 1024`
-/// (Conway PParams). This is not a protocol parameter that can be updated by
-/// governance — it is hardcoded in the implementation.
-///
-/// Re-exported from [`MAX_REF_SCRIPT_SIZE_TIER_CAP`] to keep the block-body
-/// check and the tiered-fee short-circuit in sync with the same value.
-///
-/// The corresponding per-transaction limit is [`MAX_REF_SCRIPT_SIZE_PER_TX`].
-const MAX_REF_SCRIPT_SIZE_PER_BLOCK: u64 = MAX_REF_SCRIPT_SIZE_TIER_CAP;
 
 /// Maximum total reference script size allowed in a single transaction.
 ///
@@ -84,6 +69,7 @@ impl LedgerState {
             shelley_transition_epoch: self.shelley_transition_epoch,
             byron_epoch_length: self.byron_epoch_length,
             stability_window: self.randomness_stabilisation_window,
+            stability_window_3kf: self.stability_window_3kf,
             randomness_stabilisation_window: self.randomness_stabilisation_window,
             tx_index,
         }
@@ -139,15 +125,44 @@ impl LedgerState {
             }
         }
 
-        // ── Step 2: Conway HFC era boundary transformation ────────────────
+        // ── Step 2: HFC era boundary transformation ─────────────────────
         //
-        // Discard pointer-addressed UTxO stake (TranslateEra equivalent).
-        // In Haskell, the TranslateEra instance converts ShelleyInstantStake →
-        // ConwayInstantStake at the ERA boundary, discarding `sisPtrStake` BEFORE
-        // the TICK/SNAP rules run.
-        if block.era >= Era::Conway && !self.epochs.ptr_stake_excluded {
-            self.exclude_pointer_address_stake();
-            self.epochs.ptr_stake_excluded = true;
+        // When the block era exceeds the current ledger era, dispatch
+        // era-specific state transformations via the trait. For Conway this
+        // includes discarding pointer-addressed UTxO stake (TranslateEra
+        // equivalent) and resetting donations.
+        if block.era > self.era {
+            let transition_rules = EraRulesImpl::for_era(block.era);
+            // Clone protocol_params to break the aliasing conflict between
+            // the immutable borrow in RuleContext and &mut self.epochs.
+            let transition_params = self.epochs.protocol_params.clone();
+            let transition_ctx = RuleContext {
+                params: &transition_params,
+                current_slot: block.slot().0,
+                current_epoch: self.epoch,
+                era: block.era,
+                slot_config: Some(&self.slot_config),
+                node_network: self.node_network,
+                genesis_delegates: &self.genesis_delegates,
+                update_quorum: self.update_quorum,
+                epoch_length: self.epoch_length,
+                shelley_transition_epoch: self.shelley_transition_epoch,
+                byron_epoch_length: self.byron_epoch_length,
+                stability_window: self.randomness_stabilisation_window,
+                stability_window_3kf: self.stability_window_3kf,
+                randomness_stabilisation_window: self.randomness_stabilisation_window,
+                tx_index: 0,
+            };
+            transition_rules.on_era_transition(
+                self.era,
+                &transition_ctx,
+                &mut self.utxo,
+                &mut self.certs,
+                &mut self.gov,
+                &mut self.consensus,
+                &mut self.epochs,
+            )?;
+            self.pending_era_transition = Some((self.era, block.era, self.epoch));
         }
 
         // ── Step 3: Epoch transitions ─────────────────────────────────────
@@ -282,128 +297,31 @@ impl LedgerState {
 
         let rules = EraRulesImpl::for_era(block.era);
 
-        // ── Step 6: Block-level ExUnit budget check (ValidateAll only) ────
-        let (block_mem, block_steps) = if mode == BlockValidationMode::ValidateAll {
-            let mut mem: u64 = 0;
-            let mut steps: u64 = 0;
-            for tx in &block.transactions {
-                if tx.is_valid {
-                    for r in &tx.witness_set.redeemers {
-                        mem = mem.saturating_add(r.ex_units.mem);
-                        steps = steps.saturating_add(r.ex_units.steps);
-                    }
-                }
-            }
-            (mem, steps)
-        } else {
-            (0, 0)
-        };
-        if block_mem > self.epochs.protocol_params.max_block_ex_units.mem {
-            if mode == BlockValidationMode::ValidateAll {
-                return Err(LedgerError::BlockTxValidationFailed {
-                    slot: block.slot().0,
-                    tx_hash: String::from("(block-level check)"),
-                    errors: format!(
-                        "BlockExUnitsExceeded: block memory usage {} exceeds limit {} \
-                         (Alonzo+ block-body ExUnits rule)",
-                        block_mem, self.epochs.protocol_params.max_block_ex_units.mem
-                    ),
-                });
-            } else {
-                debug!(
-                    block_mem,
-                    limit = self.epochs.protocol_params.max_block_ex_units.mem,
-                    "Block exceeds max execution unit memory budget (expected during replay before PP updates)"
-                );
-            }
-        }
-        if block_steps > self.epochs.protocol_params.max_block_ex_units.steps {
-            if mode == BlockValidationMode::ValidateAll {
-                return Err(LedgerError::BlockTxValidationFailed {
-                    slot: block.slot().0,
-                    tx_hash: String::from("(block-level check)"),
-                    errors: format!(
-                        "BlockExUnitsExceeded: block step usage {} exceeds limit {} \
-                         (Alonzo+ block-body ExUnits rule)",
-                        block_steps, self.epochs.protocol_params.max_block_ex_units.steps
-                    ),
-                });
-            } else {
-                debug!(
-                    block_steps,
-                    limit = self.epochs.protocol_params.max_block_ex_units.steps,
-                    "Block exceeds max execution unit step budget (expected during replay before PP updates)"
-                );
-            }
-        }
-
-        // ── Step 7: Block-level ref script size check (Conway+, ValidateAll) ──
-        if self.epochs.protocol_params.protocol_version_major >= 9
-            && mode == BlockValidationMode::ValidateAll
-        {
-            // Build within-block UTxO overlay for ref script resolution.
-            let mut block_utxo_overlay: std::collections::HashMap<
-                dugite_primitives::transaction::TransactionInput,
-                dugite_primitives::transaction::TransactionOutput,
-            > = std::collections::HashMap::new();
-            for tx in &block.transactions {
-                if tx.is_valid {
-                    for (idx, output) in tx.body.outputs.iter().enumerate() {
-                        block_utxo_overlay.insert(
-                            dugite_primitives::transaction::TransactionInput {
-                                transaction_id: tx.hash,
-                                index: idx as u32,
-                            },
-                            output.clone(),
-                        );
-                    }
-                }
-            }
-
-            let lookup_with_overlay = |input: &dugite_primitives::transaction::TransactionInput| {
-                block_utxo_overlay
-                    .get(input)
-                    .cloned()
-                    .or_else(|| self.utxo.utxo_set.lookup(input))
+        // ── Step 6: Block body validation (ExUnit budgets, ref scripts) ──
+        //
+        // Dispatched to era rules in ValidateAll mode. Each era checks its own
+        // constraints (e.g., Alonzo+ ExUnit budgets, Conway+ ref script size
+        // limits). In ApplyOnly mode (historical replay) these checks are
+        // skipped — the block was already validated by the producing node.
+        if mode == BlockValidationMode::ValidateAll {
+            let body_ctx = RuleContext {
+                params: &self.epochs.protocol_params,
+                current_slot: block.slot().0,
+                current_epoch: self.epoch,
+                era: block.era,
+                slot_config: Some(&self.slot_config),
+                node_network: self.node_network,
+                genesis_delegates: &self.genesis_delegates,
+                update_quorum: self.update_quorum,
+                epoch_length: self.epoch_length,
+                shelley_transition_epoch: self.shelley_transition_epoch,
+                byron_epoch_length: self.byron_epoch_length,
+                stability_window: self.randomness_stabilisation_window,
+                stability_window_3kf: self.stability_window_3kf,
+                randomness_stabilisation_window: self.randomness_stabilisation_window,
+                tx_index: 0,
             };
-
-            let total_ref_script_size: u64 = block
-                .transactions
-                .iter()
-                .map(|tx| {
-                    let spending_size: u64 = tx
-                        .body
-                        .inputs
-                        .iter()
-                        .filter_map(|inp| {
-                            lookup_with_overlay(inp)
-                                .and_then(|utxo| utxo.script_ref.as_ref().map(script_ref_byte_size))
-                        })
-                        .sum();
-                    let reference_size: u64 = tx
-                        .body
-                        .reference_inputs
-                        .iter()
-                        .filter_map(|inp| {
-                            lookup_with_overlay(inp)
-                                .and_then(|utxo| utxo.script_ref.as_ref().map(script_ref_byte_size))
-                        })
-                        .sum();
-                    spending_size.saturating_add(reference_size)
-                })
-                .fold(0u64, |acc, x| acc.saturating_add(x));
-
-            if total_ref_script_size > MAX_REF_SCRIPT_SIZE_PER_BLOCK {
-                return Err(LedgerError::BlockTxValidationFailed {
-                    slot: block.slot().0,
-                    tx_hash: String::from("(block-level check)"),
-                    errors: format!(
-                        "BodyRefScriptsSizeTooBig: totalRefScriptSize={} exceeds \
-                         maxRefScriptSizePerBlock={} (Conway Bbody rule)",
-                        total_ref_script_size, MAX_REF_SCRIPT_SIZE_PER_BLOCK
-                    ),
-                });
-            }
+            rules.validate_block_body(block, &body_ctx, &self.utxo)?;
         }
 
         // Pre-compute cost_models CBOR once per block
@@ -657,6 +575,7 @@ impl LedgerState {
                 shelley_transition_epoch: self.shelley_transition_epoch,
                 byron_epoch_length: self.byron_epoch_length,
                 stability_window: self.randomness_stabilisation_window,
+                stability_window_3kf: self.stability_window_3kf,
                 randomness_stabilisation_window: self.randomness_stabilisation_window,
                 tx_index: tx_idx as u64,
             };
@@ -724,61 +643,35 @@ impl LedgerState {
             }
         }
 
-        // ── Step 9: Track block production by pool ────────────────────────
+        // ── Step 9: Nonce evolution and block production tracking ─────────
         //
-        // Matches Haskell's `incrBlocks`: only non-overlay blocks are counted.
-        // For Babbage+ (proto >= 7), d = 0 by definition.
-        let current_d = if self.epochs.protocol_params.protocol_version_major >= 7 {
-            0.0
-        } else {
-            self.epochs.protocol_params.d.numerator as f64
-                / self.epochs.protocol_params.d.denominator.max(1) as f64
-        };
-        if current_d < 0.8 && !block.header.issuer_vkey.is_empty() {
-            let pool_id = dugite_primitives::hash::blake2b_224(&block.header.issuer_vkey);
-            *Arc::make_mut(&mut self.consensus.epoch_blocks_by_pool)
-                .entry(pool_id)
-                .or_insert(0) += 1;
-        }
-        self.consensus.epoch_block_count += 1;
-
-        // ── Step 10: Nonce evolution ──────────────────────────────────────
-        //
-        // Praos nonce state machine (matches Haskell reupdateChainDepState):
-        // 1. evolving_nonce updated for EVERY block using era-specific VRF contribution
-        // 2. candidate_nonce tracks evolving_nonce OUTSIDE the stability window
-        if !block.header.nonce_vrf_output.is_empty() {
-            self.update_evolving_nonce(&block.header.nonce_vrf_output);
-
-            // Select stability window based on era.
-            let window = if self.epochs.protocol_params.protocol_version_major >= 9 {
-                self.randomness_stabilisation_window
-            } else {
-                self.stability_window_3kf
+        // Dispatched to era rules via `evolve_nonce`. Each era's implementation
+        // handles: evolving nonce update (VRF-based), candidate nonce freeze
+        // (stability window), lab nonce = prevHashToNonce, and block production
+        // counting (incrBlocks with d-parameter gating).
+        {
+            let nonce_ctx = RuleContext {
+                params: &self.epochs.protocol_params,
+                current_slot: block.slot().0,
+                current_epoch: self.epoch,
+                era: block.era,
+                slot_config: Some(&self.slot_config),
+                node_network: self.node_network,
+                genesis_delegates: &self.genesis_delegates,
+                update_quorum: self.update_quorum,
+                epoch_length: self.epoch_length,
+                shelley_transition_epoch: self.shelley_transition_epoch,
+                byron_epoch_length: self.byron_epoch_length,
+                stability_window: self.randomness_stabilisation_window,
+                stability_window_3kf: self.stability_window_3kf,
+                randomness_stabilisation_window: self.randomness_stabilisation_window,
+                tx_index: 0,
             };
-
-            let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
-            if block.slot().0.saturating_add(window) < first_slot_of_next_epoch {
-                self.consensus.candidate_nonce = self.consensus.evolving_nonce;
-            }
-        } else if block.era.is_shelley_based() {
-            warn!(
-                slot = block.slot().0,
-                block_no = block.block_number().0,
-                epoch = self.epoch.0,
-                era = ?block.era,
-                "Nonce: Shelley+ block has EMPTY nonce_vrf_output!"
-            );
+            rules.evolve_nonce(&block.header, &nonce_ctx, &mut self.consensus);
         }
 
-        // LAB nonce = prevHashToNonce(block.prevHash)
-        self.consensus.lab_nonce = block.header.prev_hash;
-
-        // ── Step 11: Update tip and era ───────────────────────────────────
+        // ── Step 10: Update tip and era ──────────────────────────────────
         self.tip = block.tip();
-        if block.era > self.era {
-            self.pending_era_transition = Some((self.era, block.era, self.epoch));
-        }
         self.era = block.era;
 
         // Record this block's UTxO diff for rollback support.

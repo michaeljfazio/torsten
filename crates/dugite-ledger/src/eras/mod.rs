@@ -42,6 +42,9 @@ pub struct RuleContext<'a> {
     pub shelley_transition_epoch: u64,
     pub byron_epoch_length: u64,
     pub stability_window: u64,
+    /// Pre-Conway stability window (3k/f). Used by Shelley through Babbage for
+    /// the candidate nonce freeze cutoff.
+    pub stability_window_3kf: u64,
     pub randomness_stabilisation_window: u64,
     /// Index of the current transaction within the block (0-based).
     /// Used for pointer map entries during certificate processing.

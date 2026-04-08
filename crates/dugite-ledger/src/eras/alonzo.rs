@@ -47,17 +47,17 @@ impl AlonzoRules {
 impl EraRules for AlonzoRules {
     /// Alonzo block body validation.
     ///
-    /// In a full implementation this would check that the total ExUnit budget
-    /// across all transactions does not exceed the per-block limits. For now
-    /// we return `Ok(())` — the budget check will be added when Phase-2
-    /// validation is fully implemented.
+    /// Validate Alonzo block body constraints.
+    ///
+    /// Checks that the total ExUnit budget (memory + steps) across all valid
+    /// transactions does not exceed `max_block_ex_units` from protocol params.
     fn validate_block_body(
         &self,
-        _block: &Block,
-        _ctx: &RuleContext,
+        block: &Block,
+        ctx: &RuleContext,
         _utxo: &UtxoSubState,
     ) -> Result<(), LedgerError> {
-        Ok(())
+        common::validate_block_ex_units(block, ctx)
     }
 
     /// Apply a single valid Alonzo transaction (IsValid=true).
@@ -143,8 +143,15 @@ impl EraRules for AlonzoRules {
         ctx: &RuleContext,
         consensus: &mut ConsensusSubState,
     ) {
-        let first_slot_of_next_epoch = (ctx.current_epoch.0 + 1) * ctx.epoch_length
-            + ctx.shelley_transition_epoch * ctx.byron_epoch_length;
+        let first_slot_of_next_epoch = ctx
+            .current_epoch
+            .0
+            .saturating_add(1)
+            .saturating_mul(ctx.epoch_length)
+            .saturating_add(
+                ctx.shelley_transition_epoch
+                    .saturating_mul(ctx.byron_epoch_length),
+            );
 
         let d_value = if ctx.params.protocol_version_major >= 7 {
             0.0
@@ -154,11 +161,12 @@ impl EraRules for AlonzoRules {
             d_n / d_d
         };
 
+        // Alonzo uses 3k/f stability window (not 4k/f).
         common::compute_shelley_nonce(
             header,
             ctx.current_slot,
             first_slot_of_next_epoch,
-            ctx.stability_window,
+            ctx.stability_window_3kf,
             d_value,
             consensus,
         );
@@ -369,6 +377,7 @@ mod tests {
             shelley_transition_epoch: 0,
             byron_epoch_length: 21600,
             stability_window: 129600,
+            stability_window_3kf: 129600,
             randomness_stabilisation_window: 129600,
             tx_index: 0,
         }

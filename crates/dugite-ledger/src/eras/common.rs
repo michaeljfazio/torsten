@@ -26,7 +26,10 @@
 use std::sync::Arc;
 
 use dugite_primitives::address::Address;
-use dugite_primitives::block::BlockHeader;
+use dugite_primitives::block::{Block, BlockHeader};
+
+use super::RuleContext;
+use crate::state::LedgerError;
 use dugite_primitives::credentials::{Credential, Pointer};
 use dugite_primitives::hash::{blake2b_224, blake2b_256, Hash32};
 use dugite_primitives::protocol_params::ProtocolParameters;
@@ -600,7 +603,55 @@ pub(crate) fn compute_shelley_nonce(
 }
 
 // ============================================================================
-// 6. validate_shelley_base (stub)
+// 6. Block-body ExUnit budget validation (Alonzo+)
+// ============================================================================
+
+/// Validate that the total ExUnit budget (memory + steps) across all valid
+/// transactions in the block does not exceed the per-block limits.
+///
+/// Matches Haskell's Alonzo BBODY rule: `totalExUnits txs <= maxBlockExUnits pp`.
+/// Only valid transactions (is_valid=true) contribute to the budget since
+/// invalid transactions do not execute scripts.
+pub(crate) fn validate_block_ex_units(block: &Block, ctx: &RuleContext) -> Result<(), LedgerError> {
+    let mut mem: u64 = 0;
+    let mut steps: u64 = 0;
+    for tx in &block.transactions {
+        if tx.is_valid {
+            for r in &tx.witness_set.redeemers {
+                mem = mem.saturating_add(r.ex_units.mem);
+                steps = steps.saturating_add(r.ex_units.steps);
+            }
+        }
+    }
+
+    if mem > ctx.params.max_block_ex_units.mem {
+        return Err(LedgerError::BlockTxValidationFailed {
+            slot: ctx.current_slot,
+            tx_hash: String::from("(block-level check)"),
+            errors: format!(
+                "BlockExUnitsExceeded: block memory usage {} exceeds limit {} \
+                 (Alonzo+ block-body ExUnits rule)",
+                mem, ctx.params.max_block_ex_units.mem
+            ),
+        });
+    }
+    if steps > ctx.params.max_block_ex_units.steps {
+        return Err(LedgerError::BlockTxValidationFailed {
+            slot: ctx.current_slot,
+            tx_hash: String::from("(block-level check)"),
+            errors: format!(
+                "BlockExUnitsExceeded: block step usage {} exceeds limit {} \
+                 (Alonzo+ block-body ExUnits rule)",
+                steps, ctx.params.max_block_ex_units.steps
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// 7. validate_shelley_base (stub)
 // ============================================================================
 
 /// Phase-1 validation rules common to all Shelley+ eras (rules 1-10).

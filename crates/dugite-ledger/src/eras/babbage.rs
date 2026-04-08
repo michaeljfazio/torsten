@@ -51,13 +51,17 @@ impl EraRules for BabbageRules {
     /// In a full implementation this would check ExUnit budgets and reference
     /// script size limits. For now we return `Ok(())` — these checks will be
     /// added when full block validation is implemented.
+    /// Validate Babbage block body constraints.
+    ///
+    /// Checks that the total ExUnit budget (memory + steps) across all valid
+    /// transactions does not exceed `max_block_ex_units` from protocol params.
     fn validate_block_body(
         &self,
-        _block: &Block,
-        _ctx: &RuleContext,
+        block: &Block,
+        ctx: &RuleContext,
         _utxo: &UtxoSubState,
     ) -> Result<(), LedgerError> {
-        Ok(())
+        common::validate_block_ex_units(block, ctx)
     }
 
     /// Apply a single valid Babbage transaction (IsValid=true).
@@ -138,17 +142,25 @@ impl EraRules for BabbageRules {
         ctx: &RuleContext,
         consensus: &mut ConsensusSubState,
     ) {
-        let first_slot_of_next_epoch = (ctx.current_epoch.0 + 1) * ctx.epoch_length
-            + ctx.shelley_transition_epoch * ctx.byron_epoch_length;
+        let first_slot_of_next_epoch = ctx
+            .current_epoch
+            .0
+            .saturating_add(1)
+            .saturating_mul(ctx.epoch_length)
+            .saturating_add(
+                ctx.shelley_transition_epoch
+                    .saturating_mul(ctx.byron_epoch_length),
+            );
 
         // Babbage (proto >= 7): d is always 0 (fully decentralized).
         let d_value = 0.0;
 
+        // Babbage uses 3k/f stability window (not 4k/f).
         common::compute_shelley_nonce(
             header,
             ctx.current_slot,
             first_slot_of_next_epoch,
-            ctx.stability_window,
+            ctx.stability_window_3kf,
             d_value,
             consensus,
         );
@@ -363,6 +375,7 @@ mod tests {
             shelley_transition_epoch: 0,
             byron_epoch_length: 21600,
             stability_window: 129600,
+            stability_window_3kf: 129600,
             randomness_stabilisation_window: 129600,
             tx_index: 0,
         }

@@ -76,14 +76,97 @@ impl EraRules for ConwayRules {
     /// size limit (max_ref_script_size_per_block). For now we return `Ok(())`
     /// -- the detailed ref-script size check will be added when the orchestrator
     /// is wired in and full block-level validation is implemented.
+    /// Validate Conway block body constraints.
+    ///
+    /// Checks:
+    /// 1. Total ExUnit budget (memory + steps) does not exceed block limits.
+    /// 2. Total reference script size across all transactions does not exceed
+    ///    1 MiB (Conway `ppMaxRefScriptSizePerBlockG`).
     fn validate_block_body(
         &self,
-        _block: &Block,
-        _ctx: &RuleContext,
-        _utxo: &UtxoSubState,
+        block: &Block,
+        ctx: &RuleContext,
+        utxo: &UtxoSubState,
     ) -> Result<(), LedgerError> {
-        // TODO: Check total reference script size across all transactions in the
-        // block against ctx.params.max_ref_script_size_per_block (if available).
+        // Step 1: ExUnit budget check (shared with Alonzo/Babbage).
+        common::validate_block_ex_units(block, ctx)?;
+
+        // Step 2: Block-level reference script size check.
+        // Build within-block UTxO overlay for ref script resolution (outputs
+        // created earlier in the block may be referenced later).
+        let mut block_utxo_overlay: std::collections::HashMap<
+            dugite_primitives::transaction::TransactionInput,
+            dugite_primitives::transaction::TransactionOutput,
+        > = std::collections::HashMap::new();
+        for tx in &block.transactions {
+            if tx.is_valid {
+                for (idx, output) in tx.body.outputs.iter().enumerate() {
+                    block_utxo_overlay.insert(
+                        dugite_primitives::transaction::TransactionInput {
+                            transaction_id: tx.hash,
+                            index: idx as u32,
+                        },
+                        output.clone(),
+                    );
+                }
+            }
+        }
+
+        let lookup_with_overlay = |input: &dugite_primitives::transaction::TransactionInput| {
+            block_utxo_overlay
+                .get(input)
+                .cloned()
+                .or_else(|| utxo.utxo_set.lookup(input))
+        };
+
+        let total_ref_script_size: u64 = block
+            .transactions
+            .iter()
+            .map(|tx| {
+                let spending_size: u64 = tx
+                    .body
+                    .inputs
+                    .iter()
+                    .filter_map(|inp| {
+                        lookup_with_overlay(inp).and_then(|utxo_out| {
+                            utxo_out
+                                .script_ref
+                                .as_ref()
+                                .map(crate::validation::script_ref_byte_size)
+                        })
+                    })
+                    .sum();
+                let reference_size: u64 = tx
+                    .body
+                    .reference_inputs
+                    .iter()
+                    .filter_map(|inp| {
+                        lookup_with_overlay(inp).and_then(|utxo_out| {
+                            utxo_out
+                                .script_ref
+                                .as_ref()
+                                .map(crate::validation::script_ref_byte_size)
+                        })
+                    })
+                    .sum();
+                spending_size.saturating_add(reference_size)
+            })
+            .fold(0u64, |acc, x| acc.saturating_add(x));
+
+        // Conway block body limit: 1 MiB (hardcoded, not governance-updateable).
+        const MAX_REF_SCRIPT_SIZE_PER_BLOCK: u64 = 1024 * 1024;
+        if total_ref_script_size > MAX_REF_SCRIPT_SIZE_PER_BLOCK {
+            return Err(LedgerError::BlockTxValidationFailed {
+                slot: ctx.current_slot,
+                tx_hash: String::from("(block-level check)"),
+                errors: format!(
+                    "BodyRefScriptsSizeTooBig: totalRefScriptSize={} exceeds \
+                     maxRefScriptSizePerBlock={} (Conway Bbody rule)",
+                    total_ref_script_size, MAX_REF_SCRIPT_SIZE_PER_BLOCK
+                ),
+            });
+        }
+
         Ok(())
     }
 
@@ -510,8 +593,15 @@ impl EraRules for ConwayRules {
         ctx: &RuleContext,
         consensus: &mut ConsensusSubState,
     ) {
-        let first_slot_of_next_epoch = (ctx.current_epoch.0 + 1) * ctx.epoch_length
-            + ctx.shelley_transition_epoch * ctx.byron_epoch_length;
+        let first_slot_of_next_epoch = ctx
+            .current_epoch
+            .0
+            .saturating_add(1)
+            .saturating_mul(ctx.epoch_length)
+            .saturating_add(
+                ctx.shelley_transition_epoch
+                    .saturating_mul(ctx.byron_epoch_length),
+            );
 
         // Conway (proto >= 9): d is always 0 (fully decentralized).
         let d_value = 0.0;
@@ -575,6 +665,22 @@ impl EraRules for ConwayRules {
         // to return StakeRouting::None for pointer addresses, effectively
         // excluding pointer-addressed UTxO coins from the stake distribution
         // going forward.
+        //
+        // Also clear the ptr_stake map itself — matching Haskell's TranslateEra
+        // which converts ShelleyInstantStake → ConwayInstantStake at the ERA
+        // boundary, discarding `sisPtrStake` BEFORE the TICK/SNAP rules run.
+        if !epochs.ptr_stake.is_empty() {
+            let excluded_count = epochs.ptr_stake.len() as u64;
+            let excluded_total: u64 = epochs.ptr_stake.values().sum();
+            epochs.ptr_stake.clear();
+            tracing::info!(
+                excluded_count,
+                excluded_total,
+                excluded_ada = excluded_total / 1_000_000,
+                "Conway: discarded pointer-addressed UTxO stake — \
+                 matching TranslateEra ConwayInstantStake semantics"
+            );
+        }
         epochs.ptr_stake_excluded = true;
 
         // Step 5: Reset utxosDonation to 0.
@@ -1236,6 +1342,7 @@ mod tests {
             shelley_transition_epoch: 0,
             byron_epoch_length: 21600,
             stability_window: 129600,
+            stability_window_3kf: 129600,
             randomness_stabilisation_window: 129600,
             tx_index: 0,
         }

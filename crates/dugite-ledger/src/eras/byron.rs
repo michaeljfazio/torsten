@@ -1167,6 +1167,7 @@ mod tests {
             shelley_transition_epoch: 0,
             byron_epoch_length: 21600,
             stability_window: 0,
+            stability_window_3kf: 0,
             randomness_stabilisation_window: 0,
             tx_index: 0,
         }
