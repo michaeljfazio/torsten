@@ -192,3 +192,178 @@ impl LedgerState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dugite_primitives::protocol_params::ProtocolParameters;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// Create a fresh `LedgerState` with mainnet default protocol parameters.
+    fn make_state() -> LedgerState {
+        LedgerState::new(ProtocolParameters::mainnet_defaults())
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_protocol_param_update tests
+    // -----------------------------------------------------------------------
+
+    /// Applying an update with only `min_fee_a` set must change exactly that
+    /// field and leave every other parameter at its default value.
+    #[test]
+    fn test_apply_partial_update() {
+        let mut state = make_state();
+        let defaults = ProtocolParameters::mainnet_defaults();
+
+        let update = ProtocolParamUpdate {
+            min_fee_a: Some(50),
+            ..Default::default()
+        };
+
+        state
+            .apply_protocol_param_update(&update)
+            .expect("partial update should succeed");
+
+        // The targeted field must have changed.
+        assert_eq!(state.protocol_params.min_fee_a, 50);
+
+        // Every other scalar field must be untouched.
+        assert_eq!(state.protocol_params.min_fee_b, defaults.min_fee_b);
+        assert_eq!(
+            state.protocol_params.max_block_body_size,
+            defaults.max_block_body_size
+        );
+        assert_eq!(state.protocol_params.max_tx_size, defaults.max_tx_size);
+        assert_eq!(state.protocol_params.key_deposit, defaults.key_deposit);
+        assert_eq!(state.protocol_params.pool_deposit, defaults.pool_deposit);
+        assert_eq!(state.protocol_params.n_opt, defaults.n_opt);
+    }
+
+    /// Applying an update with multiple fields set must change exactly those
+    /// fields and leave every other parameter at its default value.
+    #[test]
+    fn test_apply_full_update() {
+        let mut state = make_state();
+        let defaults = ProtocolParameters::mainnet_defaults();
+
+        let update = ProtocolParamUpdate {
+            min_fee_a: Some(100),
+            min_fee_b: Some(200_000),
+            max_tx_size: Some(32768),
+            ..Default::default()
+        };
+
+        state
+            .apply_protocol_param_update(&update)
+            .expect("multi-field update should succeed");
+
+        assert_eq!(state.protocol_params.min_fee_a, 100);
+        assert_eq!(state.protocol_params.min_fee_b, 200_000);
+        assert_eq!(state.protocol_params.max_tx_size, 32768);
+
+        // Fields not mentioned in the update remain unchanged.
+        assert_eq!(
+            state.protocol_params.max_block_body_size,
+            defaults.max_block_body_size
+        );
+        assert_eq!(
+            state.protocol_params.max_block_header_size,
+            defaults.max_block_header_size
+        );
+        assert_eq!(state.protocol_params.key_deposit, defaults.key_deposit);
+    }
+
+    /// An update with all fields set to `None` is a legal no-op and must not
+    /// modify any parameter.
+    #[test]
+    fn test_noop_update() {
+        let mut state = make_state();
+        let defaults = ProtocolParameters::mainnet_defaults();
+
+        // Default::default() produces an all-None ProtocolParamUpdate.
+        let update = ProtocolParamUpdate::default();
+
+        let result = state.apply_protocol_param_update(&update);
+        assert!(result.is_ok(), "no-op update must not return an error");
+
+        // Spot-check a handful of fields to confirm nothing changed.
+        assert_eq!(state.protocol_params.min_fee_a, defaults.min_fee_a);
+        assert_eq!(state.protocol_params.min_fee_b, defaults.min_fee_b);
+        assert_eq!(state.protocol_params.max_tx_size, defaults.max_tx_size);
+        assert_eq!(state.protocol_params.n_opt, defaults.n_opt);
+        assert_eq!(state.protocol_params.key_deposit, defaults.key_deposit);
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_threshold tests
+    // -----------------------------------------------------------------------
+
+    /// A valid threshold with numerator < denominator must return `Ok(())`.
+    #[test]
+    fn test_threshold_valid() {
+        let r = Rational {
+            numerator: 1,
+            denominator: 2,
+        };
+        assert!(
+            LedgerState::validate_threshold("test", &r).is_ok(),
+            "1/2 is a valid threshold in [0, 1]"
+        );
+    }
+
+    /// A threshold where numerator > denominator must return an `Err` containing
+    /// `LedgerError::InvalidProtocolParam`.
+    #[test]
+    fn test_threshold_num_exceeds_denom() {
+        let r = Rational {
+            numerator: 3,
+            denominator: 2,
+        };
+        let err = LedgerState::validate_threshold("test", &r)
+            .expect_err("3/2 exceeds 1 and must be rejected");
+
+        // Verify the error variant and that the message names the parameter.
+        match err {
+            LedgerError::InvalidProtocolParam(msg) => {
+                assert!(
+                    msg.contains("test"),
+                    "error message should name the parameter; got: {msg}"
+                );
+                assert!(
+                    msg.contains("exceeds"),
+                    "error message should mention 'exceeds'; got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidProtocolParam, got: {other:?}"),
+        }
+    }
+
+    /// A threshold with a zero denominator must return an `Err` containing
+    /// `LedgerError::InvalidProtocolParam`.
+    #[test]
+    fn test_threshold_zero_denominator() {
+        let r = Rational {
+            numerator: 1,
+            denominator: 0,
+        };
+        let err = LedgerState::validate_threshold("test", &r)
+            .expect_err("denominator 0 is invalid and must be rejected");
+
+        match err {
+            LedgerError::InvalidProtocolParam(msg) => {
+                assert!(
+                    msg.contains("test"),
+                    "error message should name the parameter; got: {msg}"
+                );
+                assert!(
+                    msg.contains("zero denominator"),
+                    "error message should mention 'zero denominator'; got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidProtocolParam, got: {other:?}"),
+        }
+    }
+}
