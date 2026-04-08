@@ -148,7 +148,8 @@ pub trait EraRules {
 /// then dispatches through the enum's `EraRules` forwarding impl.
 pub enum EraRulesImpl {
     Byron(byron::ByronRules),
-    // Shelley, Alonzo, Babbage, Conway added in later tasks
+    Shelley(shelley::ShelleyRules),
+    // Alonzo, Babbage, Conway added in later tasks
 }
 
 impl EraRulesImpl {
@@ -160,6 +161,7 @@ impl EraRulesImpl {
     pub fn for_era(era: Era) -> Self {
         match era {
             Era::Byron => Self::Byron(byron::ByronRules),
+            Era::Shelley | Era::Allegra | Era::Mary => Self::Shelley(shelley::ShelleyRules),
             _ => todo!("Era rule implementations for {:?} not yet added", era),
         }
     }
@@ -174,6 +176,7 @@ impl EraRules for EraRulesImpl {
     ) -> Result<(), LedgerError> {
         match self {
             Self::Byron(r) => r.validate_block_body(block, ctx, utxo),
+            Self::Shelley(r) => r.validate_block_body(block, ctx, utxo),
         }
     }
 
@@ -189,6 +192,7 @@ impl EraRules for EraRulesImpl {
     ) -> Result<UtxoDiff, LedgerError> {
         match self {
             Self::Byron(r) => r.apply_valid_tx(tx, mode, ctx, utxo, certs, gov, epochs),
+            Self::Shelley(r) => r.apply_valid_tx(tx, mode, ctx, utxo, certs, gov, epochs),
         }
     }
 
@@ -201,6 +205,7 @@ impl EraRules for EraRulesImpl {
     ) -> Result<UtxoDiff, LedgerError> {
         match self {
             Self::Byron(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
+            Self::Shelley(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
         }
     }
 
@@ -218,6 +223,9 @@ impl EraRules for EraRulesImpl {
             Self::Byron(r) => {
                 r.process_epoch_transition(new_epoch, ctx, utxo, certs, gov, epochs, consensus)
             }
+            Self::Shelley(r) => {
+                r.process_epoch_transition(new_epoch, ctx, utxo, certs, gov, epochs, consensus)
+            }
         }
     }
 
@@ -229,12 +237,14 @@ impl EraRules for EraRulesImpl {
     ) {
         match self {
             Self::Byron(r) => r.evolve_nonce(header, ctx, consensus),
+            Self::Shelley(r) => r.evolve_nonce(header, ctx, consensus),
         }
     }
 
     fn min_fee(&self, tx: &Transaction, ctx: &RuleContext, utxo: &UtxoSubState) -> u64 {
         match self {
             Self::Byron(r) => r.min_fee(tx, ctx, utxo),
+            Self::Shelley(r) => r.min_fee(tx, ctx, utxo),
         }
     }
 
@@ -252,6 +262,9 @@ impl EraRules for EraRulesImpl {
             Self::Byron(r) => {
                 r.on_era_transition(from_era, ctx, utxo, certs, gov, consensus, epochs)
             }
+            Self::Shelley(r) => {
+                r.on_era_transition(from_era, ctx, utxo, certs, gov, consensus, epochs)
+            }
         }
     }
 
@@ -265,6 +278,7 @@ impl EraRules for EraRulesImpl {
     ) -> HashSet<Hash28> {
         match self {
             Self::Byron(r) => r.required_witnesses(tx, ctx, utxo, certs, gov),
+            Self::Shelley(r) => r.required_witnesses(tx, ctx, utxo, certs, gov),
         }
     }
 }
