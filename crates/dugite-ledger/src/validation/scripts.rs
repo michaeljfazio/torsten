@@ -852,3 +852,388 @@ pub(super) fn compute_min_fee(
             .saturating_add(eu_fee),
     )
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utxo::UtxoSet;
+    use dugite_primitives::address::Address;
+    use dugite_primitives::hash::{Hash28, Hash32, TransactionHash};
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::time::SlotNo;
+    use dugite_primitives::transaction::OutputDatum;
+    use dugite_primitives::transaction::{
+        NativeScript, ScriptRef, Transaction, TransactionInput, TransactionOutput,
+    };
+    use dugite_primitives::value::{Lovelace, Value};
+    use std::collections::HashSet;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// Build a dummy 32-byte key hash seeded from a single byte value.
+    fn key_hash(seed: u8) -> Hash32 {
+        Hash32::from_bytes([seed; 32])
+    }
+
+    /// Build a dummy 28-byte hash seeded from a single byte value.
+    fn hash28(seed: u8) -> Hash28 {
+        Hash28::from_bytes([seed; 28])
+    }
+
+    /// Build a dummy TransactionInput seeded from a byte value.
+    fn tx_input(seed: u8) -> TransactionInput {
+        TransactionInput {
+            transaction_id: TransactionHash::from_bytes([seed; 32]),
+            index: 0,
+        }
+    }
+
+    /// Build a minimal `TransactionOutput` with no datum and no script_ref.
+    fn simple_output() -> TransactionOutput {
+        TransactionOutput {
+            address: Address::Enterprise(dugite_primitives::address::EnterpriseAddress {
+                network: dugite_primitives::network::NetworkId::Testnet,
+                payment: dugite_primitives::credentials::Credential::VerificationKey(hash28(0x01)),
+            }),
+            value: Value::lovelace(1_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Native script evaluation — 6 tests
+    // -----------------------------------------------------------------------
+
+    /// A ScriptPubkey script passes when its keyhash is in the signer set.
+    #[test]
+    fn test_native_script_pubkey_match() {
+        let kh = key_hash(0xAA);
+        let script = NativeScript::ScriptPubkey(kh);
+        let mut signers = HashSet::new();
+        signers.insert(kh);
+        assert!(evaluate_native_script(&script, &signers, SlotNo(0)));
+    }
+
+    /// A ScriptPubkey script fails when its keyhash is absent from the signer set.
+    #[test]
+    fn test_native_script_pubkey_no_match() {
+        let kh = key_hash(0xAA);
+        let other = key_hash(0xBB);
+        let script = NativeScript::ScriptPubkey(kh);
+        let mut signers = HashSet::new();
+        signers.insert(other);
+        assert!(!evaluate_native_script(&script, &signers, SlotNo(0)));
+    }
+
+    /// ScriptAll requires every sub-script to pass.
+    /// Passes when both signers are present; fails when only one is.
+    #[test]
+    fn test_native_script_all() {
+        let kh_a = key_hash(0x01);
+        let kh_b = key_hash(0x02);
+        let script = NativeScript::ScriptAll(vec![
+            NativeScript::ScriptPubkey(kh_a),
+            NativeScript::ScriptPubkey(kh_b),
+        ]);
+
+        // Both signers — should pass.
+        let mut signers = HashSet::new();
+        signers.insert(kh_a);
+        signers.insert(kh_b);
+        assert!(evaluate_native_script(&script, &signers, SlotNo(0)));
+
+        // Only one signer — should fail.
+        let mut signers_one = HashSet::new();
+        signers_one.insert(kh_a);
+        assert!(!evaluate_native_script(&script, &signers_one, SlotNo(0)));
+
+        // No signers — should fail.
+        assert!(!evaluate_native_script(&script, &HashSet::new(), SlotNo(0)));
+    }
+
+    /// ScriptAny requires at least one sub-script to pass.
+    #[test]
+    fn test_native_script_any() {
+        let kh_a = key_hash(0x01);
+        let kh_b = key_hash(0x02);
+        let script = NativeScript::ScriptAny(vec![
+            NativeScript::ScriptPubkey(kh_a),
+            NativeScript::ScriptPubkey(kh_b),
+        ]);
+
+        // Only signer A — should pass (any one is enough).
+        let mut signers_a = HashSet::new();
+        signers_a.insert(kh_a);
+        assert!(evaluate_native_script(&script, &signers_a, SlotNo(0)));
+
+        // Only signer B — should also pass.
+        let mut signers_b = HashSet::new();
+        signers_b.insert(kh_b);
+        assert!(evaluate_native_script(&script, &signers_b, SlotNo(0)));
+
+        // No signers — should fail.
+        assert!(!evaluate_native_script(&script, &HashSet::new(), SlotNo(0)));
+    }
+
+    /// ScriptNOfK(2, [a, b, c]) passes only when at least 2 sub-scripts satisfy.
+    #[test]
+    fn test_native_script_n_of_k() {
+        let kh_a = key_hash(0x01);
+        let kh_b = key_hash(0x02);
+        let kh_c = key_hash(0x03);
+        let script = NativeScript::ScriptNOfK(
+            2,
+            vec![
+                NativeScript::ScriptPubkey(kh_a),
+                NativeScript::ScriptPubkey(kh_b),
+                NativeScript::ScriptPubkey(kh_c),
+            ],
+        );
+
+        // Exactly 2 of 3 signers present — should pass.
+        let mut signers_ab = HashSet::new();
+        signers_ab.insert(kh_a);
+        signers_ab.insert(kh_b);
+        assert!(evaluate_native_script(&script, &signers_ab, SlotNo(0)));
+
+        // All 3 signers — should still pass.
+        let mut signers_all = HashSet::new();
+        signers_all.insert(kh_a);
+        signers_all.insert(kh_b);
+        signers_all.insert(kh_c);
+        assert!(evaluate_native_script(&script, &signers_all, SlotNo(0)));
+
+        // Only 1 of 3 — should fail.
+        let mut signers_one = HashSet::new();
+        signers_one.insert(kh_a);
+        assert!(!evaluate_native_script(&script, &signers_one, SlotNo(0)));
+
+        // No signers — should fail.
+        assert!(!evaluate_native_script(&script, &HashSet::new(), SlotNo(0)));
+    }
+
+    /// InvalidBefore(100): slot 99 → false, slot 100 → true (inclusive lower bound).
+    /// InvalidHereafter(100): slot 99 → true, slot 100 → false (exclusive upper bound).
+    #[test]
+    fn test_native_script_time_locks() {
+        let signers: HashSet<Hash32> = HashSet::new();
+
+        let before = NativeScript::InvalidBefore(SlotNo(100));
+        // Slot 99 is before the lower bound — tx not yet valid.
+        assert!(!evaluate_native_script(&before, &signers, SlotNo(99)));
+        // Slot 100 equals the lower bound — tx is now valid.
+        assert!(evaluate_native_script(&before, &signers, SlotNo(100)));
+        // Slot 200 is well past the lower bound — valid.
+        assert!(evaluate_native_script(&before, &signers, SlotNo(200)));
+
+        let hereafter = NativeScript::InvalidHereafter(SlotNo(100));
+        // Slot 99 is strictly before the upper bound — valid.
+        assert!(evaluate_native_script(&hereafter, &signers, SlotNo(99)));
+        // Slot 100 equals (and thus is not strictly less than) the upper bound — invalid.
+        assert!(!evaluate_native_script(&hereafter, &signers, SlotNo(100)));
+        // Slot 101 is past the upper bound — invalid.
+        assert!(!evaluate_native_script(&hereafter, &signers, SlotNo(101)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Script hash computation — 1 test
+    // -----------------------------------------------------------------------
+
+    /// compute_script_ref_hash prefixes native scripts with 0x00 and Plutus V2
+    /// scripts with 0x02 before hashing, matching the Cardano spec tag convention.
+    #[test]
+    fn test_script_hash_type_tags() {
+        // --- Native script: tag 0x00 ---
+        // Use a simple ScriptPubkey native script.
+        let kh = key_hash(0x42);
+        let ns = NativeScript::ScriptPubkey(kh);
+        let script_ref_native = ScriptRef::NativeScript(ns.clone());
+
+        let computed = compute_script_ref_hash(&script_ref_native);
+
+        // Manually reproduce: blake2b_224(0x00 || script_cbor)
+        let script_cbor = dugite_serialization::encode_native_script(&ns);
+        let mut tagged_native = Vec::with_capacity(1 + script_cbor.len());
+        tagged_native.push(0x00u8);
+        tagged_native.extend_from_slice(&script_cbor);
+        let expected_native = dugite_primitives::hash::blake2b_224(&tagged_native);
+
+        assert_eq!(
+            computed, expected_native,
+            "Native script hash must equal blake2b_224(0x00 || script_cbor)"
+        );
+
+        // --- Plutus V2: tag 0x02 ---
+        let plutus_v2_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03];
+        let script_ref_v2 = ScriptRef::PlutusV2(plutus_v2_bytes.clone());
+        let computed_v2 = compute_script_ref_hash(&script_ref_v2);
+
+        let mut tagged_v2 = Vec::with_capacity(1 + plutus_v2_bytes.len());
+        tagged_v2.push(0x02u8);
+        tagged_v2.extend_from_slice(&plutus_v2_bytes);
+        let expected_v2 = dugite_primitives::hash::blake2b_224(&tagged_v2);
+
+        assert_eq!(
+            computed_v2, expected_v2,
+            "Plutus V2 script hash must equal blake2b_224(0x02 || script_bytes)"
+        );
+
+        // The two hashes must differ because the prefix bytes differ.
+        assert_ne!(
+            computed, computed_v2,
+            "Native and Plutus V2 hashes must differ (different tag bytes)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Available script collection — 2 tests
+    // -----------------------------------------------------------------------
+
+    /// collect_available_script_hashes returns hashes for native and Plutus V2
+    /// scripts present in the transaction witness set.
+    #[test]
+    fn test_available_scripts_from_witnesses() {
+        let mut tx = Transaction::empty_with_hash(TransactionHash::from_bytes([0x11; 32]));
+
+        // Add a native script to the witness set.
+        let kh = key_hash(0x55);
+        let ns = NativeScript::ScriptPubkey(kh);
+        tx.witness_set.native_scripts.push(ns.clone());
+
+        // Add a Plutus V2 script to the witness set.
+        let v2_bytes = vec![0xCA, 0xFE, 0xBA, 0xBE];
+        tx.witness_set.plutus_v2_scripts.push(v2_bytes.clone());
+
+        let utxo_set = UtxoSet::new();
+        let available = collect_available_script_hashes(&tx, &utxo_set);
+
+        // Compute expected hash for the native script.
+        let ns_cbor = dugite_serialization::encode_native_script(&ns);
+        let mut ns_tagged = vec![0x00u8];
+        ns_tagged.extend_from_slice(&ns_cbor);
+        let ns_hash = dugite_primitives::hash::blake2b_224(&ns_tagged);
+
+        // Compute expected hash for the Plutus V2 script.
+        let mut v2_tagged = vec![0x02u8];
+        v2_tagged.extend_from_slice(&v2_bytes);
+        let v2_hash = dugite_primitives::hash::blake2b_224(&v2_tagged);
+
+        assert!(
+            available.contains(&ns_hash),
+            "Native script hash should be in available set"
+        );
+        assert!(
+            available.contains(&v2_hash),
+            "Plutus V2 script hash should be in available set"
+        );
+        assert_eq!(
+            available.len(),
+            2,
+            "Available set should contain exactly 2 hashes"
+        );
+    }
+
+    /// collect_available_script_hashes picks up script_ref hashes from UTxOs
+    /// reachable via reference inputs.
+    #[test]
+    fn test_available_scripts_from_ref_inputs() {
+        let ref_input = tx_input(0xAB);
+
+        let mut tx = Transaction::empty_with_hash(TransactionHash::from_bytes([0x22; 32]));
+        tx.body.reference_inputs.push(ref_input.clone());
+
+        // Build a UTxO that carries a Plutus V2 script_ref.
+        let v2_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
+        let mut utxo_set = UtxoSet::new();
+        let mut output = simple_output();
+        output.script_ref = Some(ScriptRef::PlutusV2(v2_bytes.clone()));
+        utxo_set.insert(ref_input, output);
+
+        let available = collect_available_script_hashes(&tx, &utxo_set);
+
+        // Compute the expected hash.
+        let mut tagged = vec![0x02u8];
+        tagged.extend_from_slice(&v2_bytes);
+        let expected = dugite_primitives::hash::blake2b_224(&tagged);
+
+        assert!(
+            available.contains(&expected),
+            "Script hash from reference input's script_ref should be available"
+        );
+        assert_eq!(
+            available.len(),
+            1,
+            "Available set should contain exactly 1 hash from the ref input"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tiered fee calculation — 2 tests
+    // -----------------------------------------------------------------------
+
+    /// Single tier: total_size == TIER_SIZE (25,600 bytes).
+    /// Fee = base_fee_per_byte * total_size = 15 * 25_600 = 384_000.
+    #[test]
+    fn test_tiered_fee_single_tier() {
+        // Exactly one tier, no multiplier applied yet.
+        let fee = calculate_ref_script_tiered_fee(15, 25_600);
+        assert_eq!(
+            fee, 384_000,
+            "Single-tier fee must equal base_fee_per_byte * tier_size"
+        );
+    }
+
+    /// Two tiers: total_size == 2 * TIER_SIZE (51,200 bytes).
+    ///
+    /// Tier 0: price = 15/1, contribution = 25_600 * 15 = 384_000, whole = 384_000, rem = 0
+    /// Tier 1: price advances: 15*6=90, den 1*5=5, gcd(90,5)=5 → price = 18/1
+    ///         contribution = 25_600 * 18 = 460_800, whole = 460_800, rem = 0
+    /// Total (floor) = 384_000 + 460_800 = 844_800.
+    #[test]
+    fn test_tiered_fee_multiple_tiers() {
+        let fee = calculate_ref_script_tiered_fee(15, 51_200);
+        // Tier 0: 25_600 * 15 = 384_000
+        // Tier 1: price = 18 (15 * 6/5 = 90/5 = 18), 25_600 * 18 = 460_800
+        assert_eq!(
+            fee, 844_800,
+            "Two-tier fee must equal tier0 + tier1 contributions (floor, no fractional remainder)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Min fee computation — 1 test
+    // -----------------------------------------------------------------------
+
+    /// compute_min_fee with a pre-Alonzo (raw_cbor = None) transaction and no
+    /// reference scripts or redeemers.
+    ///
+    /// Expected: min_fee_a * tx_size + min_fee_b + 0 (ref_script) + 0 (ex_units).
+    #[test]
+    fn test_min_fee_computation() {
+        let tx = Transaction::empty_with_hash(TransactionHash::from_bytes([0x33; 32]));
+        // raw_cbor is None, so fee_tx_size returns tx_size unchanged.
+        let tx_size: u64 = 200;
+
+        let params = ProtocolParameters::mainnet_defaults();
+        // min_fee_a = 44, min_fee_b = 155_381 (from mainnet_defaults).
+        let expected = params.min_fee_a * tx_size + params.min_fee_b;
+
+        let utxo_set = UtxoSet::new();
+        let fee = compute_min_fee(&tx, &utxo_set, &params, tx_size);
+
+        assert_eq!(
+            fee,
+            Lovelace(expected),
+            "compute_min_fee with no scripts or ex-units must equal min_fee_a*size + min_fee_b"
+        );
+    }
+}
