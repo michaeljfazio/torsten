@@ -147,13 +147,13 @@ fn push_rollback_reapply_fork_cycle() {
 
     // Main chain: 5 blocks.
     push_n_fee_deltas(&mut seq, 5);
-    let main_tip_fees = seq.tip_state().epoch_fees;
+    let main_tip_fees = seq.tip_state().utxo.epoch_fees;
     assert_eq!(main_tip_fees.0, 5_000_000);
 
     // Rollback 3 — fork at block 2.
     seq.rollback(3);
     assert_eq!(seq.len(), 2);
-    assert_eq!(seq.tip_state().epoch_fees.0, 2_000_000);
+    assert_eq!(seq.tip_state().utxo.epoch_fees.0, 2_000_000);
 
     // Fork chain: 4 blocks with different fee amounts.
     let mut running = 2_000_000u64;
@@ -162,19 +162,19 @@ fn push_rollback_reapply_fork_cycle() {
         seq.push(fee_delta(i as u64, i, running, i as u64));
     }
     assert_eq!(seq.len(), 6);
-    assert_eq!(seq.tip_state().epoch_fees.0, 4_000_000);
+    assert_eq!(seq.tip_state().utxo.epoch_fees.0, 4_000_000);
 }
 
 #[test]
 fn tip_state_after_rollback_matches_anchor_when_fully_empty() {
     let anchor = make_anchor();
-    let expected_fees = anchor.epoch_fees;
+    let expected_fees = anchor.utxo.epoch_fees;
     let mut seq = LedgerSeq::with_defaults(anchor, 10);
 
     push_n_fee_deltas(&mut seq, 3);
     seq.rollback(3);
 
-    assert_eq!(seq.tip_state().epoch_fees, expected_fees);
+    assert_eq!(seq.tip_state().utxo.epoch_fees, expected_fees);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -199,7 +199,7 @@ fn advance_anchor_applies_oldest_delta_to_anchor() {
     // Volatile window should be empty.
     assert!(seq.is_empty());
     // Anchor should now have epoch_fees = 5_000_000.
-    assert_eq!(seq.anchor_state().epoch_fees.0, 5_000_000);
+    assert_eq!(seq.anchor_state().utxo.epoch_fees.0, 5_000_000);
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn advance_anchor_reindexes_checkpoints() {
     // Old checkpoint at index 1 → new index 0.
     // Old checkpoint at index 3 → new index 2.
     let tip = seq.tip_state();
-    assert_eq!(tip.epoch_fees.0, 4_000_000);
+    assert_eq!(tip.utxo.epoch_fees.0, 4_000_000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -287,7 +287,7 @@ fn push_beyond_k_advances_anchor_automatically() {
 
     // Anchor has been advanced once, so it should have epoch_fees from
     // the first delta.
-    assert_eq!(seq.anchor_state().epoch_fees.0, 1_000_000);
+    assert_eq!(seq.anchor_state().utxo.epoch_fees.0, 1_000_000);
 }
 
 #[test]
@@ -313,11 +313,11 @@ fn checkpoint_created_at_configured_interval() {
     // After 3 pushes: no checkpoints yet.
     push_n_fee_deltas(&mut seq, 3);
     // Verify by confirming tip_state still works (uses anchor + deltas).
-    assert_eq!(seq.tip_state().epoch_fees.0, 3_000_000);
+    assert_eq!(seq.tip_state().utxo.epoch_fees.0, 3_000_000);
 
     // 4th push → checkpoint at index 3.
     seq.push(fee_delta(4, 4, 4_000_000, 4));
-    assert_eq!(seq.tip_state().epoch_fees.0, 4_000_000);
+    assert_eq!(seq.tip_state().utxo.epoch_fees.0, 4_000_000);
 }
 
 #[test]
@@ -339,7 +339,7 @@ fn checkpoint_reconstruction_consistent_with_sequential_at_every_index() {
             .state_at(SlotNo(i as u64), &h(i))
             .unwrap_or_else(|| panic!("slot {} should be in window", i));
         assert_eq!(
-            state.epoch_fees.0, expected_fees,
+            state.utxo.epoch_fees.0, expected_fees,
             "epoch_fees mismatch at slot {}",
             i
         );
@@ -356,7 +356,7 @@ fn tip_state_matches_expected_accumulated_fees() {
     }
 
     let tip = seq.tip_state();
-    assert_eq!(tip.epoch_fees.0, 10_000_000);
+    assert_eq!(tip.utxo.epoch_fees.0, 10_000_000);
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn state_at_finds_oldest_block_in_window() {
     let state = seq
         .state_at(SlotNo(1), &h(1))
         .expect("slot 1 should be in window");
-    assert_eq!(state.epoch_fees.0, 1_000_000);
+    assert_eq!(state.utxo.epoch_fees.0, 1_000_000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -408,10 +408,10 @@ fn delegation_register_and_deregister_reflected_in_tip_state() {
 
     let state = seq.tip_state();
     assert!(
-        state.delegations.contains_key(&cred),
+        state.certs.delegations.contains_key(&cred),
         "credential should be delegated after registration"
     );
-    assert_eq!(state.delegations[&cred], pool);
+    assert_eq!(state.certs.delegations[&cred], pool);
 
     // Block 2: deregister.
     let mut d2 = LedgerDelta::new(SlotNo(2), h(2), BlockNo(2));
@@ -425,11 +425,11 @@ fn delegation_register_and_deregister_reflected_in_tip_state() {
 
     let state2 = seq.tip_state();
     assert!(
-        !state2.delegations.contains_key(&cred),
+        !state2.certs.delegations.contains_key(&cred),
         "credential should not be delegated after deregistration"
     );
     assert!(
-        !state2.reward_accounts.contains_key(&cred),
+        !state2.certs.reward_accounts.contains_key(&cred),
         "reward account should be removed after deregistration"
     );
 }
@@ -455,12 +455,12 @@ fn rollback_undoes_delegation_registration() {
     seq.push(d1);
 
     // After push: credential is delegated.
-    assert!(seq.tip_state().delegations.contains_key(&cred));
+    assert!(seq.tip_state().certs.delegations.contains_key(&cred));
 
     // Roll back: delegation should disappear from the tip.
     seq.rollback(1);
     // Tip is now the anchor — which has no delegations.
-    assert!(!seq.tip_state().delegations.contains_key(&cred));
+    assert!(!seq.tip_state().certs.delegations.contains_key(&cred));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -495,10 +495,10 @@ fn pool_registration_reflected_in_tip_state() {
 
     let state = seq.tip_state();
     assert!(
-        state.pool_params.contains_key(&pool_id),
+        state.certs.pool_params.contains_key(&pool_id),
         "pool should appear in pool_params after registration"
     );
-    assert_eq!(state.pool_params[&pool_id].pledge.0, 500_000_000);
+    assert_eq!(state.certs.pool_params[&pool_id].pledge.0, 500_000_000);
 }
 
 #[test]
@@ -540,10 +540,13 @@ fn pool_reregistration_queued_in_future_pool_params() {
 
     let state = seq.tip_state();
     assert!(
-        state.future_pool_params.contains_key(&pool_id),
+        state.certs.future_pool_params.contains_key(&pool_id),
         "re-registration should be queued in future_pool_params"
     );
-    assert_eq!(state.future_pool_params[&pool_id].pledge.0, 200_000_000);
+    assert_eq!(
+        state.certs.future_pool_params[&pool_id].pledge.0,
+        200_000_000
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -568,7 +571,7 @@ fn reward_credit_and_withdrawal_correct() {
     d1.block_fields.epoch_block_count = 1;
     seq.push(d1);
 
-    assert_eq!(seq.tip_state().reward_accounts[&cred].0, 10_000_000);
+    assert_eq!(seq.tip_state().certs.reward_accounts[&cred].0, 10_000_000);
 
     // Withdraw 6_000_000.
     let mut d2 = LedgerDelta::new(SlotNo(2), h(2), BlockNo(2));
@@ -579,7 +582,7 @@ fn reward_credit_and_withdrawal_correct() {
     d2.block_fields.epoch_block_count = 2;
     seq.push(d2);
 
-    assert_eq!(seq.tip_state().reward_accounts[&cred].0, 4_000_000);
+    assert_eq!(seq.tip_state().certs.reward_accounts[&cred].0, 4_000_000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -613,10 +616,10 @@ fn drep_registration_reflected_in_tip_state() {
 
     let state = seq.tip_state();
     assert!(
-        state.governance.dreps.contains_key(&cred_hash),
+        state.gov.governance.dreps.contains_key(&cred_hash),
         "DRep should appear after registration"
     );
-    assert_eq!(state.governance.drep_registration_count, 1);
+    assert_eq!(state.gov.governance.drep_registration_count, 1);
 }
 
 #[test]
@@ -652,7 +655,7 @@ fn drep_unregistration_removes_from_dreps() {
 
     let state = seq.tip_state();
     assert!(
-        !state.governance.dreps.contains_key(&cred_hash),
+        !state.gov.governance.dreps.contains_key(&cred_hash),
         "DRep should be removed after unregistration"
     );
 }
@@ -673,7 +676,7 @@ fn evolving_nonce_updated_each_block() {
     }
 
     let tip = seq.tip_state();
-    assert_eq!(tip.evolving_nonce, h(30));
+    assert_eq!(tip.consensus.evolving_nonce, h(30));
 }
 
 #[test]
@@ -686,7 +689,7 @@ fn lab_nonce_reflects_latest_block_prev_hash() {
     delta.block_fields.epoch_block_count = 3;
     seq.push(delta);
 
-    assert_eq!(seq.tip_state().lab_nonce, prev_hash_of_block3);
+    assert_eq!(seq.tip_state().consensus.lab_nonce, prev_hash_of_block3);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -703,7 +706,7 @@ fn epoch_block_count_increments_per_block() {
         seq.push(delta);
     }
 
-    assert_eq!(seq.tip_state().epoch_block_count, 5);
+    assert_eq!(seq.tip_state().consensus.epoch_block_count, 5);
 }
 
 #[test]
@@ -718,7 +721,11 @@ fn pool_block_increment_recorded_in_tip() {
 
     let state = seq.tip_state();
     assert_eq!(
-        *state.epoch_blocks_by_pool.get(&pool).unwrap_or(&0),
+        *state
+            .consensus
+            .epoch_blocks_by_pool
+            .get(&pool)
+            .unwrap_or(&0),
         1,
         "pool block count should be 1"
     );
@@ -788,11 +795,11 @@ fn multiple_advance_anchor_calls_accumulate_correctly() {
 
     // After advancing 3 times: anchor has seen deltas 1,2,3.
     // epoch_fees in anchor = 6_000_000.
-    assert_eq!(seq.anchor_state().epoch_fees.0, 6_000_000);
+    assert_eq!(seq.anchor_state().utxo.epoch_fees.0, 6_000_000);
     assert_eq!(seq.len(), 2);
 
     // Tip still has all fees applied.
-    assert_eq!(seq.tip_state().epoch_fees.0, 10_000_000);
+    assert_eq!(seq.tip_state().utxo.epoch_fees.0, 10_000_000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -817,5 +824,5 @@ fn large_window_k_432_maintains_correct_tip() {
     // After k+50 pushes, tip is the (k+50)th delta, epoch_fees = (k+50)*1_000_000.
     // But since delta.block_fields.epoch_fees IS the running total, the tip's
     // epoch_fees = running = (k+50) * 1_000_000.
-    assert_eq!(seq.tip_state().epoch_fees.0, (k + 50) * 1_000_000);
+    assert_eq!(seq.tip_state().utxo.epoch_fees.0, (k + 50) * 1_000_000);
 }

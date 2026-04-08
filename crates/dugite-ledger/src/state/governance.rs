@@ -24,6 +24,7 @@ impl LedgerState {
     /// 3. pvCanFollow for HardForkInitiation — target version must follow the current version
     ///    by exactly one major increment (minor=0) or the same major with a higher minor
     ///    (Haskell: `pvCanFollow`).
+    #[allow(dead_code)]
     pub(crate) fn process_proposal(
         &mut self,
         tx_hash: &Hash32,
@@ -81,8 +82,8 @@ impl LedgerState {
             ..
         } = &proposal.gov_action
         {
-            let cur_major = self.protocol_params.protocol_version_major;
-            let cur_minor = self.protocol_params.protocol_version_minor;
+            let cur_major = self.epochs.protocol_params.protocol_version_major;
+            let cur_minor = self.epochs.protocol_params.protocol_version_minor;
             let can_follow = (*tgt_major == cur_major + 1 && *tgt_minor == 0)
                 || (*tgt_major == cur_major && *tgt_minor > cur_minor);
             if !can_follow {
@@ -119,8 +120,8 @@ impl LedgerState {
             // Allowed if: (a) it references the last enacted root of this purpose, OR
             //             (b) it references an active (in-flight) proposal.
             let valid_root =
-                prev_action_matches_enacted_root(&proposal.gov_action, prev, &self.governance);
-            let in_flight = self.governance.proposals.contains_key(prev);
+                prev_action_matches_enacted_root(&proposal.gov_action, prev, &self.gov.governance);
+            let in_flight = self.gov.governance.proposals.contains_key(prev);
             if !valid_root && !in_flight {
                 debug!(
                     tx = %tx_hash.to_hex(),
@@ -138,6 +139,7 @@ impl LedgerState {
         // ParameterChange and TreasuryWithdrawals must include the constitution's script_hash.
         // Mismatches are rejected (proposal dropped), matching Haskell's GOV rule.
         let constitution_script = self
+            .gov
             .governance
             .constitution
             .as_ref()
@@ -190,7 +192,7 @@ impl LedgerState {
         //
         // Note: Koios displays `expiration = gasExpiresAfter + 1` (the first epoch
         // where the proposal is inactive), so on-chain queries show lifetime = L+1.
-        let gov_action_lifetime = self.protocol_params.gov_action_lifetime;
+        let gov_action_lifetime = self.epochs.protocol_params.gov_action_lifetime;
         let expires_epoch = EpochNo(self.epoch.0.saturating_add(gov_action_lifetime));
 
         let state = ProposalState {
@@ -206,7 +208,7 @@ impl LedgerState {
             "Governance proposal submitted: {:?} (expires epoch {})",
             action_id, expires_epoch.0
         );
-        let gov = Arc::make_mut(&mut self.governance);
+        let gov = Arc::make_mut(&mut self.gov.governance);
         gov.proposals.insert(action_id.clone(), state);
         gov.proposal_count += 1;
 
@@ -231,6 +233,7 @@ impl LedgerState {
     ///
     /// During bootstrap (protocol == 9) this check is skipped since committee
     /// membership rules are not yet fully active.
+    #[allow(dead_code)]
     pub(crate) fn process_vote(
         &mut self,
         voter: &Voter,
@@ -255,19 +258,22 @@ impl LedgerState {
                 let hot_hash = credential_to_hash(cred);
                 // A vote is valid if the hot credential is authorised for any
                 // current (non-expired, non-resigned) cold credential.
-                let is_elected =
-                    self.governance
-                        .committee_hot_keys
-                        .iter()
-                        .any(|(cold_hash, registered_hot)| {
-                            *registered_hot == hot_hash
-                                && !self.governance.committee_resigned.contains_key(cold_hash)
-                                && self
-                                    .governance
-                                    .committee_expiration
-                                    .get(cold_hash)
-                                    .is_some_and(|exp| self.epoch <= *exp)
-                        });
+                let is_elected = self.gov.governance.committee_hot_keys.iter().any(
+                    |(cold_hash, registered_hot)| {
+                        *registered_hot == hot_hash
+                            && !self
+                                .gov
+                                .governance
+                                .committee_resigned
+                                .contains_key(cold_hash)
+                            && self
+                                .gov
+                                .governance
+                                .committee_expiration
+                                .get(cold_hash)
+                                .is_some_and(|exp| self.epoch <= *exp)
+                    },
+                );
                 if !is_elected {
                     warn!(
                         tx = %action_id.transaction_id.to_hex(),
@@ -281,7 +287,7 @@ impl LedgerState {
         }
 
         // Update vote tally on the proposal
-        if let Some(proposal) = Arc::make_mut(&mut self.governance)
+        if let Some(proposal) = Arc::make_mut(&mut self.gov.governance)
             .proposals
             .get_mut(action_id)
         {
@@ -295,7 +301,7 @@ impl LedgerState {
         // Track DRep activity — voting counts as activity per CIP-1694
         if let Voter::DRep(cred) = voter {
             let drep_hash = credential_to_hash(cred);
-            if let Some(drep) = Arc::make_mut(&mut self.governance)
+            if let Some(drep) = Arc::make_mut(&mut self.gov.governance)
                 .dreps
                 .get_mut(&drep_hash)
             {
@@ -304,7 +310,7 @@ impl LedgerState {
         }
 
         // Record the vote (indexed by action_id for efficient ratification)
-        let action_votes = Arc::make_mut(&mut self.governance)
+        let action_votes = Arc::make_mut(&mut self.gov.governance)
             .votes_by_action
             .entry(action_id.clone())
             .or_default();
@@ -372,8 +378,8 @@ impl LedgerState {
             ..
         } = &proposal.gov_action
         {
-            let cur_major = self.protocol_params.protocol_version_major;
-            let cur_minor = self.protocol_params.protocol_version_minor;
+            let cur_major = self.epochs.protocol_params.protocol_version_major;
+            let cur_minor = self.epochs.protocol_params.protocol_version_minor;
             let can_follow = (*tgt_major == cur_major + 1 && *tgt_minor == 0)
                 || (*tgt_major == cur_major && *tgt_minor > cur_minor);
             if !can_follow {
@@ -402,8 +408,8 @@ impl LedgerState {
         };
         if let Some(prev) = prev_id {
             let valid_root =
-                prev_action_matches_enacted_root(&proposal.gov_action, prev, &self.governance);
-            let in_flight = self.governance.proposals.contains_key(prev);
+                prev_action_matches_enacted_root(&proposal.gov_action, prev, &self.gov.governance);
+            let in_flight = self.gov.governance.proposals.contains_key(prev);
             if !valid_root && !in_flight {
                 debug!(
                     tx = %tx_hash.to_hex(),
@@ -420,6 +426,7 @@ impl LedgerState {
         // ParameterChange and TreasuryWithdrawals must include the constitution's script_hash.
         // Mismatches are rejected (proposal dropped), matching Haskell's GOV rule.
         let constitution_script = self
+            .gov
             .governance
             .constitution
             .as_ref()
@@ -460,7 +467,7 @@ impl LedgerState {
             action_index,
         };
 
-        let gov_action_lifetime = self.protocol_params.gov_action_lifetime;
+        let gov_action_lifetime = self.epochs.protocol_params.gov_action_lifetime;
         let expires_epoch = EpochNo(self.epoch.0.saturating_add(gov_action_lifetime));
 
         let state = ProposalState {
@@ -479,7 +486,7 @@ impl LedgerState {
             "Governance proposal submitted (with delta): {:?} (expires epoch {})",
             action_id, expires_epoch.0
         );
-        let gov = Arc::make_mut(&mut self.governance);
+        let gov = Arc::make_mut(&mut self.gov.governance);
         gov.proposals.insert(action_id.clone(), state);
         gov.proposal_count += 1;
 
@@ -526,19 +533,22 @@ impl LedgerState {
         if let Voter::ConstitutionalCommittee(cred) = voter {
             if !self.is_bootstrap_phase() {
                 let hot_hash = credential_to_hash(cred);
-                let is_elected =
-                    self.governance
-                        .committee_hot_keys
-                        .iter()
-                        .any(|(cold_hash, registered_hot)| {
-                            *registered_hot == hot_hash
-                                && !self.governance.committee_resigned.contains_key(cold_hash)
-                                && self
-                                    .governance
-                                    .committee_expiration
-                                    .get(cold_hash)
-                                    .is_some_and(|exp| self.epoch <= *exp)
-                        });
+                let is_elected = self.gov.governance.committee_hot_keys.iter().any(
+                    |(cold_hash, registered_hot)| {
+                        *registered_hot == hot_hash
+                            && !self
+                                .gov
+                                .governance
+                                .committee_resigned
+                                .contains_key(cold_hash)
+                            && self
+                                .gov
+                                .governance
+                                .committee_expiration
+                                .get(cold_hash)
+                                .is_some_and(|exp| self.epoch <= *exp)
+                    },
+                );
                 if !is_elected {
                     warn!(
                         tx = %action_id.transaction_id.to_hex(),
@@ -552,7 +562,7 @@ impl LedgerState {
         }
 
         // Update vote tally on the proposal.
-        if let Some(proposal) = Arc::make_mut(&mut self.governance)
+        if let Some(proposal) = Arc::make_mut(&mut self.gov.governance)
             .proposals
             .get_mut(action_id)
         {
@@ -566,7 +576,7 @@ impl LedgerState {
         // Track DRep activity — voting counts as activity per CIP-1694.
         if let Voter::DRep(cred) = voter {
             let drep_hash = credential_to_hash(cred);
-            if let Some(drep) = Arc::make_mut(&mut self.governance)
+            if let Some(drep) = Arc::make_mut(&mut self.gov.governance)
                 .dreps
                 .get_mut(&drep_hash)
             {
@@ -575,7 +585,7 @@ impl LedgerState {
         }
 
         // Record the vote (indexed by action_id for efficient ratification).
-        let action_votes = Arc::make_mut(&mut self.governance)
+        let action_votes = Arc::make_mut(&mut self.gov.governance)
             .votes_by_action
             .entry(action_id.clone())
             .or_default();
@@ -625,17 +635,17 @@ impl LedgerState {
         // Lazy forest reconstruction for backward compatibility with old snapshots
         // that lack proposal_roots / proposal_graph.  Runs once per node startup
         // from a pre-forest snapshot, then the forest is persisted in subsequent saves.
-        if self.governance.proposal_roots == GovRelation::default()
-            && !self.governance.proposals.is_empty()
+        if self.gov.governance.proposal_roots == GovRelation::default()
+            && !self.gov.governance.proposals.is_empty()
         {
             let (roots, graph) = rebuild_forest_from_flat(
-                &self.governance.proposals,
-                &self.governance.enacted_pparam_update,
-                &self.governance.enacted_hard_fork,
-                &self.governance.enacted_committee,
-                &self.governance.enacted_constitution,
+                &self.gov.governance.proposals,
+                &self.gov.governance.enacted_pparam_update,
+                &self.gov.governance.enacted_hard_fork,
+                &self.gov.governance.enacted_committee,
+                &self.gov.governance.enacted_constitution,
             );
-            let gov = Arc::make_mut(&mut self.governance);
+            let gov = Arc::make_mut(&mut self.gov.governance);
             gov.proposal_roots = roots;
             gov.proposal_graph = graph;
             debug!("Governance forest rebuilt from flat proposals map (backward compat)");
@@ -648,17 +658,21 @@ impl LedgerState {
         // SPO voting power: use the **set** snapshot (= previous epoch's mark),
         // matching Haskell's `dpStakePoolDistr` in the DRep pulser.
         //
-        // After SNAP rotation (mark→set→go), `self.snapshots.mark` is the NEW
-        // mark for the upcoming epoch, while `self.snapshots.set` holds the mark
+        // After SNAP rotation (mark→set→go), `self.epochs.snapshots.mark` is the NEW
+        // mark for the upcoming epoch, while `self.epochs.snapshots.set` holds the mark
         // from the PREVIOUS boundary — which is when the Haskell DRep pulser was
         // initialized and captured `ssStakeMarkPoolDistr`.  Using `mark` here
         // caused a one-epoch SPO stake mismatch, leading to HardForkInitiation
         // proposals being ratified one epoch early (see #332).
         //
         // We clone the pool_stake map to avoid holding an immutable borrow on
-        // `self.snapshots` across the mutable `self.enact_gov_action()` calls.
-        let ratify_pool_stake: Option<HashMap<Hash28, Lovelace>> =
-            self.snapshots.set.as_ref().map(|s| s.pool_stake.clone());
+        // `self.epochs.snapshots` across the mutable `self.enact_gov_action()` calls.
+        let ratify_pool_stake: Option<HashMap<Hash28, Lovelace>> = self
+            .epochs
+            .snapshots
+            .set
+            .as_ref()
+            .map(|s| s.pool_stake.clone());
         let ratify_pool_stake_ref = ratify_pool_stake.as_ref();
         let total_spo_stake: u64 = ratify_pool_stake_ref
             .map(|ps| {
@@ -670,7 +684,7 @@ impl LedgerState {
 
         // Determine the source of proposals, votes, and committee state:
         // prefer the frozen ratification snapshot, fall back to live state.
-        let snapshot = self.governance.ratification_snapshot.clone();
+        let snapshot = self.gov.governance.ratification_snapshot.clone();
         let using_snapshot = snapshot.is_some();
 
         let (
@@ -701,7 +715,7 @@ impl LedgerState {
             )
         } else {
             // Fallback: live state (first epoch or old snapshot without this field)
-            let gov = &self.governance;
+            let gov = &self.gov.governance;
             (
                 gov.proposals.clone(),
                 gov.votes_by_action.clone(),
@@ -753,7 +767,7 @@ impl LedgerState {
             no_confidence_stake,
             using_snapshot,
             bootstrap = self.is_bootstrap_phase(),
-            protocol_version = self.protocol_params.protocol_version_major,
+            protocol_version = self.epochs.protocol_params.protocol_version_major,
             cc_members = snap_committee_expiration.len(),
             cc_hot_keys = snap_committee_hot_keys.len(),
             cc_threshold = ?snap_committee_threshold,
@@ -814,7 +828,11 @@ impl LedgerState {
                         ratify_pool_stake_ref,
                         snap_vote_delegations_ref,
                     );
-                let remaining_treasury = self.treasury.0.saturating_sub(enacted_withdrawals_total);
+                let remaining_treasury = self
+                    .epochs
+                    .treasury
+                    .0
+                    .saturating_sub(enacted_withdrawals_total);
                 let met = self.check_ratification(
                     action_id,
                     state,
@@ -871,7 +889,7 @@ impl LedgerState {
 
         // After ratification pass, persist the final enacted roots to live state
         {
-            let gov = Arc::make_mut(&mut self.governance);
+            let gov = Arc::make_mut(&mut self.gov.governance);
             gov.enacted_pparam_update = enacted_pparam;
             gov.enacted_hard_fork = enacted_hardfork;
             gov.enacted_committee = enacted_committee_root;
@@ -908,6 +926,7 @@ impl LedgerState {
         // before processing the enacted sequence.
         let current_epoch = self.epoch;
         let expired_ids: Vec<GovActionId> = self
+            .gov
             .governance
             .proposals
             .iter()
@@ -916,7 +935,7 @@ impl LedgerState {
             .collect();
 
         let expired_removed = if !expired_ids.is_empty() {
-            let gov = Arc::make_mut(&mut self.governance);
+            let gov = Arc::make_mut(&mut self.gov.governance);
             let removed = forest_remove_with_descendants(
                 &expired_ids,
                 &mut gov.proposals,
@@ -931,12 +950,12 @@ impl LedgerState {
                     let return_addr = &proposal_state.procedure.return_addr;
                     if return_addr.len() >= 29 {
                         let key = Self::reward_account_to_hash(return_addr);
-                        if self.reward_accounts.contains_key(&key) {
-                            *Arc::make_mut(&mut self.reward_accounts)
+                        if self.certs.reward_accounts.contains_key(&key) {
+                            *Arc::make_mut(&mut self.certs.reward_accounts)
                                 .entry(key)
                                 .or_insert(Lovelace(0)) += deposit;
                         } else {
-                            self.treasury += deposit;
+                            self.epochs.treasury += deposit;
                             debug!(
                                 "Governance proposal {:?} deposit {} -> treasury \
                                  (unregistered return address)",
@@ -968,10 +987,10 @@ impl LedgerState {
         if !ratified.is_empty() {
             for action_id in &ratified {
                 // Remove from forest first.
-                if let Some(state) = self.governance.proposals.get(action_id) {
+                if let Some(state) = self.gov.governance.proposals.get(action_id) {
                     let purpose = gov_action_purpose_tag(&state.procedure.gov_action);
                     if let Some(tag) = purpose {
-                        let gov = Arc::make_mut(&mut self.governance);
+                        let gov = Arc::make_mut(&mut self.gov.governance);
                         forest_remove_node(
                             action_id,
                             tag,
@@ -980,7 +999,7 @@ impl LedgerState {
                         );
                     }
                 }
-                if let Some(proposal_state) = Arc::make_mut(&mut self.governance)
+                if let Some(proposal_state) = Arc::make_mut(&mut self.gov.governance)
                     .proposals
                     .remove(action_id)
                 {
@@ -989,12 +1008,12 @@ impl LedgerState {
                         let return_addr = &proposal_state.procedure.return_addr;
                         if return_addr.len() >= 29 {
                             let key = Self::reward_account_to_hash(return_addr);
-                            if self.reward_accounts.contains_key(&key) {
-                                *Arc::make_mut(&mut self.reward_accounts)
+                            if self.certs.reward_accounts.contains_key(&key) {
+                                *Arc::make_mut(&mut self.certs.reward_accounts)
                                     .entry(key)
                                     .or_insert(Lovelace(0)) += deposit;
                             } else {
-                                self.treasury += deposit;
+                                self.epochs.treasury += deposit;
                                 debug!(
                                     "Governance proposal {:?} deposit {} -> treasury \
                                      (unregistered return address)",
@@ -1005,7 +1024,7 @@ impl LedgerState {
                     }
                     ratified_with_state.push((action_id.clone(), proposal_state));
                 }
-                Arc::make_mut(&mut self.governance)
+                Arc::make_mut(&mut self.gov.governance)
                     .votes_by_action
                     .remove(action_id);
             }
@@ -1030,7 +1049,7 @@ impl LedgerState {
                 // Siblings = other children of the same root (before promotion),
                 // i.e. PRoot.children minus the enacted proposal.
                 let siblings: Vec<GovActionId> = {
-                    let root = self.governance.proposal_roots.get(tag);
+                    let root = self.gov.governance.proposal_roots.get(tag);
                     root.children
                         .iter()
                         .filter(|id| *id != enacted_id)
@@ -1040,7 +1059,7 @@ impl LedgerState {
 
                 // Remove siblings + all descendants using the forest.
                 if !siblings.is_empty() {
-                    let gov = Arc::make_mut(&mut self.governance);
+                    let gov = Arc::make_mut(&mut self.gov.governance);
                     let removed = forest_remove_with_descendants(
                         &siblings,
                         &mut gov.proposals,
@@ -1055,12 +1074,12 @@ impl LedgerState {
                             let return_addr = &proposal_state.procedure.return_addr;
                             if return_addr.len() >= 29 {
                                 let key = Self::reward_account_to_hash(return_addr);
-                                if self.reward_accounts.contains_key(&key) {
-                                    *Arc::make_mut(&mut self.reward_accounts)
+                                if self.certs.reward_accounts.contains_key(&key) {
+                                    *Arc::make_mut(&mut self.certs.reward_accounts)
                                         .entry(key)
                                         .or_insert(Lovelace(0)) += deposit;
                                 } else {
-                                    self.treasury += deposit;
+                                    self.epochs.treasury += deposit;
                                 }
                             }
                         }
@@ -1075,7 +1094,7 @@ impl LedgerState {
                 }
 
                 // Promote enacted proposal to new root of its purpose tree.
-                let gov = Arc::make_mut(&mut self.governance);
+                let gov = Arc::make_mut(&mut self.gov.governance);
                 forest_promote_root(
                     enacted_id,
                     tag,
@@ -1086,7 +1105,7 @@ impl LedgerState {
         }
 
         // Store ratification and expiry results for GetRatifyState query (tag 32).
-        let gov = Arc::make_mut(&mut self.governance);
+        let gov = Arc::make_mut(&mut self.gov.governance);
         gov.last_ratified = ratified_with_state;
         gov.last_expired = expired_removed;
         gov.last_ratify_delayed = delayed;
@@ -1096,7 +1115,7 @@ impl LedgerState {
     /// During bootstrap, all DRep voting thresholds are set to 0 (auto-pass)
     /// per the Haskell `hardforkConwayBootstrapPhase` function.
     fn is_bootstrap_phase(&self) -> bool {
-        self.protocol_params.protocol_version_major == 9
+        self.epochs.protocol_params.protocol_version_major == 9
     }
 
     /// Check whether a proposal has met its voting thresholds for ratification.
@@ -1163,7 +1182,7 @@ impl LedgerState {
                 committee_resigned,
                 committee_threshold,
                 self.epoch,
-                self.protocol_params.committee_min_size,
+                self.epochs.protocol_params.committee_min_size,
                 bootstrap,
             )
         };
@@ -1186,13 +1205,13 @@ impl LedgerState {
                 } else {
                     pp_change_drep_all_groups_met(
                         protocol_param_update,
-                        &self.protocol_params,
+                        &self.epochs.protocol_params,
                         drep_yes,
                         drep_total,
                     )
                 };
                 let spo_met = if let Some(ref spo_threshold) =
-                    pp_change_spo_threshold(protocol_param_update, &self.protocol_params)
+                    pp_change_spo_threshold(protocol_param_update, &self.epochs.protocol_params)
                 {
                     check_threshold(spo_yes, spo_denom, spo_threshold)
                 } else {
@@ -1219,9 +1238,9 @@ impl LedgerState {
                 let drep_threshold = if bootstrap {
                     rational_zero
                 } else {
-                    self.protocol_params.dvt_hard_fork.clone()
+                    self.epochs.protocol_params.dvt_hard_fork.clone()
                 };
-                let spo_threshold = &self.protocol_params.pvt_hard_fork;
+                let spo_threshold = &self.epochs.protocol_params.pvt_hard_fork;
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
                 let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
                 let cc_met = cc_met_fn(action_id);
@@ -1246,9 +1265,9 @@ impl LedgerState {
                 let drep_threshold = if bootstrap {
                     rational_zero
                 } else {
-                    self.protocol_params.dvt_no_confidence.clone()
+                    self.epochs.protocol_params.dvt_no_confidence.clone()
                 };
-                let spo_threshold = &self.protocol_params.pvt_motion_no_confidence;
+                let spo_threshold = &self.epochs.protocol_params.pvt_motion_no_confidence;
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
                 let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
                 debug!(
@@ -1266,7 +1285,8 @@ impl LedgerState {
                 // Haskell RATIFY: `validCommitteeTerm` — all new members' expiry epochs
                 // must be ≤ currentEpoch + committeeMaxTermLength. Only new members are
                 // checked (retained members are not re-validated).
-                let max_expiry = self.epoch.0 + self.protocol_params.committee_max_term_length;
+                let max_expiry =
+                    self.epoch.0 + self.epochs.protocol_params.committee_max_term_length;
                 if members_to_add.values().any(|&exp| exp > max_expiry) {
                     debug!(
                         action_id = %action_id.transaction_id.to_hex(),
@@ -1283,27 +1303,30 @@ impl LedgerState {
                 // Use snapshot no_confidence state: check if committee_threshold is None
                 // (which indicates no-confidence when committee was dissolved).
                 // The no_confidence flag from the snapshot is implicitly captured in the
-                // committee state. We use self.governance.no_confidence here because the
+                // committee state. We use self.gov.governance.no_confidence here because the
                 // threshold selection (normal vs no-confidence) depends on the enacted
                 // state which is threaded through the ratification pass.
-                let no_confidence = self.governance.no_confidence;
+                let no_confidence = self.gov.governance.no_confidence;
                 let (drep_threshold, spo_threshold) = if no_confidence {
                     (
                         if bootstrap {
                             rational_zero
                         } else {
-                            self.protocol_params.dvt_committee_no_confidence.clone()
+                            self.epochs
+                                .protocol_params
+                                .dvt_committee_no_confidence
+                                .clone()
                         },
-                        &self.protocol_params.pvt_committee_no_confidence,
+                        &self.epochs.protocol_params.pvt_committee_no_confidence,
                     )
                 } else {
                     (
                         if bootstrap {
                             rational_zero
                         } else {
-                            self.protocol_params.dvt_committee_normal.clone()
+                            self.epochs.protocol_params.dvt_committee_normal.clone()
                         },
-                        &self.protocol_params.pvt_committee_normal,
+                        &self.epochs.protocol_params.pvt_committee_normal,
                     )
                 };
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
@@ -1318,7 +1341,7 @@ impl LedgerState {
                 let drep_threshold = if bootstrap {
                     rational_zero
                 } else {
-                    self.protocol_params.dvt_constitution.clone()
+                    self.epochs.protocol_params.dvt_constitution.clone()
                 };
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
                 let cc_met = cc_met_fn(action_id);
@@ -1348,7 +1371,7 @@ impl LedgerState {
                 let drep_threshold = if bootstrap {
                     rational_zero
                 } else {
-                    self.protocol_params.dvt_treasury_withdrawal.clone()
+                    self.epochs.protocol_params.dvt_treasury_withdrawal.clone()
                 };
                 let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
                 let cc_met = cc_met_fn(action_id);
@@ -1374,11 +1397,11 @@ impl LedgerState {
     /// can supply either live votes or a [`RatificationSnapshot`]'s frozen votes.
     ///
     /// The `pool_stake_override` parameter, when `Some`, provides the SPO stake
-    /// distribution to use instead of `self.snapshots.mark`.  During ratification
+    /// distribution to use instead of `self.epochs.snapshots.mark`.  During ratification
     /// this MUST be the **set** snapshot (= the mark from the PREVIOUS epoch
     /// boundary), matching Haskell's `dpStakePoolDistr` which is captured when
     /// the DRep pulser is initialized at the prior boundary.  After SNAP rotation,
-    /// `self.snapshots.mark` is the NEW mark for the upcoming epoch, not the one
+    /// `self.epochs.snapshots.mark` is the NEW mark for the upcoming epoch, not the one
     /// the Haskell pulser would have used.
     ///
     /// Returns `(drep_yes, drep_total, spo_yes, spo_abstain, cc_yes, cc_total)`.
@@ -1450,9 +1473,9 @@ impl LedgerState {
         // Get the pool distribution.  When a caller supplies pool_stake_override
         // (ratification path — uses the *set* snapshot, i.e. the previous epoch's
         // mark, matching Haskell's dpStakePoolDistr), prefer that.  Otherwise fall
-        // back to self.snapshots.mark for non-ratification contexts (e.g. queries).
-        let mark_pool_stake: Option<&HashMap<Hash28, Lovelace>> =
-            pool_stake_override.or_else(|| self.snapshots.mark.as_ref().map(|s| &s.pool_stake));
+        // back to self.epochs.snapshots.mark for non-ratification contexts (e.g. queries).
+        let mark_pool_stake: Option<&HashMap<Hash28, Lovelace>> = pool_stake_override
+            .or_else(|| self.epochs.snapshots.mark.as_ref().map(|s| &s.pool_stake));
 
         if let Some(pool_stake) = mark_pool_stake {
             for (pool_id, stake) in pool_stake {
@@ -1560,7 +1583,7 @@ impl LedgerState {
         vote_delegations_override: Option<&HashMap<Hash32, DRep>>,
     ) -> DefaultVote {
         // Look up the pool's reward account from pool_params
-        let pool_reg = self.pool_params.get(pool_id);
+        let pool_reg = self.certs.pool_params.get(pool_id);
         let reward_account = match pool_reg {
             Some(reg) if reg.reward_account.len() >= 29 => &reg.reward_account,
             _ => return DefaultVote::No,
@@ -1574,7 +1597,8 @@ impl LedgerState {
         // in the DRep pulser at the previous epoch boundary.  Falls back
         // to live state for non-ratification contexts or before the first
         // snapshot is captured.
-        let delegations = vote_delegations_override.unwrap_or(&self.governance.vote_delegations);
+        let delegations =
+            vote_delegations_override.unwrap_or(&self.gov.governance.vote_delegations);
 
         match delegations.get(&cred_hash) {
             Some(DRep::NoConfidence) => DefaultVote::NoConfidence,
@@ -1589,12 +1613,14 @@ impl LedgerState {
     /// deposits are added separately via `proposal_deposits_by_credential()`.
     pub(crate) fn credential_stake(&self, cred_hash: &Hash32) -> u64 {
         let utxo = self
+            .certs
             .stake_distribution
             .stake_map
             .get(cred_hash)
             .map(|s| s.0)
             .unwrap_or(0);
         let reward = self
+            .certs
             .reward_accounts
             .get(cred_hash)
             .map(|s| s.0)
@@ -1608,7 +1634,7 @@ impl LedgerState {
     /// submitted governance proposals have their deposited ADA counted toward
     /// DRep/SPO voting power.
     fn proposal_deposits_by_credential(&self) -> HashMap<Hash32, u64> {
-        Self::proposal_deposits_from(&self.governance.proposals)
+        Self::proposal_deposits_from(&self.gov.governance.proposals)
     }
 
     /// Compute proposal deposits per credential from a given proposals map.
@@ -1637,30 +1663,30 @@ impl LedgerState {
     /// Returns `(drep_power_cache, always_no_confidence_stake, always_abstain_stake)`.
     pub fn build_drep_power_cache(&self) -> (HashMap<Hash32, u64>, u64, u64) {
         // Use epoch-boundary snapshot when available (preferred — matches Haskell).
-        if !self.governance.drep_distribution_snapshot.is_empty()
-            || self.governance.drep_snapshot_no_confidence > 0
-            || self.governance.drep_snapshot_abstain > 0
+        if !self.gov.governance.drep_distribution_snapshot.is_empty()
+            || self.gov.governance.drep_snapshot_no_confidence > 0
+            || self.gov.governance.drep_snapshot_abstain > 0
         {
             // The stored snapshot is the BASE distribution (without proposal deposits),
             // matching Haskell's `computeDRepDistr`.  Add proposal deposits from the
             // ratification snapshot's proposals (= `dpProposalDeposits` in Haskell's
             // DRep pulser), so that proposal submitters' deposits count toward their
             // DRep's voting power.
-            let mut cache = self.governance.drep_distribution_snapshot.clone();
-            let mut no_confidence = self.governance.drep_snapshot_no_confidence;
-            let mut abstain = self.governance.drep_snapshot_abstain;
+            let mut cache = self.gov.governance.drep_distribution_snapshot.clone();
+            let mut no_confidence = self.gov.governance.drep_snapshot_no_confidence;
+            let mut abstain = self.gov.governance.drep_snapshot_abstain;
 
             // Add proposal deposits from the ratification snapshot's proposals,
             // matching Haskell's `dpProposalDeposits` added during DRep pulsing.
             // Fall back to live proposals if no ratification snapshot exists.
-            let proposals = if let Some(ref snap) = self.governance.ratification_snapshot {
+            let proposals = if let Some(ref snap) = self.gov.governance.ratification_snapshot {
                 &snap.proposals
             } else {
-                &self.governance.proposals
+                &self.gov.governance.proposals
             };
             let prop_deposits = Self::proposal_deposits_from(proposals);
             for (cred, deposit) in &prop_deposits {
-                if let Some(drep) = self.governance.vote_delegations.get(cred) {
+                if let Some(drep) = self.gov.governance.vote_delegations.get(cred) {
                     match drep {
                         DRep::KeyHash(h) => {
                             if cache.contains_key(h) {
@@ -1705,19 +1731,25 @@ impl LedgerState {
         // Precompute proposal deposits per credential (Haskell: proposalDeposits
         // passed into DRepPulser, added to each credential's voting power).
         let prop_deposits = self.proposal_deposits_by_credential();
-        for (stake_cred, drep) in &self.governance.vote_delegations {
+        for (stake_cred, drep) in &self.gov.governance.vote_delegations {
             let stake = self.credential_stake(stake_cred)
                 + prop_deposits.get(stake_cred).copied().unwrap_or(0);
             match drep {
                 DRep::KeyHash(h) => {
                     // Only count stake for active DReps
-                    if self.governance.dreps.get(h).is_some_and(|d| d.active) {
+                    if self.gov.governance.dreps.get(h).is_some_and(|d| d.active) {
                         *cache.entry(*h).or_default() += stake;
                     }
                 }
                 DRep::ScriptHash(h) => {
                     let hash32 = h.to_hash32_padded();
-                    if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                    if self
+                        .gov
+                        .governance
+                        .dreps
+                        .get(&hash32)
+                        .is_some_and(|d| d.active)
+                    {
                         *cache.entry(hash32).or_default() += stake;
                     }
                 }
@@ -1755,17 +1787,23 @@ impl LedgerState {
         let mut no_confidence = 0u64;
         let mut abstain = 0u64;
         // No proposal deposits — matches Haskell's computeDRepDistr
-        for (stake_cred, drep) in &self.governance.vote_delegations {
+        for (stake_cred, drep) in &self.gov.governance.vote_delegations {
             let stake = self.credential_stake(stake_cred);
             match drep {
                 DRep::KeyHash(h) => {
-                    if self.governance.dreps.get(h).is_some_and(|d| d.active) {
+                    if self.gov.governance.dreps.get(h).is_some_and(|d| d.active) {
                         *cache.entry(*h).or_default() += stake;
                     }
                 }
                 DRep::ScriptHash(h) => {
                     let hash32 = h.to_hash32_padded();
-                    if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                    if self
+                        .gov
+                        .governance
+                        .dreps
+                        .get(&hash32)
+                        .is_some_and(|d| d.active)
+                    {
                         *cache.entry(hash32).or_default() += stake;
                     }
                 }
@@ -1777,7 +1815,7 @@ impl LedgerState {
                 }
             }
         }
-        let gov = Arc::make_mut(&mut self.governance);
+        let gov = Arc::make_mut(&mut self.gov.governance);
         gov.drep_distribution_snapshot = cache;
         gov.drep_snapshot_no_confidence = no_confidence;
         gov.drep_snapshot_abstain = abstain;
@@ -1797,7 +1835,7 @@ impl LedgerState {
     /// at the NEXT epoch boundary, matching Haskell's DRep pulser timing where the
     /// pulser is created with `setFreshDRepPulsingState` from post-transition state.
     pub(crate) fn capture_ratification_snapshot(&mut self) {
-        let gov = &self.governance;
+        let gov = &self.gov.governance;
         let snapshot = super::RatificationSnapshot {
             proposals: gov.proposals.clone(),
             votes_by_action: gov.votes_by_action.clone(),
@@ -1820,7 +1858,7 @@ impl LedgerState {
             committee = snapshot.committee_expiration.len(),
             "Ratification snapshot captured for next epoch boundary"
         );
-        Arc::make_mut(&mut self.governance).ratification_snapshot = Some(snapshot);
+        Arc::make_mut(&mut self.gov.governance).ratification_snapshot = Some(snapshot);
     }
 
     /// Compute total active DRep-delegated stake across all DReps.
@@ -1834,25 +1872,26 @@ impl LedgerState {
         // snapshot values also ensures the total is consistent with the per-DRep
         // power returned by `build_drep_power_cache()` (both include proposal
         // deposits).
-        if !self.governance.drep_distribution_snapshot.is_empty()
-            || self.governance.drep_snapshot_no_confidence > 0
-            || self.governance.drep_snapshot_abstain > 0
+        if !self.gov.governance.drep_distribution_snapshot.is_empty()
+            || self.gov.governance.drep_snapshot_no_confidence > 0
+            || self.gov.governance.drep_snapshot_abstain > 0
         {
             let drep_sum: u64 = self
+                .gov
                 .governance
                 .drep_distribution_snapshot
                 .values()
                 .fold(0u64, |acc, v| acc.saturating_add(*v));
             let total = drep_sum
-                .saturating_add(self.governance.drep_snapshot_no_confidence)
-                .saturating_add(self.governance.drep_snapshot_abstain);
+                .saturating_add(self.gov.governance.drep_snapshot_no_confidence)
+                .saturating_add(self.gov.governance.drep_snapshot_abstain);
             return total.max(1);
         }
 
         // Fallback: compute from live state (first epoch or old snapshot).
         let prop_deposits = self.proposal_deposits_by_credential();
         let mut total = 0u64;
-        for (stake_cred, drep) in &self.governance.vote_delegations {
+        for (stake_cred, drep) in &self.gov.governance.vote_delegations {
             let stake = self.credential_stake(stake_cred)
                 + prop_deposits.get(stake_cred).copied().unwrap_or(0);
             match drep {
@@ -1860,13 +1899,19 @@ impl LedgerState {
                     total += stake;
                 }
                 DRep::KeyHash(h) => {
-                    if self.governance.dreps.get(h).is_some_and(|d| d.active) {
+                    if self.gov.governance.dreps.get(h).is_some_and(|d| d.active) {
                         total += stake;
                     }
                 }
                 DRep::ScriptHash(h) => {
                     let hash32 = h.to_hash32_padded();
-                    if self.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                    if self
+                        .gov
+                        .governance
+                        .dreps
+                        .get(&hash32)
+                        .is_some_and(|d| d.active)
+                    {
                         total += stake;
                     }
                 }
@@ -1889,7 +1934,7 @@ impl LedgerState {
     /// uses `ssStakeMarkPoolDistr` (the mark pool distribution).
     pub(crate) fn compute_spo_voting_power(&self, pool_id: &Hash28) -> u64 {
         // Use the "mark" snapshot — non-ratification fallback.
-        if let Some(ref snapshot) = self.snapshots.mark {
+        if let Some(ref snapshot) = self.epochs.snapshots.mark {
             if let Some(stake) = snapshot.pool_stake.get(pool_id) {
                 return stake.0;
             }
@@ -1898,7 +1943,7 @@ impl LedgerState {
         // This path is taken during the first two epochs before snapshots are populated.
         debug!("SPO voting power: falling back to O(n) delegation scan — snapshot not available");
         let mut total = 0u64;
-        for (stake_cred, delegated_pool) in self.delegations.iter() {
+        for (stake_cred, delegated_pool) in self.certs.delegations.iter() {
             if delegated_pool == pool_id {
                 total += self.credential_stake(stake_cred);
             }
@@ -1915,7 +1960,7 @@ impl LedgerState {
     /// fallback for non-ratification contexts and early epochs.
     fn compute_total_spo_stake(&self) -> u64 {
         // Use "mark" snapshot if available, else fall back.
-        if let Some(ref snapshot) = self.snapshots.mark {
+        if let Some(ref snapshot) = self.epochs.snapshots.mark {
             let total: u64 = snapshot
                 .pool_stake
                 .values()
@@ -1925,7 +1970,7 @@ impl LedgerState {
         // Fallback: sum all pool stake from current delegations (UTxO + rewards).
         // This path is taken during the first two epochs before snapshots are populated.
         let mut total = 0u64;
-        for stake_cred in self.delegations.keys() {
+        for stake_cred in self.certs.delegations.keys() {
             total = total.saturating_add(self.credential_stake(stake_cred));
         }
         total.max(1)
@@ -1950,8 +1995,8 @@ impl LedgerState {
             GovAction::HardForkInitiation {
                 protocol_version, ..
             } => {
-                self.protocol_params.protocol_version_major = protocol_version.0;
-                self.protocol_params.protocol_version_minor = protocol_version.1;
+                self.epochs.protocol_params.protocol_version_major = protocol_version.0;
+                self.epochs.protocol_params.protocol_version_minor = protocol_version.1;
                 debug!(
                     "Governance   hard fork initiated (protocol version {}.{})",
                     protocol_version.0, protocol_version.1
@@ -1967,17 +2012,17 @@ impl LedgerState {
                 let total: u64 = withdrawals
                     .values()
                     .fold(0u64, |acc, a| acc.saturating_add(a.0));
-                if total > self.treasury.0 {
+                if total > self.epochs.treasury.0 {
                     warn!(
                         "Treasury withdrawal exceeds balance: requested {} but only {} available",
-                        total, self.treasury.0
+                        total, self.epochs.treasury.0
                     );
                 }
-                self.treasury.0 = self.treasury.0.saturating_sub(total);
+                self.epochs.treasury.0 = self.epochs.treasury.0.saturating_sub(total);
                 for (reward_addr, amount) in withdrawals {
                     if amount.0 > 0 && reward_addr.len() >= 29 {
                         let key = Self::reward_account_to_hash(reward_addr);
-                        *Arc::make_mut(&mut self.reward_accounts)
+                        *Arc::make_mut(&mut self.certs.reward_accounts)
                             .entry(key)
                             .or_insert(Lovelace(0)) += *amount;
                     }
@@ -1991,7 +2036,7 @@ impl LedgerState {
             GovAction::NoConfidence { .. } => {
                 // No confidence motion: dissolve the committee entirely.
                 // Per Haskell: `ensCommittee = SNothing` — committee is set to Nothing.
-                let gov = Arc::make_mut(&mut self.governance);
+                let gov = Arc::make_mut(&mut self.gov.governance);
                 gov.committee_hot_keys.clear();
                 gov.committee_expiration.clear();
                 gov.committee_threshold = None; // Match Haskell SNothing
@@ -2007,28 +2052,29 @@ impl LedgerState {
                 // Remove specified members
                 for cred in members_to_remove {
                     let key = credential_to_hash(cred);
-                    Arc::make_mut(&mut self.governance)
+                    Arc::make_mut(&mut self.gov.governance)
                         .committee_hot_keys
                         .remove(&key);
-                    Arc::make_mut(&mut self.governance)
+                    Arc::make_mut(&mut self.gov.governance)
                         .committee_expiration
                         .remove(&key);
-                    Arc::make_mut(&mut self.governance)
+                    Arc::make_mut(&mut self.gov.governance)
                         .committee_resigned
                         .remove(&key);
                 }
                 // Add new members with expiration epochs
                 for (cred, expiration_epoch) in members_to_add {
                     let key = credential_to_hash(cred);
-                    Arc::make_mut(&mut self.governance)
+                    Arc::make_mut(&mut self.gov.governance)
                         .committee_expiration
                         .insert(key, EpochNo(*expiration_epoch));
                     // Hot key auth comes via CommitteeHotAuth certificates
                 }
                 // Store the new committee quorum threshold
-                Arc::make_mut(&mut self.governance).committee_threshold = Some(threshold.clone());
+                Arc::make_mut(&mut self.gov.governance).committee_threshold =
+                    Some(threshold.clone());
                 // UpdateCommittee restores confidence
-                Arc::make_mut(&mut self.governance).no_confidence = false;
+                Arc::make_mut(&mut self.gov.governance).no_confidence = false;
                 debug!(
                     "Governance   committee updated: {} removed, {} added, threshold={}/{}",
                     members_to_remove.len(),
@@ -2038,7 +2084,7 @@ impl LedgerState {
                 );
             }
             GovAction::NewConstitution { constitution, .. } => {
-                Arc::make_mut(&mut self.governance).constitution = Some(constitution.clone());
+                Arc::make_mut(&mut self.gov.governance).constitution = Some(constitution.clone());
                 debug!(
                     "Governance   new constitution enacted (script_hash: {:?})",
                     constitution.script_hash.as_ref().map(|h| h.to_hex())
@@ -2885,23 +2931,23 @@ mod tests {
         params.committee_min_size = 0; // Don't require min committee size in tests
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
-        state.needs_stake_rebuild = false;
+        state.epochs.needs_stake_rebuild = false;
         // Zero reserves to prevent RUPD monetary expansion from interfering
         // with governance-specific assertions about treasury changes.
-        state.reserves = Lovelace(0);
+        state.epochs.reserves = Lovelace(0);
 
         // Set up CC
         let cold = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
         let hot = Credential::VerificationKey(Hash28::from_bytes([20u8; 28]));
         let cold_key = credential_to_hash(&cold);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .committee_expiration
             .insert(cold_key, EpochNo(1000));
         state.process_certificate(&Certificate::CommitteeHotAuth {
             cold_credential: cold,
             hot_credential: hot,
         });
-        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
             numerator: 1,
             denominator: 2,
         });
@@ -2910,7 +2956,7 @@ mod tests {
         for i in 0..n_dreps {
             let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
             let key = credential_to_hash(&cred);
-            Arc::make_mut(&mut state.governance).dreps.insert(
+            Arc::make_mut(&mut state.gov.governance).dreps.insert(
                 key,
                 DRepRegistration {
                     credential: cred,
@@ -2922,10 +2968,11 @@ mod tests {
                 },
             );
             let stake_key = Hash32::from_bytes([200 + i as u8; 32]);
-            Arc::make_mut(&mut state.governance)
+            Arc::make_mut(&mut state.gov.governance)
                 .vote_delegations
                 .insert(stake_key, DRep::KeyHash(key));
             state
+                .certs
                 .stake_distribution
                 .stake_map
                 .insert(stake_key, Lovelace(1_000_000_000));
@@ -2934,7 +2981,7 @@ mod tests {
         // Register SPOs with delegations
         for i in 0..n_spos {
             let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
-            Arc::make_mut(&mut state.pool_params).insert(
+            Arc::make_mut(&mut state.certs.pool_params).insert(
                 pool_id,
                 PoolRegistration {
                     pool_id,
@@ -2951,8 +2998,9 @@ mod tests {
                 },
             );
             let stake_key = Hash32::from_bytes([150 + i as u8; 32]);
-            Arc::make_mut(&mut state.delegations).insert(stake_key, pool_id);
+            Arc::make_mut(&mut state.certs.delegations).insert(stake_key, pool_id);
             state
+                .certs
                 .stake_distribution
                 .stake_map
                 .insert(stake_key, Lovelace(1_000_000_000));
@@ -3090,7 +3138,7 @@ mod tests {
     fn test_delaying_action_blocks_subsequent_ratification() {
         let mut state = gov_test_state(10, 10);
         // Set CC threshold to 0 to simplify
-        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
@@ -3142,11 +3190,11 @@ mod tests {
         state.process_epoch_transition(EpochNo(1));
 
         // NoConfidence should be enacted (delaying action)
-        assert!(state.governance.no_confidence);
+        assert!(state.gov.governance.no_confidence);
         // ParameterChange should be delayed — NOT enacted
-        assert_eq!(state.protocol_params.n_opt, 500); // unchanged
-                                                      // The pp proposal should still be active (delayed, not expired)
-        assert!(state.governance.last_ratify_delayed);
+        assert_eq!(state.epochs.protocol_params.n_opt, 500); // unchanged
+                                                             // The pp proposal should still be active (delayed, not expired)
+        assert!(state.gov.governance.last_ratify_delayed);
     }
 
     // ========================================================================
@@ -3383,7 +3431,7 @@ mod tests {
     #[test]
     fn test_drep_non_voters_count_as_implicit_no() {
         let mut state = gov_test_state(10, 0);
-        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
@@ -3424,7 +3472,7 @@ mod tests {
             },
             &cache,
             nc_stake,
-            &state.governance.votes_by_action,
+            &state.gov.governance.votes_by_action,
             None,
             None,
         );
@@ -3465,7 +3513,7 @@ mod tests {
             &GovAction::InfoAction,
             &cache,
             nc_stake,
-            &state.governance.votes_by_action,
+            &state.gov.governance.votes_by_action,
             None,
             None,
         );
@@ -3481,10 +3529,11 @@ mod tests {
         // Add AlwaysAbstain delegators
         for i in 0..3u8 {
             let stake_key = Hash32::from_bytes([230 + i; 32]);
-            Arc::make_mut(&mut state.governance)
+            Arc::make_mut(&mut state.gov.governance)
                 .vote_delegations
                 .insert(stake_key, DRep::Abstain);
             state
+                .certs
                 .stake_distribution
                 .stake_map
                 .insert(stake_key, Lovelace(2_000_000_000));
@@ -3514,7 +3563,7 @@ mod tests {
             &GovAction::InfoAction,
             &cache,
             nc_stake,
-            &state.governance.votes_by_action,
+            &state.gov.governance.votes_by_action,
             None,
             None,
         );
@@ -3530,10 +3579,11 @@ mod tests {
         // Add AlwaysNoConfidence delegators
         for i in 0..3u8 {
             let stake_key = Hash32::from_bytes([230 + i; 32]);
-            Arc::make_mut(&mut state.governance)
+            Arc::make_mut(&mut state.gov.governance)
                 .vote_delegations
                 .insert(stake_key, DRep::NoConfidence);
             state
+                .certs
                 .stake_distribution
                 .stake_map
                 .insert(stake_key, Lovelace(2_000_000_000));
@@ -3563,7 +3613,7 @@ mod tests {
             },
             &cache,
             nc_stake,
-            &state.governance.votes_by_action,
+            &state.gov.governance.votes_by_action,
             None,
             None,
         );
@@ -3579,10 +3629,11 @@ mod tests {
         let mut state = gov_test_state(5, 0);
         for i in 0..3u8 {
             let stake_key = Hash32::from_bytes([230 + i; 32]);
-            Arc::make_mut(&mut state.governance)
+            Arc::make_mut(&mut state.gov.governance)
                 .vote_delegations
                 .insert(stake_key, DRep::NoConfidence);
             state
+                .certs
                 .stake_distribution
                 .stake_map
                 .insert(stake_key, Lovelace(2_000_000_000));
@@ -3606,7 +3657,7 @@ mod tests {
             &GovAction::InfoAction,
             &cache,
             nc_stake,
-            &state.governance.votes_by_action,
+            &state.gov.governance.votes_by_action,
             None,
             None,
         );
@@ -3624,12 +3675,12 @@ mod tests {
         let cred1 = Credential::VerificationKey(Hash28::from_bytes([1u8; 28]));
         let key0 = credential_to_hash(&cred0);
         let key1 = credential_to_hash(&cred1);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .dreps
             .get_mut(&key0)
             .unwrap()
             .active = false;
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .dreps
             .get_mut(&key1)
             .unwrap()
@@ -3648,12 +3699,12 @@ mod tests {
     #[test]
     fn test_cc_expired_members_excluded() {
         let mut state = gov_test_state(5, 0);
-        state.protocol_params.committee_min_size = 0;
+        state.epochs.protocol_params.committee_min_size = 0;
         // Add a second CC member with early expiry
         let cold2 = Credential::VerificationKey(Hash28::from_bytes([11u8; 28]));
         let hot2 = Credential::VerificationKey(Hash28::from_bytes([21u8; 28]));
         let cold2_key = credential_to_hash(&cold2);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .committee_expiration
             .insert(cold2_key, EpochNo(5)); // Active through epoch 5
 
@@ -3691,13 +3742,13 @@ mod tests {
         // At epoch 5, member with expiry 5 should still be active
         let result = check_cc_approval(
             &action_id,
-            &state.governance.votes_by_action,
-            &state.governance.committee_hot_keys,
-            &state.governance.committee_expiration,
-            &state.governance.committee_resigned,
-            &state.governance.committee_threshold,
+            &state.gov.governance.votes_by_action,
+            &state.gov.governance.committee_hot_keys,
+            &state.gov.governance.committee_expiration,
+            &state.gov.governance.committee_resigned,
+            &state.gov.governance.committee_threshold,
             EpochNo(5),
-            state.protocol_params.committee_min_size,
+            state.epochs.protocol_params.committee_min_size,
             false,
         );
         assert!(result);
@@ -3705,13 +3756,13 @@ mod tests {
         // At epoch 6, member with expiry 5 should be expired
         let result = check_cc_approval(
             &action_id,
-            &state.governance.votes_by_action,
-            &state.governance.committee_hot_keys,
-            &state.governance.committee_expiration,
-            &state.governance.committee_resigned,
-            &state.governance.committee_threshold,
+            &state.gov.governance.votes_by_action,
+            &state.gov.governance.committee_hot_keys,
+            &state.gov.governance.committee_expiration,
+            &state.gov.governance.committee_resigned,
+            &state.gov.governance.committee_threshold,
             EpochNo(6),
-            state.protocol_params.committee_min_size,
+            state.epochs.protocol_params.committee_min_size,
             false,
         );
         // Only first CC member (expiry 1000) is active, voted Yes → 1/1 >= 1/2 → pass
@@ -3725,7 +3776,7 @@ mod tests {
             credential_to_hash(&Credential::VerificationKey(Hash28::from_bytes([10u8; 28])));
 
         // Resign the CC member
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .committee_resigned
             .insert(cold_key, None);
 
@@ -3744,13 +3795,13 @@ mod tests {
         // CC vote should fail — only member is resigned
         let result = check_cc_approval(
             &action_id,
-            &state.governance.votes_by_action,
-            &state.governance.committee_hot_keys,
-            &state.governance.committee_expiration,
-            &state.governance.committee_resigned,
-            &state.governance.committee_threshold,
+            &state.gov.governance.votes_by_action,
+            &state.gov.governance.committee_hot_keys,
+            &state.gov.governance.committee_expiration,
+            &state.gov.governance.committee_resigned,
+            &state.gov.governance.committee_threshold,
             EpochNo(0),
-            state.protocol_params.committee_min_size,
+            state.epochs.protocol_params.committee_min_size,
             false,
         );
         assert!(!result);
@@ -3783,7 +3834,7 @@ mod tests {
     fn test_cc_min_size_enforcement() {
         let mut state = gov_test_state(5, 0);
         // Set min committee size to 3 (we only have 1 member)
-        state.protocol_params.committee_min_size = 3;
+        state.epochs.protocol_params.committee_min_size = 3;
 
         let action_id = make_action_id(50, 0);
         state.process_proposal(
@@ -3801,11 +3852,11 @@ mod tests {
         // Post-bootstrap: should fail because active_size (1) < committee_min_size (3)
         let result = check_cc_approval(
             &action_id,
-            &state.governance.votes_by_action,
-            &state.governance.committee_hot_keys,
-            &state.governance.committee_expiration,
-            &state.governance.committee_resigned,
-            &state.governance.committee_threshold,
+            &state.gov.governance.votes_by_action,
+            &state.gov.governance.committee_hot_keys,
+            &state.gov.governance.committee_expiration,
+            &state.gov.governance.committee_resigned,
+            &state.gov.governance.committee_threshold,
             EpochNo(0),
             3,
             false,
@@ -3815,11 +3866,11 @@ mod tests {
         // During bootstrap: min size check is skipped
         let result = check_cc_approval(
             &action_id,
-            &state.governance.votes_by_action,
-            &state.governance.committee_hot_keys,
-            &state.governance.committee_expiration,
-            &state.governance.committee_resigned,
-            &state.governance.committee_threshold,
+            &state.gov.governance.votes_by_action,
+            &state.gov.governance.committee_hot_keys,
+            &state.gov.governance.committee_expiration,
+            &state.gov.governance.committee_resigned,
+            &state.gov.governance.committee_threshold,
             EpochNo(0),
             3,
             true,
@@ -3836,7 +3887,7 @@ mod tests {
         // NoConfidence: DRep + SPO, NO CC
         let mut state = gov_test_state(10, 10);
         // Set CC threshold to something that would block if checked
-        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
             numerator: 99,
             denominator: 100,
         });
@@ -3867,15 +3918,15 @@ mod tests {
         // NO CC votes — CC cannot vote on NoConfidence
 
         state.process_epoch_transition(EpochNo(1));
-        assert!(state.governance.no_confidence);
-        assert!(state.governance.proposals.is_empty());
+        assert!(state.gov.governance.no_confidence);
+        assert!(state.gov.governance.proposals.is_empty());
     }
 
     #[test]
     fn test_update_committee_no_cc_required() {
         // UpdateCommittee: DRep + SPO, NO CC
         let mut state = gov_test_state(10, 10);
-        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
             numerator: 99,
             denominator: 100,
         });
@@ -3916,8 +3967,8 @@ mod tests {
 
         state.process_epoch_transition(EpochNo(1));
         // UpdateCommittee restores confidence
-        assert!(!state.governance.no_confidence);
-        assert!(state.governance.proposals.is_empty());
+        assert!(!state.gov.governance.no_confidence);
+        assert!(state.gov.governance.proposals.is_empty());
     }
 
     #[test]
@@ -3952,15 +4003,15 @@ mod tests {
         // NO SPO votes — SPOs cannot vote on NewConstitution
 
         state.process_epoch_transition(EpochNo(1));
-        assert!(state.governance.constitution.is_some());
-        assert!(state.governance.proposals.is_empty());
+        assert!(state.gov.governance.constitution.is_some());
+        assert!(state.gov.governance.proposals.is_empty());
     }
 
     #[test]
     fn test_treasury_withdrawal_no_spo_required() {
         // TreasuryWithdrawals: DRep + CC, NO SPO
         let mut state = gov_test_state(10, 10);
-        state.treasury = Lovelace(10_000_000_000);
+        state.epochs.treasury = Lovelace(10_000_000_000);
 
         let mut withdrawals = BTreeMap::new();
         withdrawals.insert(vec![0u8; 29], Lovelace(5_000_000_000));
@@ -3987,7 +4038,7 @@ mod tests {
         cc_vote_yes(&mut state, &action_id);
 
         state.process_epoch_transition(EpochNo(1));
-        assert_eq!(state.treasury, Lovelace(5_000_000_000));
+        assert_eq!(state.epochs.treasury, Lovelace(5_000_000_000));
     }
 
     // ========================================================================
@@ -3999,7 +4050,7 @@ mod tests {
         // Gap 1: TreasuryWithdrawals that exceed treasury balance must not be
         // ratified, matching Haskell's checkWithdrawals precondition.
         let mut state = gov_test_state(10, 0);
-        state.treasury = Lovelace(500_000_000); // 500M
+        state.epochs.treasury = Lovelace(500_000_000); // 500M
 
         let mut withdrawals = BTreeMap::new();
         withdrawals.insert(vec![0u8; 29], Lovelace(1_000_000_000)); // Request 1B
@@ -4030,11 +4081,11 @@ mod tests {
 
         // Withdrawal exceeds treasury → not ratified despite unanimous approval
         assert_eq!(
-            state.treasury.0, 500_000_000,
+            state.epochs.treasury.0, 500_000_000,
             "Treasury must be unchanged when withdrawal exceeds balance"
         );
         assert_eq!(
-            state.governance.proposals.len(),
+            state.gov.governance.proposals.len(),
             1,
             "Proposal must remain active (not ratified)"
         );
@@ -4046,7 +4097,7 @@ mod tests {
         // cumulative withdrawals. Second proposal blocked when aggregate exceeds
         // treasury balance.
         let mut state = gov_test_state(10, 0);
-        state.treasury = Lovelace(600_000_000); // 600M
+        state.epochs.treasury = Lovelace(600_000_000); // 600M
 
         // Two withdrawal proposals: 400M each (total 800M > 600M treasury)
         for proposal_idx in 0u8..2 {
@@ -4078,16 +4129,16 @@ mod tests {
             cc_vote_yes(&mut state, &action_id);
         }
 
-        assert_eq!(state.governance.proposals.len(), 2);
+        assert_eq!(state.gov.governance.proposals.len(), 2);
         state.process_epoch_transition(EpochNo(1));
 
         // First 400M enacted, second 400M blocked (would exceed remaining 200M)
         assert_eq!(
-            state.treasury.0, 200_000_000,
+            state.epochs.treasury.0, 200_000_000,
             "Only the first 400M withdrawal should be enacted"
         );
         assert_eq!(
-            state.governance.proposals.len(),
+            state.gov.governance.proposals.len(),
             1,
             "Second proposal must remain active (aggregate cap)"
         );
@@ -4123,7 +4174,7 @@ mod tests {
         );
         let action_id_a = make_action_id(40, 0);
         // Manually set expires to current epoch so it's already expired at boundary
-        if let Some(ps) = Arc::make_mut(&mut state.governance)
+        if let Some(ps) = Arc::make_mut(&mut state.gov.governance)
             .proposals
             .get_mut(&action_id_a)
         {
@@ -4164,7 +4215,7 @@ mod tests {
         // A expired and was never enacted → enacted_pparam root is still None →
         // B's prev_action_id (Some(A)) doesn't match → B is not ratified
         assert_ne!(
-            state.protocol_params.max_block_body_size, 98304,
+            state.epochs.protocol_params.max_block_body_size, 98304,
             "Proposal B must NOT be ratified (parent A expired without enactment)"
         );
     }
@@ -4176,7 +4227,7 @@ mod tests {
     #[test]
     fn test_no_confidence_clears_committee_threshold() {
         let mut state = gov_test_state(10, 10);
-        assert!(state.governance.committee_threshold.is_some());
+        assert!(state.gov.governance.committee_threshold.is_some());
 
         let tx_hash = Hash32::from_bytes([50u8; 32]);
         state.process_proposal(
@@ -4202,10 +4253,10 @@ mod tests {
 
         state.process_epoch_transition(EpochNo(1));
 
-        assert!(state.governance.no_confidence);
-        assert!(state.governance.committee_threshold.is_none()); // Cleared
-        assert!(state.governance.committee_hot_keys.is_empty());
-        assert!(state.governance.committee_expiration.is_empty());
+        assert!(state.gov.governance.no_confidence);
+        assert!(state.gov.governance.committee_threshold.is_none()); // Cleared
+        assert!(state.gov.governance.committee_hot_keys.is_empty());
+        assert!(state.gov.governance.committee_expiration.is_empty());
     }
 
     #[test]
@@ -4215,14 +4266,14 @@ mod tests {
         state.enact_gov_action(&GovAction::NoConfidence {
             prev_action_id: None,
         });
-        assert!(state.governance.no_confidence);
+        assert!(state.gov.governance.no_confidence);
 
         // In no-confidence state, UpdateCommittee should use dvt_committee_no_confidence
         // (a different threshold from dvt_committee_normal).
         // On mainnet: no_confidence=60%, normal=67% (no_confidence is lower, not higher)
         assert_ne!(
-            state.protocol_params.dvt_committee_no_confidence,
-            state.protocol_params.dvt_committee_normal
+            state.epochs.protocol_params.dvt_committee_no_confidence,
+            state.epochs.protocol_params.dvt_committee_normal
         );
     }
 
@@ -4236,7 +4287,7 @@ mod tests {
         params.protocol_version_major = 9; // Bootstrap
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
-        state.needs_stake_rebuild = false;
+        state.epochs.needs_stake_rebuild = false;
 
         assert!(state.is_bootstrap_phase());
 
@@ -4252,7 +4303,7 @@ mod tests {
     fn test_proposal_expiry_inclusive() {
         // Proposals are active through their expires_epoch (per Haskell gasExpiresAfter < currentEpoch)
         let mut state = gov_test_state(5, 0);
-        state.protocol_params.gov_action_lifetime = 3;
+        state.epochs.protocol_params.gov_action_lifetime = 3;
 
         let tx_hash = Hash32::from_bytes([50u8; 32]);
         state.process_proposal(
@@ -4275,7 +4326,7 @@ mod tests {
         for e in 1..=4 {
             state.process_epoch_transition(EpochNo(e));
             assert_eq!(
-                state.governance.proposals.len(),
+                state.gov.governance.proposals.len(),
                 1,
                 "Should be active at epoch {}",
                 e
@@ -4283,7 +4334,7 @@ mod tests {
         }
 
         state.process_epoch_transition(EpochNo(5));
-        assert_eq!(state.governance.proposals.len(), 0); // Expired
+        assert_eq!(state.gov.governance.proposals.len(), 0); // Expired
     }
 
     #[test]
@@ -4291,12 +4342,12 @@ mod tests {
         // Use TreasuryWithdrawals to verify deposit return on ratification.
         // Set CC threshold to 0 so it auto-passes with no votes.
         let mut state = gov_test_state(10, 0);
-        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
         // DRep threshold for treasury withdrawal = dvt_treasury_withdrawal
-        state.protocol_params.dvt_treasury_withdrawal = Rational {
+        state.epochs.protocol_params.dvt_treasury_withdrawal = Rational {
             numerator: 0,
             denominator: 1,
         };
@@ -4305,7 +4356,7 @@ mod tests {
         let return_key = LedgerState::reward_account_to_hash(&return_addr);
         // Register the return credential so the deposit refund goes to the
         // reward account (not treasury, per Haskell `returnProposalDeposits`).
-        Arc::make_mut(&mut state.reward_accounts).insert(return_key, Lovelace(0));
+        Arc::make_mut(&mut state.certs.reward_accounts).insert(return_key, Lovelace(0));
 
         let tx_hash = Hash32::from_bytes([50u8; 32]);
         state.process_proposal(
@@ -4327,6 +4378,7 @@ mod tests {
         // Deposit should be returned to reward account
         assert_eq!(
             state
+                .certs
                 .reward_accounts
                 .get(&return_key)
                 .copied()
@@ -4338,13 +4390,13 @@ mod tests {
     #[test]
     fn test_deposit_returned_on_expiry() {
         let mut state = gov_test_state(5, 0);
-        state.protocol_params.gov_action_lifetime = 1;
+        state.epochs.protocol_params.gov_action_lifetime = 1;
 
         let return_addr = vec![0u8; 29];
         let return_key = LedgerState::reward_account_to_hash(&return_addr);
         // Register the return credential so the deposit refund goes to the
         // reward account (not treasury, per Haskell `returnProposalDeposits`).
-        Arc::make_mut(&mut state.reward_accounts).insert(return_key, Lovelace(0));
+        Arc::make_mut(&mut state.certs.reward_accounts).insert(return_key, Lovelace(0));
 
         let tx_hash = Hash32::from_bytes([50u8; 32]);
         state.process_proposal(
@@ -4364,17 +4416,18 @@ mod tests {
         // At transition to 2, self.epoch=1, 1 < 1 = false → still active
         // At transition to 3, self.epoch=2, 1 < 2 = true → expired
         state.process_epoch_transition(EpochNo(1));
-        assert_eq!(state.governance.proposals.len(), 1); // Still active
+        assert_eq!(state.gov.governance.proposals.len(), 1); // Still active
 
         state.process_epoch_transition(EpochNo(2));
-        assert_eq!(state.governance.proposals.len(), 1); // Still active (1 < 1 = false)
+        assert_eq!(state.gov.governance.proposals.len(), 1); // Still active (1 < 1 = false)
 
         state.process_epoch_transition(EpochNo(3));
-        assert_eq!(state.governance.proposals.len(), 0); // Expired (1 < 2 = true)
+        assert_eq!(state.gov.governance.proposals.len(), 0); // Expired (1 < 2 = true)
 
         // Deposit should be refunded
         assert_eq!(
             state
+                .certs
                 .reward_accounts
                 .get(&return_key)
                 .copied()
@@ -4408,7 +4461,12 @@ mod tests {
         // DRep 0 changes vote to Yes
         drep_vote(&mut state, 0, &action_id, Vote::Yes);
 
-        let votes = state.governance.votes_by_action.get(&action_id).unwrap();
+        let votes = state
+            .gov
+            .governance
+            .votes_by_action
+            .get(&action_id)
+            .unwrap();
         let drep_cred = Credential::VerificationKey(Hash28::from_bytes([0u8; 28]));
         let drep_vote_entry = votes
             .iter()
@@ -4424,7 +4482,7 @@ mod tests {
     #[test]
     fn test_competing_proposals_same_prev_action_id() {
         let mut state = gov_test_state(10, 0);
-        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
             numerator: 0,
             denominator: 1,
         });
@@ -4482,7 +4540,7 @@ mod tests {
         // First proposal (by BTreeMap order) should be enacted
         // Second proposal's prevActionId (None) no longer matches enacted root
         // The enacted_pparam_update should be set
-        assert!(state.governance.enacted_pparam_update.is_some());
+        assert!(state.gov.governance.enacted_pparam_update.is_some());
 
         // One proposal should still be active (the one whose prevActionId became stale)
         // OR both could have been enacted if they're processed in order and both match
@@ -4491,7 +4549,7 @@ mod tests {
         // But we need to check: our code does self.update_enacted_root BEFORE processing the next.
         // Yes, line 251-252: self.enact_gov_action(action); self.update_enacted_root(action_id, action);
         // So the second proposal should fail.
-        let enacted_id = state.governance.enacted_pparam_update.as_ref().unwrap();
+        let enacted_id = state.gov.governance.enacted_pparam_update.as_ref().unwrap();
         assert!(enacted_id == &id1 || enacted_id == &id2);
     }
 
@@ -4502,17 +4560,17 @@ mod tests {
     #[test]
     fn test_enact_no_confidence_effects() {
         let mut state = gov_test_state(5, 0);
-        assert!(!state.governance.no_confidence);
-        assert!(state.governance.committee_threshold.is_some());
+        assert!(!state.gov.governance.no_confidence);
+        assert!(state.gov.governance.committee_threshold.is_some());
 
         state.enact_gov_action(&GovAction::NoConfidence {
             prev_action_id: None,
         });
 
-        assert!(state.governance.no_confidence);
-        assert!(state.governance.committee_threshold.is_none());
-        assert!(state.governance.committee_hot_keys.is_empty());
-        assert!(state.governance.committee_expiration.is_empty());
+        assert!(state.gov.governance.no_confidence);
+        assert!(state.gov.governance.committee_threshold.is_none());
+        assert!(state.gov.governance.committee_hot_keys.is_empty());
+        assert!(state.gov.governance.committee_expiration.is_empty());
     }
 
     #[test]
@@ -4521,7 +4579,7 @@ mod tests {
         state.enact_gov_action(&GovAction::NoConfidence {
             prev_action_id: None,
         });
-        assert!(state.governance.no_confidence);
+        assert!(state.gov.governance.no_confidence);
 
         let new_cred = Credential::VerificationKey(Hash28::from_bytes([30u8; 28]));
         let mut members = BTreeMap::new();
@@ -4537,9 +4595,9 @@ mod tests {
             },
         });
 
-        assert!(!state.governance.no_confidence);
+        assert!(!state.gov.governance.no_confidence);
         assert_eq!(
-            state.governance.committee_threshold,
+            state.gov.governance.committee_threshold,
             Some(Rational {
                 numerator: 2,
                 denominator: 3,
@@ -4550,21 +4608,21 @@ mod tests {
     #[test]
     fn test_enact_hard_fork_updates_protocol_version() {
         let mut state = gov_test_state(5, 0);
-        assert_eq!(state.protocol_params.protocol_version_major, 10);
+        assert_eq!(state.epochs.protocol_params.protocol_version_major, 10);
 
         state.enact_gov_action(&GovAction::HardForkInitiation {
             prev_action_id: None,
             protocol_version: (11, 0),
         });
 
-        assert_eq!(state.protocol_params.protocol_version_major, 11);
-        assert_eq!(state.protocol_params.protocol_version_minor, 0);
+        assert_eq!(state.epochs.protocol_params.protocol_version_major, 11);
+        assert_eq!(state.epochs.protocol_params.protocol_version_minor, 0);
     }
 
     #[test]
     fn test_enact_treasury_withdrawal_debits_treasury() {
         let mut state = gov_test_state(5, 0);
-        state.treasury = Lovelace(10_000_000_000);
+        state.epochs.treasury = Lovelace(10_000_000_000);
 
         let mut withdrawals = BTreeMap::new();
         withdrawals.insert(vec![0u8; 29], Lovelace(3_000_000_000));
@@ -4575,13 +4633,13 @@ mod tests {
             policy_hash: None,
         });
 
-        assert_eq!(state.treasury, Lovelace(5_000_000_000));
+        assert_eq!(state.epochs.treasury, Lovelace(5_000_000_000));
     }
 
     #[test]
     fn test_enact_new_constitution() {
         let mut state = gov_test_state(5, 0);
-        assert!(state.governance.constitution.is_none());
+        assert!(state.gov.governance.constitution.is_none());
 
         let constitution = Constitution {
             anchor: make_anchor(),
@@ -4593,20 +4651,20 @@ mod tests {
             constitution: constitution.clone(),
         });
 
-        let stored = state.governance.constitution.as_ref().unwrap();
+        let stored = state.gov.governance.constitution.as_ref().unwrap();
         assert_eq!(stored.script_hash, constitution.script_hash);
     }
 
     #[test]
     fn test_enact_info_action_no_effect() {
         let mut state = gov_test_state(5, 0);
-        let before = state.protocol_params.clone();
+        let before = state.epochs.protocol_params.clone();
 
         state.enact_gov_action(&GovAction::InfoAction);
 
-        assert_eq!(state.protocol_params.n_opt, before.n_opt);
+        assert_eq!(state.epochs.protocol_params.n_opt, before.n_opt);
         assert_eq!(
-            state.protocol_params.protocol_version_major,
+            state.epochs.protocol_params.protocol_version_major,
             before.protocol_version_major
         );
     }
@@ -4636,8 +4694,8 @@ mod tests {
         let mut state = gov_test_state(10, 10);
 
         // Record the baseline values so we can assert they changed.
-        let old_tx_mem = state.protocol_params.max_tx_ex_units.mem;
-        let old_block_mem = state.protocol_params.max_block_ex_units.mem;
+        let old_tx_mem = state.epochs.protocol_params.max_tx_ex_units.mem;
+        let old_block_mem = state.epochs.protocol_params.max_block_ex_units.mem;
 
         // Propose a ParameterChange that updates both ex-unit limits.
         // These are the preview testnet values from on-chain governance epoch 1094.
@@ -4689,34 +4747,34 @@ mod tests {
 
         // The proposal must have been consumed (ratified and enacted).
         assert!(
-            state.governance.proposals.is_empty(),
+            state.gov.governance.proposals.is_empty(),
             "Proposal should have been ratified and removed from pending proposals"
         );
 
         // The protocol params must reflect the new ex-unit values.
         assert_ne!(
-            state.protocol_params.max_tx_ex_units.mem, old_tx_mem,
+            state.epochs.protocol_params.max_tx_ex_units.mem, old_tx_mem,
             "max_tx_ex_units.mem must have changed from the baseline"
         );
         assert_eq!(
-            state.protocol_params.max_tx_ex_units.mem, new_tx_ex_units.mem,
+            state.epochs.protocol_params.max_tx_ex_units.mem, new_tx_ex_units.mem,
             "max_tx_ex_units.mem must equal the enacted value (16_500_000)"
         );
         assert_eq!(
-            state.protocol_params.max_tx_ex_units.steps, new_tx_ex_units.steps,
+            state.epochs.protocol_params.max_tx_ex_units.steps, new_tx_ex_units.steps,
             "max_tx_ex_units.steps must equal the enacted value"
         );
 
         assert_ne!(
-            state.protocol_params.max_block_ex_units.mem, old_block_mem,
+            state.epochs.protocol_params.max_block_ex_units.mem, old_block_mem,
             "max_block_ex_units.mem must have changed from the baseline"
         );
         assert_eq!(
-            state.protocol_params.max_block_ex_units.mem, new_block_ex_units.mem,
+            state.epochs.protocol_params.max_block_ex_units.mem, new_block_ex_units.mem,
             "max_block_ex_units.mem must equal the enacted value (72_000_000)"
         );
         assert_eq!(
-            state.protocol_params.max_block_ex_units.steps, new_block_ex_units.steps,
+            state.epochs.protocol_params.max_block_ex_units.steps, new_block_ex_units.steps,
             "max_block_ex_units.steps must equal the enacted value"
         );
     }
@@ -4728,7 +4786,7 @@ mod tests {
     fn test_parameter_change_ex_units_not_ratified_without_cc() {
         let mut state = gov_test_state(10, 10);
         // Use a non-trivial CC threshold so missing the CC vote actually blocks ratification.
-        Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+        Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
             numerator: 1,
             denominator: 2,
         });
@@ -4769,12 +4827,12 @@ mod tests {
 
         // Proposal must still be pending (not ratified — CC threshold not met).
         assert!(
-            !state.governance.proposals.is_empty(),
+            !state.gov.governance.proposals.is_empty(),
             "Proposal should NOT have been ratified without CC approval"
         );
         // ex-unit value must be unchanged.
         assert_eq!(
-            state.protocol_params.max_tx_ex_units.mem,
+            state.epochs.protocol_params.max_tx_ex_units.mem,
             ProtocolParameters::mainnet_defaults().max_tx_ex_units.mem,
             "max_tx_ex_units.mem must be unchanged when CC approval is missing"
         );
@@ -4954,11 +5012,11 @@ mod tests {
         // The set snapshot has a different (lower) amount.
         let mut mark_pool_stake = std::collections::HashMap::new();
         mark_pool_stake.insert(pool_id, Lovelace(5_000_000_000));
-        state.snapshots.mark = Some(StakeSnapshot {
+        state.epochs.snapshots.mark = Some(StakeSnapshot {
             epoch: EpochNo(1),
             delegations: Arc::new(std::collections::HashMap::new()),
             pool_stake: mark_pool_stake,
-            pool_params: Arc::clone(&state.pool_params),
+            pool_params: Arc::clone(&state.certs.pool_params),
             stake_distribution: Arc::new(std::collections::HashMap::new()),
             epoch_fees: Lovelace(0),
             epoch_block_count: 0,
@@ -4967,11 +5025,11 @@ mod tests {
 
         let mut set_pool_stake = std::collections::HashMap::new();
         set_pool_stake.insert(pool_id, Lovelace(1_000_000_000)); // deliberately different
-        state.snapshots.set = Some(StakeSnapshot {
+        state.epochs.snapshots.set = Some(StakeSnapshot {
             epoch: EpochNo(0),
             delegations: Arc::new(std::collections::HashMap::new()),
             pool_stake: set_pool_stake,
-            pool_params: Arc::clone(&state.pool_params),
+            pool_params: Arc::clone(&state.certs.pool_params),
             stake_distribution: Arc::new(std::collections::HashMap::new()),
             epoch_fees: Lovelace(0),
             epoch_block_count: 0,
@@ -5000,11 +5058,11 @@ mod tests {
         let mut mark_stake = std::collections::HashMap::new();
         mark_stake.insert(pool_a, Lovelace(3_000_000_000));
         mark_stake.insert(pool_b, Lovelace(5_000_000_000));
-        state.snapshots.mark = Some(StakeSnapshot {
+        state.epochs.snapshots.mark = Some(StakeSnapshot {
             epoch: EpochNo(2),
             delegations: Arc::new(std::collections::HashMap::new()),
             pool_stake: mark_stake,
-            pool_params: Arc::clone(&state.pool_params),
+            pool_params: Arc::clone(&state.certs.pool_params),
             stake_distribution: Arc::new(std::collections::HashMap::new()),
             epoch_fees: Lovelace(0),
             epoch_block_count: 0,
@@ -5014,11 +5072,11 @@ mod tests {
         // Set has only one pool: total = 1B (stale, should NOT be used)
         let mut set_stake = std::collections::HashMap::new();
         set_stake.insert(pool_a, Lovelace(1_000_000_000));
-        state.snapshots.set = Some(StakeSnapshot {
+        state.epochs.snapshots.set = Some(StakeSnapshot {
             epoch: EpochNo(1),
             delegations: Arc::new(std::collections::HashMap::new()),
             pool_stake: set_stake,
-            pool_params: Arc::clone(&state.pool_params),
+            pool_params: Arc::clone(&state.certs.pool_params),
             stake_distribution: Arc::new(std::collections::HashMap::new()),
             epoch_fees: Lovelace(0),
             epoch_block_count: 0,
@@ -5042,12 +5100,13 @@ mod tests {
         let stake_cred = Hash32::from_bytes([88u8; 32]);
 
         // No snapshots — must fall back to live delegation scan
-        assert!(state.snapshots.mark.is_none());
-        assert!(state.snapshots.set.is_none());
+        assert!(state.epochs.snapshots.mark.is_none());
+        assert!(state.epochs.snapshots.set.is_none());
 
         // With a delegation pointing to pool_id and some stake
-        Arc::make_mut(&mut state.delegations).insert(stake_cred, pool_id);
+        Arc::make_mut(&mut state.certs.delegations).insert(stake_cred, pool_id);
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(stake_cred, Lovelace(9_000_000));
@@ -5060,7 +5119,7 @@ mod tests {
     }
 
     /// Verify that `count_votes_by_type` uses the `pool_stake_override` when
-    /// provided, NOT `self.snapshots.mark`.  This matches Haskell's RATIFY which
+    /// provided, NOT `self.epochs.snapshots.mark`.  This matches Haskell's RATIFY which
     /// uses `dpStakePoolDistr` (the mark from the PREVIOUS boundary, stored in
     /// the DRep pulser) rather than the current mark.
     ///
@@ -5071,11 +5130,11 @@ mod tests {
         use crate::state::StakeSnapshot;
 
         let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-        state.protocol_params.protocol_version_major = 9; // bootstrap
+        state.epochs.protocol_params.protocol_version_major = 9; // bootstrap
         let pool_id = Hash28::from_bytes([42u8; 28]);
 
         // Register the pool so SPO votes are recognized
-        Arc::make_mut(&mut state.pool_params).insert(
+        Arc::make_mut(&mut state.certs.pool_params).insert(
             pool_id,
             PoolRegistration {
                 pool_id,
@@ -5095,11 +5154,11 @@ mod tests {
         // Mark snapshot: pool has 10B (this is the WRONG snapshot for ratification)
         let mut mark_pool_stake = HashMap::new();
         mark_pool_stake.insert(pool_id, Lovelace(10_000_000_000));
-        state.snapshots.mark = Some(StakeSnapshot {
+        state.epochs.snapshots.mark = Some(StakeSnapshot {
             epoch: EpochNo(2),
             delegations: Arc::new(HashMap::new()),
             pool_stake: mark_pool_stake,
-            pool_params: Arc::clone(&state.pool_params),
+            pool_params: Arc::clone(&state.certs.pool_params),
             stake_distribution: Arc::new(HashMap::new()),
             epoch_fees: Lovelace(0),
             epoch_block_count: 0,
@@ -5173,12 +5232,12 @@ mod tests {
         params.committee_min_size = 0;
         let mut state = LedgerState::new(params);
         state.epoch_length = 100;
-        state.needs_stake_rebuild = false;
+        state.epochs.needs_stake_rebuild = false;
 
         let mut mark_pool_stake = HashMap::new();
         for i in 0..n {
             let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
-            Arc::make_mut(&mut state.pool_params).insert(
+            Arc::make_mut(&mut state.certs.pool_params).insert(
                 pool_id,
                 PoolRegistration {
                     pool_id,
@@ -5197,11 +5256,11 @@ mod tests {
             mark_pool_stake.insert(pool_id, Lovelace(1_000_000_000));
         }
 
-        state.snapshots.mark = Some(StakeSnapshot {
+        state.epochs.snapshots.mark = Some(StakeSnapshot {
             epoch: EpochNo(0),
             delegations: Arc::new(HashMap::new()),
             pool_stake: mark_pool_stake,
-            pool_params: Arc::clone(&state.pool_params),
+            pool_params: Arc::clone(&state.certs.pool_params),
             stake_distribution: Arc::new(HashMap::new()),
             epoch_fees: Lovelace(0),
             epoch_block_count: 0,
@@ -5417,7 +5476,7 @@ mod tests {
             ra.extend_from_slice(&[50u8; 28]);
             ra
         };
-        Arc::make_mut(&mut state.pool_params)
+        Arc::make_mut(&mut state.certs.pool_params)
             .get_mut(&pool_id)
             .unwrap()
             .reward_account = reward_account;
@@ -5429,7 +5488,7 @@ mod tests {
                 .copied()
                 .collect::<Vec<u8>>(),
         );
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .vote_delegations
             .insert(cred_hash, DRep::Abstain);
 
@@ -5464,13 +5523,13 @@ mod tests {
         // Set up pool's reward account
         let mut reward_account = vec![0xe0u8];
         reward_account.extend_from_slice(&[60u8; 28]);
-        Arc::make_mut(&mut state.pool_params)
+        Arc::make_mut(&mut state.certs.pool_params)
             .get_mut(&pool_id)
             .unwrap()
             .reward_account = reward_account.clone();
 
         let cred_hash = LedgerState::reward_account_to_hash(&reward_account);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .vote_delegations
             .insert(cred_hash, DRep::NoConfidence);
 
@@ -5498,7 +5557,7 @@ mod tests {
         let mut state = gov_test_state(10, 10);
         state.epoch = EpochNo(5);
 
-        let max_term = state.protocol_params.committee_max_term_length;
+        let max_term = state.epochs.protocol_params.committee_max_term_length;
         let too_long_expiry = state.epoch.0 + max_term + 1;
 
         let tx_hash = Hash32::from_bytes([80u8; 32]);
@@ -5535,7 +5594,7 @@ mod tests {
         state.process_epoch_transition(EpochNo(6));
         // Should NOT ratify — validCommitteeTerm check fails
         assert!(
-            !state.governance.proposals.is_empty(),
+            !state.gov.governance.proposals.is_empty(),
             "Proposal with excessive member expiry must not ratify"
         );
     }

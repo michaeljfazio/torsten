@@ -58,28 +58,30 @@ use strategies::{arb_ledger_state, LedgerStateConfig};
 ///              + sumRewards + deposits + feePot
 /// ```
 fn compute_six_pot_total(state: &LedgerState) -> u64 {
-    let utxo_total = state.utxo_set.total_lovelace().0;
-    let reserves = state.reserves.0;
-    let treasury = state.treasury.0;
-    let reward_accounts: u64 = state.reward_accounts.values().map(|l| l.0).sum();
-    let deposits_pot: u64 = state.total_stake_key_deposits
-        + state.pool_deposits.values().sum::<u64>()
+    let utxo_total = state.utxo.utxo_set.total_lovelace().0;
+    let reserves = state.epochs.reserves.0;
+    let treasury = state.epochs.treasury.0;
+    let reward_accounts: u64 = state.certs.reward_accounts.values().map(|l| l.0).sum();
+    let deposits_pot: u64 = state.certs.total_stake_key_deposits
+        + state.certs.pool_deposits.values().sum::<u64>()
         + state
+            .gov
             .governance
             .dreps
             .values()
             .map(|d| d.deposit.0)
             .sum::<u64>()
         + state
+            .gov
             .governance
             .proposals
             .values()
             .map(|p| p.procedure.deposit.0)
             .sum::<u64>();
-    let fee_pot = state.epoch_fees.0;
+    let fee_pot = state.utxo.epoch_fees.0;
     // pending_donations buffers treasury-bound ADA from tx bodies; include it
     // so the identity holds in both pre- and post-transition states.
-    let pending_donations = state.pending_donations.0;
+    let pending_donations = state.utxo.pending_donations.0;
 
     utxo_total
         .saturating_add(reserves)
@@ -128,17 +130,17 @@ proptest! {
 
         // `ss_fee` is the fee pot captured by the SNAP rule at the previous
         // boundary (Haskell's `ssFee`).  This is what `calculate_rewards_inner`
-        // uses as `epoch_fees` — NOT `state.epoch_fees`.
-        let ss_fee = state.snapshots.ss_fee.0;
+        // uses as `epoch_fees` — NOT `state.utxo.epoch_fees`.
+        let ss_fee = state.epochs.snapshots.ss_fee.0;
 
         // `prev_d` determines whether `eta = 1` or a performance ratio.
         // `LedgerState::new` sets `prev_d = 1.0`, so the generated states
         // always take the `d >= 0.8` branch.
-        let prev_d = state.prev_d;
+        let prev_d = state.epochs.prev_d;
 
         // Use `prev_protocol_params` for `rho` and `tau`, matching Haskell's
         // `startStep` which reads from `prevPParams`.
-        let pp = &state.prev_protocol_params;
+        let pp = &state.epochs.prev_protocol_params;
         let rho_num = pp.rho.numerator;
         let rho_den = pp.rho.denominator.max(1);
         let tau_num = pp.tau.numerator;
@@ -150,7 +152,7 @@ proptest! {
         let expansion: u64 = if prev_d >= 0.8 {
             // eta = 1: full expansion
             // floor(rho * reserves) — use u128 to avoid overflow on large reserves
-            let reserves = state.reserves.0;
+            let reserves = state.epochs.reserves.0;
             let num = (reserves as u128) * (rho_num as u128);
             let den = rho_den as u128;
             (num / den) as u64
@@ -178,7 +180,7 @@ proptest! {
 
         // Record reward account balances before the transition.
         let pre_rewards: std::collections::HashMap<_, _> = state
-            .reward_accounts
+            .certs.reward_accounts
             .iter()
             .map(|(k, v)| (*k, v.0))
             .collect();
@@ -192,7 +194,7 @@ proptest! {
         // not counted.  New accounts (registered via certificates, impossible
         // in arb_ledger_state) would also be counted here.
         let total_credited: u64 = state
-            .reward_accounts
+            .certs.reward_accounts
             .iter()
             .map(|(cred, &post)| {
                 let pre = pre_rewards.get(cred).copied().unwrap_or(0);
@@ -213,7 +215,7 @@ proptest! {
              expansion={expansion}, ss_fee={ss_fee}, treasury_cut={treasury_cut}, \
              tau={tau_num}/{tau_den}, rho={rho_num}/{rho_den}, \
              reserves={}",
-            state.reserves.0,
+            state.epochs.reserves.0,
         );
     }
 }
@@ -274,22 +276,22 @@ proptest! {
         // ── Step 3: Verify the post-transition total is unchanged ─────────────
 
         let post_total = compute_six_pot_total(&state);
-        let post_deposits = state.total_stake_key_deposits
-            + state.pool_deposits.values().sum::<u64>()
-            + state.governance.dreps.values().map(|d| d.deposit.0).sum::<u64>()
-            + state.governance.proposals.values().map(|p| p.procedure.deposit.0).sum::<u64>();
+        let post_deposits = state.certs.total_stake_key_deposits
+            + state.certs.pool_deposits.values().sum::<u64>()
+            + state.gov.governance.dreps.values().map(|d| d.deposit.0).sum::<u64>()
+            + state.gov.governance.proposals.values().map(|p| p.procedure.deposit.0).sum::<u64>();
         prop_assert!(
             post_total == pre_total,
             "Six-pot total changed during epoch transition: pre={} post={}: \
              utxo={}, reserves={}, treasury={}, rewards={}, deposits={}, fee_pot={}",
             pre_total,
             post_total,
-            state.utxo_set.total_lovelace().0,
-            state.reserves.0,
-            state.treasury.0,
-            state.reward_accounts.values().map(|l| l.0).sum::<u64>(),
+            state.utxo.utxo_set.total_lovelace().0,
+            state.epochs.reserves.0,
+            state.epochs.treasury.0,
+            state.certs.reward_accounts.values().map(|l| l.0).sum::<u64>(),
             post_deposits,
-            state.epoch_fees.0,
+            state.utxo.epoch_fees.0,
         );
     }
 }
@@ -339,16 +341,16 @@ proptest! {
         // The epoch tag stored inside each snapshot tells us which epoch it
         // was captured at.  We use these to verify the rotation without
         // comparing full snapshot content (which would be expensive).
-        let pre_mark_epoch: Option<EpochNo> = state.snapshots.mark.as_ref().map(|s| s.epoch);
-        let pre_set_epoch: Option<EpochNo> = state.snapshots.set.as_ref().map(|s| s.epoch);
-        let pre_go_epoch: Option<EpochNo> = state.snapshots.go.as_ref().map(|s| s.epoch);
+        let pre_mark_epoch: Option<EpochNo> = state.epochs.snapshots.mark.as_ref().map(|s| s.epoch);
+        let pre_set_epoch: Option<EpochNo> = state.epochs.snapshots.set.as_ref().map(|s| s.epoch);
+        let pre_go_epoch: Option<EpochNo> = state.epochs.snapshots.go.as_ref().map(|s| s.epoch);
 
         // Also record the number of pools in each snapshot for a structural
         // (not just epoch-tag) sanity check that the correct snapshot was rotated.
         let pre_mark_pools: Option<usize> =
-            state.snapshots.mark.as_ref().map(|s| s.pool_params.len());
+            state.epochs.snapshots.mark.as_ref().map(|s| s.pool_params.len());
         let pre_set_pools: Option<usize> =
-            state.snapshots.set.as_ref().map(|s| s.pool_params.len());
+            state.epochs.snapshots.set.as_ref().map(|s| s.pool_params.len());
 
         // ── Step 2: Run the epoch transition ─────────────────────────────────
 
@@ -359,7 +361,7 @@ proptest! {
         // ── Step 3: Verify the new mark has the correct epoch tag ────────────
 
         // After rotation: new mark epoch = new_epoch (the epoch being entered).
-        let post_mark_epoch = state.snapshots.mark.as_ref().map(|s| s.epoch);
+        let post_mark_epoch = state.epochs.snapshots.mark.as_ref().map(|s| s.epoch);
         prop_assert_eq!(
             post_mark_epoch,
             Some(new_epoch),
@@ -373,7 +375,7 @@ proptest! {
         // Haskell: ssStakeSet' = ssStakeMark.  The epoch tag inside the
         // snapshot does not change during rotation — only the slot (mark/set/go)
         // it occupies changes.
-        let post_set_epoch = state.snapshots.set.as_ref().map(|s| s.epoch);
+        let post_set_epoch = state.epochs.snapshots.set.as_ref().map(|s| s.epoch);
         prop_assert_eq!(
             post_set_epoch,
             pre_mark_epoch,
@@ -385,7 +387,7 @@ proptest! {
         // ── Step 5: Verify old set became new go (epoch tag preserved) ───────
 
         // Haskell: ssStakeGo' = ssStakeSet.
-        let post_go_epoch = state.snapshots.go.as_ref().map(|s| s.epoch);
+        let post_go_epoch = state.epochs.snapshots.go.as_ref().map(|s| s.epoch);
         prop_assert_eq!(
             post_go_epoch,
             pre_set_epoch,
@@ -401,7 +403,7 @@ proptest! {
         // "same snapshot data moved to the next slot".
         //
         // New set == old mark (pool count should be identical).
-        let post_set_pools = state.snapshots.set.as_ref().map(|s| s.pool_params.len());
+        let post_set_pools = state.epochs.snapshots.set.as_ref().map(|s| s.pool_params.len());
         prop_assert_eq!(
             post_set_pools,
             pre_mark_pools,
@@ -411,7 +413,7 @@ proptest! {
         );
 
         // New go == old set (pool count should be identical).
-        let post_go_pools = state.snapshots.go.as_ref().map(|s| s.pool_params.len());
+        let post_go_pools = state.epochs.snapshots.go.as_ref().map(|s| s.pool_params.len());
         prop_assert_eq!(
             post_go_pools,
             pre_set_pools,
@@ -511,23 +513,23 @@ proptest! {
         // Pick the first pool in pool_params (deterministic from the generator
         // output, which uses sorted keys).  If no pools exist the test becomes
         // a trivial no-op assertion — still valid.
-        let retiring_pool_id: Option<Hash28> = state.pool_params.keys().copied().next();
+        let retiring_pool_id: Option<Hash28> = state.certs.pool_params.keys().copied().next();
 
         if let Some(pool_id) = retiring_pool_id {
             // ── Step 2: Register the retirement ──────────────────────────────
-            state.pending_retirements.insert(pool_id, new_epoch);
+            state.certs.pending_retirements.insert(pool_id, new_epoch);
 
             // Record the pool's reward account key BEFORE the transition so we
             // can check the deposit refund afterwards.
             let op_key = {
-                let reg = state.pool_params.get(&pool_id).unwrap();
+                let reg = state.certs.pool_params.get(&pool_id).unwrap();
                 LedgerState::reward_account_to_hash(&reg.reward_account)
             };
-            let pool_deposit = state.pool_deposits.get(&pool_id).copied()
-                .unwrap_or(state.protocol_params.pool_deposit.0);
-            let op_balance_before = state.reward_accounts.get(&op_key).map(|l| l.0).unwrap_or(0);
-            let treasury_before = state.treasury.0;
-            let op_is_registered = state.reward_accounts.contains_key(&op_key);
+            let pool_deposit = state.certs.pool_deposits.get(&pool_id).copied()
+                .unwrap_or(state.epochs.protocol_params.pool_deposit.0);
+            let op_balance_before = state.certs.reward_accounts.get(&op_key).map(|l| l.0).unwrap_or(0);
+            let treasury_before = state.epochs.treasury.0;
+            let op_is_registered = state.certs.reward_accounts.contains_key(&op_key);
 
             // ── Step 3: Plant a future_pool_params entry for the retiring pool.
             //
@@ -552,11 +554,11 @@ proptest! {
                 metadata_url: None,
                 metadata_hash: None,
             };
-            state.future_pool_params.insert(pool_id, dummy_future_reg);
+            state.certs.future_pool_params.insert(pool_id, dummy_future_reg);
 
             // Count delegators pointing at the retiring pool before transition.
             let pre_delegators_to_pool: usize = state
-                .delegations
+                .certs.delegations
                 .values()
                 .filter(|&&pid| pid == pool_id)
                 .count();
@@ -566,7 +568,7 @@ proptest! {
 
             // ── Step 5(a): Retired pool must be absent from pool_params ──────
             prop_assert!(
-                !state.pool_params.contains_key(&pool_id),
+                !state.certs.pool_params.contains_key(&pool_id),
                 "Retired pool {} still present in pool_params after epoch {}",
                 pool_id.to_hex(),
                 new_epoch.0,
@@ -575,7 +577,7 @@ proptest! {
             // ── Step 5(b): Deposit refund / treasury forwarding ───────────────
             if op_is_registered {
                 // Deposit must be credited to the operator's reward account.
-                let op_balance_after = state.reward_accounts.get(&op_key).map(|l| l.0).unwrap_or(0);
+                let op_balance_after = state.certs.reward_accounts.get(&op_key).map(|l| l.0).unwrap_or(0);
                 prop_assert!(
                     op_balance_after >= op_balance_before + pool_deposit,
                     "Pool deposit not refunded to reward account: \
@@ -587,11 +589,11 @@ proptest! {
             } else {
                 // Deposit must have been forwarded to treasury.
                 prop_assert!(
-                    state.treasury.0 >= treasury_before + pool_deposit,
+                    state.epochs.treasury.0 >= treasury_before + pool_deposit,
                     "Pool deposit not forwarded to treasury: \
                      treasury_before={}, treasury_after={}, deposit={}",
                     treasury_before,
-                    state.treasury.0,
+                    state.epochs.treasury.0,
                     pool_deposit,
                 );
             }
@@ -602,7 +604,7 @@ proptest! {
             //   adjustedDelegs = Map.filter (\pid -> pid `Set.notMember` retired)
             // So ALL delegators to this pool are removed from the delegation map.
             let post_delegators_to_pool: usize = state
-                .delegations
+                .certs.delegations
                 .values()
                 .filter(|&&pid| pid == pool_id)
                 .count();
@@ -624,14 +626,14 @@ proptest! {
             // above is either applied-then-removed or dropped by the merge logic.
             // Either way, no future entry for a now-retired pool should survive.
             prop_assert!(
-                !state.future_pool_params.contains_key(&pool_id),
+                !state.certs.future_pool_params.contains_key(&pool_id),
                 "future_pool_params entry for retired pool {} should be absent after transition",
                 pool_id.to_hex(),
             );
 
             // ── Step 5(e): pending_retirements entry cleaned up ───────────────
             prop_assert!(
-                !state.pending_retirements.contains_key(&pool_id),
+                !state.certs.pending_retirements.contains_key(&pool_id),
                 "pending_retirements entry for pool {} should be removed after processing",
                 pool_id.to_hex(),
             );
@@ -685,14 +687,14 @@ proptest! {
         // This test only exercises the formula when there is a pool with
         // delegators and the reward pot is positive.  If the generated state
         // has no pools or no delegators, the test is trivially satisfied.
-        if state.pool_params.is_empty() {
+        if state.certs.pool_params.is_empty() {
             return Ok(());
         }
 
-        let pool_id = *state.pool_params.keys().next().unwrap();
+        let pool_id = *state.certs.pool_params.keys().next().unwrap();
 
         // Count actual member delegators (non-owners) for the rounding bound.
-        let pool_reg = state.pool_params.get(&pool_id).unwrap().clone();
+        let pool_reg = state.certs.pool_params.get(&pool_id).unwrap().clone();
         let owner_set: std::collections::HashSet<Hash32> = pool_reg
             .owners
             .iter()
@@ -700,7 +702,7 @@ proptest! {
             .collect();
 
         let n_members = state
-            .delegations
+            .certs.delegations
             .iter()
             .filter(|(cred, pid)| **pid == pool_id && !owner_set.contains(cred))
             .count();
@@ -715,18 +717,18 @@ proptest! {
         // already arranges (all three snapshots mirror live pool state).
         let mut state = state;
         {
-            let bprev = Arc::make_mut(&mut state.snapshots.bprev_blocks_by_pool);
+            let bprev = Arc::make_mut(&mut state.epochs.snapshots.bprev_blocks_by_pool);
             bprev.insert(pool_id, 10); // claim 10 blocks for this pool
         }
-        state.snapshots.bprev_block_count = 10;
+        state.epochs.snapshots.bprev_block_count = 10;
 
         // ── Step 2: Record reward account balances before transition ─────────
         let pre_rewards: std::collections::HashMap<Hash32, u64> = state
-            .reward_accounts
+            .certs.reward_accounts
             .iter()
             .map(|(k, v)| (*k, v.0))
             .collect();
-        let pre_treasury = state.treasury.0;
+        let pre_treasury = state.epochs.treasury.0;
         let new_epoch = EpochNo(state.epoch.0 + 1);
 
         // ── Step 3: Compute expected pool_reward directly using the same
@@ -737,22 +739,22 @@ proptest! {
         // The go snapshot is used by the reward computation internally.
         // We reference it here for documentation only; actual formula inputs
         // come from the scalar fields on state.
-        let _go = state.snapshots.go.clone()
+        let _go = state.epochs.snapshots.go.clone()
             .unwrap_or_else(|| StakeSnapshot::empty(EpochNo(0)));
-        let pp = &state.prev_protocol_params;
+        let pp = &state.epochs.prev_protocol_params;
         let rho_num = pp.rho.numerator as i128;
         let rho_den = pp.rho.denominator.max(1) as i128;
         let tau_num = pp.tau.numerator as i128;
         let tau_den = pp.tau.denominator.max(1) as i128;
 
-        let reserves = state.reserves.0;
+        let reserves = state.epochs.reserves.0;
         let expansion = {
             // prev_d is 1.0 (genesis default), so d >= 0.8 branch applies.
             let num = (reserves as u128) * (rho_num as u128);
             let den = rho_den as u128;
             if den == 0 { 0u64 } else { (num / den) as u64 }
         };
-        let total_rewards_available = expansion.saturating_add(state.snapshots.ss_fee.0);
+        let total_rewards_available = expansion.saturating_add(state.epochs.snapshots.ss_fee.0);
         let treasury_cut = {
             let num = (total_rewards_available as u128) * (tau_num as u128);
             let den = tau_den as u128;
@@ -767,18 +769,18 @@ proptest! {
         let op_key = LedgerState::reward_account_to_hash(&pool_reg.reward_account);
 
         let leader_credited: u64 = state
-            .reward_accounts
+            .certs.reward_accounts
             .get(&op_key)
             .map(|l| l.0)
             .unwrap_or(0)
             .saturating_sub(pre_rewards.get(&op_key).copied().unwrap_or(0));
 
         let members_credited: u64 = state
-            .reward_accounts
+            .certs.reward_accounts
             .iter()
             .filter(|(cred, _)| {
                 // Member = delegated to pool, not an owner, not the operator account
-                state.delegations.get(cred).copied() == Some(pool_id)
+                state.certs.delegations.get(cred).copied() == Some(pool_id)
                     && !owner_set.contains(cred)
                     && **cred != op_key
             })
@@ -849,13 +851,13 @@ proptest! {
         //     This is only a soft check: when reward_pot == 0, treasury may be unchanged.
         if reward_pot > 0 {
             // All undistributed pool rewards also go to treasury, so
-            // state.treasury >= pre_treasury + treasury_cut.
+            // state.epochs.treasury >= pre_treasury + treasury_cut.
             // Using >= because undistributed pool rewards also accrue.
             prop_assert!(
-                state.treasury.0 >= pre_treasury,
+                state.epochs.treasury.0 >= pre_treasury,
                 "Treasury decreased unexpectedly: before={}, after={}",
                 pre_treasury,
-                state.treasury.0,
+                state.epochs.treasury.0,
             );
         }
     }
@@ -909,7 +911,7 @@ proptest! {
         let new_epoch = EpochNo(current_epoch.0 + 1);
 
         // ── Step 1: Record old parameter value ───────────────────────────────
-        let old_min_fee_b = state.protocol_params.min_fee_b;
+        let old_min_fee_b = state.epochs.protocol_params.min_fee_b;
 
         // Choose a new value that differs from the old one.
         // Use a deterministic transformation to avoid proptest shrinking issues.
@@ -931,19 +933,19 @@ proptest! {
             ..Default::default()
         };
         state
-            .pending_pp_updates
+            .epochs.pending_pp_updates
             .entry(current_epoch)
             .or_default()
             .push((genesis_hash, update));
 
         // ── Step 3: Verify old params are still active BEFORE the transition ─
         prop_assert_eq!(
-            state.protocol_params.min_fee_b,
+            state.epochs.protocol_params.min_fee_b,
             old_min_fee_b,
             "min_fee_b should be unchanged before epoch transition: \
              expected={}, actual={}",
             old_min_fee_b,
-            state.protocol_params.min_fee_b,
+            state.epochs.protocol_params.min_fee_b,
         );
 
         // ── Step 4: Run the epoch transition N → N+1 ─────────────────────────
@@ -951,14 +953,14 @@ proptest! {
 
         // ── Step 5: Verify new params are active AFTER the transition ─────────
         prop_assert_eq!(
-            state.protocol_params.min_fee_b,
+            state.epochs.protocol_params.min_fee_b,
             new_min_fee_b,
             "min_fee_b should be updated after epoch transition N={} → N+1={}: \
              expected={}, actual={}",
             current_epoch.0,
             new_epoch.0,
             new_min_fee_b,
-            state.protocol_params.min_fee_b,
+            state.epochs.protocol_params.min_fee_b,
         );
 
         // ── Step 6: Pending update list must be cleared after consumption ─────
@@ -968,7 +970,7 @@ proptest! {
         // and then retains only proposals targeting epochs >= lookup_epoch.
         // After the transition our proposal (targeting epoch N) is consumed.
         let remaining_for_n: bool = state
-            .pending_pp_updates
+            .epochs.pending_pp_updates
             .contains_key(&current_epoch);
         prop_assert!(
             !remaining_for_n,
@@ -1083,7 +1085,7 @@ proptest! {
         // The SNAP rule always sets mark.epoch = new_epoch (the epoch being
         // entered).  This is a consequence of the epoch advancing correctly
         // and the snapshot logic being consistent with the new epoch counter.
-        let mark_epoch = state.snapshots.mark.as_ref().map(|s| s.epoch);
+        let mark_epoch = state.epochs.snapshots.mark.as_ref().map(|s| s.epoch);
         prop_assert_eq!(
             mark_epoch,
             Some(new_epoch),
@@ -1098,10 +1100,10 @@ proptest! {
         // the end of `process_epoch_transition` clears `epoch_fees` to zero.
         // Verifying this ensures the fee pot does not accumulate across epochs.
         prop_assert_eq!(
-            state.epoch_fees.0,
+            state.utxo.epoch_fees.0,
             0,
             "epoch_fees should be reset to 0 after transition, got {}",
-            state.epoch_fees.0,
+            state.utxo.epoch_fees.0,
         );
 
     }

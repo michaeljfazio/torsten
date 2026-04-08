@@ -665,7 +665,7 @@ impl Node {
                         if snapshot_valid {
                             info!(
                                 epoch = state.epoch.0,
-                                utxos = state.utxo_set.len(),
+                                utxos = state.utxo.utxo_set.len(),
                                 tip = %state.tip,
                                 "Ledger restored from snapshot",
                             );
@@ -709,9 +709,9 @@ impl Node {
         };
         // Apply Conway genesis committee threshold and members if not already set
         if let Some((num, den)) = conway_committee_threshold {
-            if ledger.governance.committee_threshold.is_none() {
+            if ledger.gov.governance.committee_threshold.is_none() {
                 use dugite_primitives::transaction::Rational;
-                std::sync::Arc::make_mut(&mut ledger.governance).committee_threshold =
+                std::sync::Arc::make_mut(&mut ledger.gov.governance).committee_threshold =
                     Some(Rational {
                         numerator: num,
                         denominator: den,
@@ -720,12 +720,13 @@ impl Node {
             }
         }
         // Seed initial committee members from Conway genesis if committee is empty
-        if ledger.governance.committee_expiration.is_empty() && !conway_committee_members.is_empty()
+        if ledger.gov.governance.committee_expiration.is_empty()
+            && !conway_committee_members.is_empty()
         {
             use dugite_primitives::hash::Hash32;
             for (hash_bytes, expiration) in &conway_committee_members {
                 let cold_key = Hash32::from_bytes(*hash_bytes);
-                std::sync::Arc::make_mut(&mut ledger.governance)
+                std::sync::Arc::make_mut(&mut ledger.gov.governance)
                     .committee_expiration
                     .insert(cold_key, dugite_primitives::EpochNo(*expiration));
             }
@@ -760,7 +761,7 @@ impl Node {
                     // to avoid a false-zero from the freshly-opened store (count starts
                     // at 0 and is only set correctly once rebuild_address_index runs).
                     ledger.attach_utxo_store(store);
-                    let store_count = ledger.utxo_set.len();
+                    let store_count = ledger.utxo.utxo_set.len();
 
                     // If the ledger has a non-origin tip but the UTxO store has
                     // significantly fewer entries than expected, the store data
@@ -799,28 +800,31 @@ impl Node {
         // pool stakes so that block production has correct data immediately on restart.
         // Without this, a block producer restored from snapshot may see pool_stake=0
         // if the saved snapshot's incremental stake tracking was stale.
-        if ledger.tip.point != Point::Origin && !ledger.utxo_set.is_empty() {
+        if ledger.tip.point != Point::Origin && !ledger.utxo.utxo_set.is_empty() {
             info!("Rebuilding stake distribution from UTxO store for snapshot consistency");
             ledger.rebuild_stake_distribution();
             // Log delegation/pool_params stats before recompute for diagnostics
             debug!(
-                main_delegations = ledger.delegations.len(),
-                pool_params = ledger.pool_params.len(),
-                stake_credentials = ledger.stake_distribution.stake_map.len(),
-                reward_accounts = ledger.reward_accounts.len(),
+                main_delegations = ledger.certs.delegations.len(),
+                pool_params = ledger.certs.pool_params.len(),
+                stake_credentials = ledger.certs.stake_distribution.stake_map.len(),
+                reward_accounts = ledger.certs.reward_accounts.len(),
                 mark_delegations = ledger
+                    .epochs
                     .snapshots
                     .mark
                     .as_ref()
                     .map(|s| s.delegations.len())
                     .unwrap_or(0),
                 set_delegations = ledger
+                    .epochs
                     .snapshots
                     .set
                     .as_ref()
                     .map(|s| s.delegations.len())
                     .unwrap_or(0),
                 go_delegations = ledger
+                    .epochs
                     .snapshots
                     .go
                     .as_ref()
@@ -852,10 +856,10 @@ impl Node {
         // Extract opcert counters and current era before moving ledger into
         // the lock, so we avoid blocking_read() inside the tokio runtime.
         let snapshot_era = ledger.era;
-        let snapshot_opcert_counters = if ledger.opcert_counters.is_empty() {
+        let snapshot_opcert_counters = if ledger.consensus.opcert_counters.is_empty() {
             None
         } else {
-            Some(ledger.opcert_counters.clone())
+            Some(ledger.consensus.opcert_counters.clone())
         };
 
         let ledger_state = Arc::new(RwLock::new(ledger));
@@ -1382,7 +1386,7 @@ impl Node {
             let ls = self.ledger_state.read().await;
             info!(
                 tip = %tip,
-                utxos = ls.utxo_set.len(),
+                utxos = ls.utxo.utxo_set.len(),
                 mempool_txs = self.mempool.len(),
                 "Chain tip",
             );
@@ -1390,26 +1394,26 @@ impl Node {
             // Initialize Prometheus metrics from loaded ledger state so they
             // are accurate immediately on startup (before any blocks arrive).
             self.metrics.set_epoch(ls.epoch.0);
-            self.metrics.set_utxo_count(ls.utxo_set.len() as u64);
+            self.metrics.set_utxo_count(ls.utxo.utxo_set.len() as u64);
             self.metrics.set_mempool_count(self.mempool.len() as u64);
             self.metrics.set_mempool_max(self.mempool.capacity() as u64);
             self.metrics.delegation_count.store(
-                ls.delegations.len() as u64,
+                ls.certs.delegations.len() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
             self.metrics
                 .treasury_lovelace
-                .store(ls.treasury.0, std::sync::atomic::Ordering::Relaxed);
+                .store(ls.epochs.treasury.0, std::sync::atomic::Ordering::Relaxed);
             self.metrics.pool_count.store(
-                ls.pool_params.len() as u64,
+                ls.certs.pool_params.len() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
             self.metrics.drep_count.store(
-                ls.governance.active_drep_count() as u64,
+                ls.gov.governance.active_drep_count() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
             self.metrics.proposal_count.store(
-                ls.governance.proposals.len() as u64,
+                ls.gov.governance.proposals.len() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
             // Set slot/block from tip and compute sync progress
@@ -1505,7 +1509,7 @@ impl Node {
         // so operators can immediately diagnose eligibility issues.
         if let Some(ref creds) = self.block_producer {
             let ls = self.ledger_state.read().await;
-            if let Some(ref set_snap) = ls.snapshots.set {
+            if let Some(ref set_snap) = ls.epochs.snapshots.set {
                 let total_stake: u64 = set_snap.pool_stake.values().map(|s| s.0).sum();
                 let pool_stake = set_snap
                     .pool_stake
@@ -1528,13 +1532,14 @@ impl Node {
                 if pool_stake == 0 {
                     // Diagnostic: check if pool is in delegations, pool_params,
                     // and if any credentials delegate to it.
-                    let pool_in_params = ls.pool_params.contains_key(&creds.pool_id);
+                    let pool_in_params = ls.certs.pool_params.contains_key(&creds.pool_id);
                     let delegators_to_pool = set_snap
                         .delegations
                         .values()
                         .filter(|pid| **pid == creds.pool_id)
                         .count();
                     let main_delegators_to_pool = ls
+                        .certs
                         .delegations
                         .values()
                         .filter(|pid| **pid == creds.pool_id)
@@ -1547,7 +1552,7 @@ impl Node {
                         snapshot_delegators = delegators_to_pool,
                         main_delegators = main_delegators_to_pool,
                         total_snapshot_delegations = set_snap.delegations.len(),
-                        total_main_delegations = ls.delegations.len(),
+                        total_main_delegations = ls.certs.delegations.len(),
                         "Block producer has ZERO stake in 'set' snapshot — will not be elected slot leader. \
                          Pool may not be in snapshot or stake distribution may need rebuilding.",
                     );
@@ -2070,10 +2075,12 @@ impl Node {
 
                         // Build pool_id -> stake map for BLP classification
                         let pool_stakes: Vec<_> = ls
+                            .certs
                             .pool_params
                             .keys()
                             .map(|pool_id| {
                                 let stake = ls
+                                    .epochs
                                     .snapshots
                                     .set
                                     .as_ref()
@@ -2089,7 +2096,7 @@ impl Node {
 
                         let mut relays = Vec::new();
                         let mut blp_relays = Vec::new();
-                        for (pool_id, pool_reg) in ls.pool_params.iter() {
+                        for (pool_id, pool_reg) in ls.certs.pool_params.iter() {
                             let is_blp = big_pool_set.contains(pool_id.as_bytes().as_slice());
                             for relay in &pool_reg.relays {
                                 match relay {
@@ -3111,7 +3118,7 @@ impl Node {
                 // Evict if any input is absent from both on-chain UTxO and mempool
                 // virtual UTxO (catches orphaned chained txs whose parent was removed).
                 for input in &tx.body.inputs {
-                    if !ls.utxo_set.contains(input)
+                    if !ls.utxo.utxo_set.contains(input)
                         && self.mempool.lookup_virtual_utxo(input).is_none()
                     {
                         return false;
@@ -3440,8 +3447,8 @@ impl Node {
 
         // Apply active_slots_coeff from genesis protocol params (not in
         // the CBOR PParams array(31) but needed for VRF leader check).
-        state.protocol_params.active_slots_coeff = protocol_params.active_slots_coeff;
-        state.prev_protocol_params.active_slots_coeff = protocol_params.active_slots_coeff;
+        state.epochs.protocol_params.active_slots_coeff = protocol_params.active_slots_coeff;
+        state.epochs.prev_protocol_params.active_slots_coeff = protocol_params.active_slots_coeff;
 
         // Set network
         let network_id = if network_magic == 764824073 {
@@ -3516,7 +3523,7 @@ impl Node {
                     raw_cbor: None,
                 };
 
-                state.utxo_set.insert(input, output);
+                state.utxo.utxo_set.insert(input, output);
                 utxo_count += 1;
 
                 if utxo_count.is_multiple_of(1_000_000) {
@@ -3538,7 +3545,7 @@ impl Node {
             path = %native_snapshot_path.display(),
             tip = %state.tip,
             epoch = state.epoch.0,
-            utxos = state.utxo_set.len(),
+            utxos = state.utxo.utxo_set.len(),
             "Saving native ledger snapshot from Haskell import"
         );
         state
@@ -3781,7 +3788,7 @@ impl Node {
         };
         // Use epoch_nonce_for_slot to handle first slot of new epoch correctly.
         // At epoch boundaries, the TICKN transition hasn't been applied yet, so
-        // ls.epoch_nonce still holds the previous epoch's nonce. epoch_nonce_for_slot
+        // ls.consensus.epoch_nonce still holds the previous epoch's nonce. epoch_nonce_for_slot
         // pre-computes the correct nonce, matching the sync path.
         let epoch_nonce = ls.epoch_nonce_for_slot(next_slot.0);
         let block_number = dugite_primitives::time::BlockNo(ls.current_block_number().0 + 1);
@@ -3795,7 +3802,8 @@ impl Node {
 
         // Calculate stake from the "set" snapshot (used for leader election).
         // Keep as raw u64 values to use exact rational arithmetic in the VRF check.
-        let (pool_stake, total_active_stake) = if let Some(set_snapshot) = &ls.snapshots.set {
+        let (pool_stake, total_active_stake) = if let Some(set_snapshot) = &ls.epochs.snapshots.set
+        {
             let total_stake: u64 = set_snapshot.pool_stake.values().map(|s| s.0).sum();
             let pool_stake = set_snapshot
                 .pool_stake
@@ -3868,9 +3876,9 @@ impl Node {
         // Enforce byte-size AND execution-unit budgets so the forged block
         // stays within maxBlockBodySize and maxBlockExecutionUnits.
         let ls = self.ledger_state.read().await;
-        let max_block_body_size = ls.protocol_params.max_block_body_size;
-        let max_block_ex_mem = ls.protocol_params.max_block_ex_units.mem;
-        let max_block_ex_steps = ls.protocol_params.max_block_ex_units.steps;
+        let max_block_body_size = ls.epochs.protocol_params.max_block_body_size;
+        let max_block_ex_mem = ls.epochs.protocol_params.max_block_ex_units.mem;
+        let max_block_ex_steps = ls.epochs.protocol_params.max_block_ex_units.steps;
         let current_era = ls.era;
         drop(ls);
         let transactions = self.mempool.get_txs_for_block_with_ex_units(

@@ -38,6 +38,15 @@ impl UtxoDiff {
         self.deletes.push((input, output));
     }
 
+    /// Merge another diff into this one (append all inserts and deletes).
+    ///
+    /// Used by the orchestrator to accumulate per-transaction diffs into a
+    /// single per-block diff.
+    pub fn merge(&mut self, other: &UtxoDiff) {
+        self.inserts.extend_from_slice(&other.inserts);
+        self.deletes.extend_from_slice(&other.deletes);
+    }
+
     /// Whether this diff has no changes.
     pub fn is_empty(&self) -> bool {
         self.inserts.is_empty() && self.deletes.is_empty()

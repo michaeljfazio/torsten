@@ -186,6 +186,7 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
         tokio::task::block_in_place(|| {
             let ledger = self.ledger.blocking_read();
             let results: Vec<_> = ledger
+                .utxo
                 .utxo_set
                 .utxos_at_address(&addr)
                 .into_iter()
@@ -193,7 +194,7 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
                 .collect();
             tracing::debug!(
                 addr_type = ?std::mem::discriminant(&addr),
-                index_size = ledger.utxo_set.address_index_size(),
+                index_size = ledger.utxo.utxo_set.address_index_size(),
                 utxos_found = results.len(),
                 "UTxO query by address"
             );
@@ -213,7 +214,7 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
                         transaction_id: dugite_primitives::hash::Hash32::from_bytes(hash_arr),
                         index: *idx,
                     };
-                    if let Some(output) = ledger.utxo_set.lookup(&tx_input) {
+                    if let Some(output) = ledger.utxo.utxo_set.lookup(&tx_input) {
                         results.push(utxo_to_snapshot(&tx_input, &output));
                     }
                 }
@@ -226,6 +227,7 @@ impl UtxoQueryProvider for LedgerUtxoProvider {
         tokio::task::block_in_place(|| {
             let ledger = self.ledger.blocking_read();
             let results: Vec<_> = ledger
+                .utxo
                 .utxo_set
                 .iter()
                 .into_iter()
@@ -275,12 +277,12 @@ impl TxValidator for LedgerTxValidator {
             .map(|mp| mp.virtual_utxo_snapshot())
             .unwrap_or_default();
         let utxo_view =
-            dugite_ledger::utxo::CompositeUtxoView::new(&ledger.utxo_set, virtual_utxos);
+            dugite_ledger::utxo::CompositeUtxoView::new(&ledger.utxo.utxo_set, virtual_utxos);
 
         dugite_ledger::validation::validate_transaction(
             &tx,
             &utxo_view,
-            &ledger.protocol_params,
+            &ledger.epochs.protocol_params,
             current_slot,
             tx_size,
             Some(&self.slot_config),

@@ -10,8 +10,21 @@
 ///
 /// Byron transactions always succeed when structurally valid — there is no
 /// `is_valid` flag and no collateral mechanism.
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use dugite_primitives::block::{Block, BlockHeader};
+use dugite_primitives::era::Era;
+use dugite_primitives::hash::{blake2b_224, Hash28};
+use dugite_primitives::time::EpochNo;
 use dugite_primitives::transaction::{Transaction, TransactionInput, TransactionOutput};
 use dugite_primitives::value::Lovelace;
+
+use crate::state::substates::*;
+use crate::state::{BlockValidationMode, LedgerError};
+use crate::utxo_diff::UtxoDiff;
+
+use super::{EraRules, RuleContext};
 
 /// Byron-specific validation error
 #[derive(Debug, thiserror::Error)]
@@ -352,17 +365,271 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// ByronLedger struct (kept for era dispatch, currently stateless)
+// ByronRules — EraRules implementation for the Byron era
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-pub struct ByronLedger;
+/// Stateless Byron era rule strategy.
+///
+/// Byron is the simplest era: no scripts, no certificates, no governance,
+/// no multi-asset. This implementation delegates to the existing Byron
+/// validation functions (`validate_byron_tx`, `apply_byron_block`) and
+/// provides trivial (no-op) implementations for features that do not exist
+/// in the Byron era.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ByronRules;
 
-impl ByronLedger {
+impl ByronRules {
     pub fn new() -> Self {
-        ByronLedger
+        ByronRules
     }
 }
+
+impl EraRules for ByronRules {
+    /// Byron has no ExUnit budgets or reference scripts — always succeeds.
+    fn validate_block_body(
+        &self,
+        _block: &Block,
+        _ctx: &RuleContext,
+        _utxo: &UtxoSubState,
+    ) -> Result<(), LedgerError> {
+        Ok(())
+    }
+
+    /// Apply a single valid Byron transaction.
+    ///
+    /// Byron has no `is_valid` flag — all structurally valid transactions are
+    /// considered valid. Delegates to `validate_byron_tx` for validation (in
+    /// `ValidateAll` mode) or directly computes UTxO changes (in `ApplyOnly`).
+    ///
+    /// Returns the [`UtxoDiff`] recording consumed inputs and produced outputs.
+    fn apply_valid_tx(
+        &self,
+        tx: &Transaction,
+        mode: BlockValidationMode,
+        ctx: &RuleContext,
+        utxo: &mut UtxoSubState,
+        _certs: &mut CertSubState,
+        _gov: &mut GovSubState,
+        _epochs: &mut EpochSubState,
+    ) -> Result<UtxoDiff, LedgerError> {
+        let fee_policy = ByronFeePolicy {
+            min_fee_a: ctx.params.min_fee_a,
+            min_fee_b: ctx.params.min_fee_b,
+        };
+
+        let tx_size_bytes = tx.raw_cbor.as_ref().map_or(0, |b| b.len() as u64);
+        let mut diff = UtxoDiff::new();
+
+        match mode {
+            BlockValidationMode::ValidateAll => {
+                // Full validation: delegate to validate_byron_tx
+                let effect = validate_byron_tx(
+                    tx,
+                    |input| utxo.utxo_set.lookup(input),
+                    fee_policy,
+                    tx_size_bytes,
+                )
+                .map_err(|e| LedgerError::BlockTxValidationFailed {
+                    slot: ctx.current_slot,
+                    tx_hash: tx.hash.to_hex(),
+                    errors: e.to_string(),
+                })?;
+
+                // Apply UTxO changes
+                for input in &effect.consumed {
+                    if let Some(spent_output) = utxo.utxo_set.lookup(input) {
+                        diff.record_delete(input.clone(), spent_output);
+                    }
+                    utxo.utxo_set.remove(input);
+                }
+                for (input, output) in effect.produced {
+                    diff.record_insert(input.clone(), output.clone());
+                    utxo.utxo_set.insert(input, output);
+                }
+
+                // Accumulate fees
+                utxo.epoch_fees.0 = utxo.epoch_fees.0.saturating_add(effect.fee.0);
+            }
+
+            BlockValidationMode::ApplyOnly => {
+                // Replay mode: trust the block, collect UTxO changes without
+                // full validation. If inputs are missing, skip the UTxO update
+                // but still count the fee.
+                let mut all_inputs_present = true;
+                let mut consumed = Vec::with_capacity(tx.body.inputs.len());
+
+                for input in &tx.body.inputs {
+                    if let Some(output) = utxo.utxo_set.lookup(input) {
+                        consumed.push((input.clone(), output));
+                    } else {
+                        all_inputs_present = false;
+                        break;
+                    }
+                }
+
+                if all_inputs_present {
+                    for (input, output) in &consumed {
+                        diff.record_delete(input.clone(), output.clone());
+                        utxo.utxo_set.remove(input);
+                    }
+                    for (idx, output) in tx.body.outputs.iter().enumerate() {
+                        let out_input = TransactionInput {
+                            transaction_id: tx.hash,
+                            index: idx as u32,
+                        };
+                        diff.record_insert(out_input.clone(), output.clone());
+                        utxo.utxo_set.insert(out_input, output.clone());
+                    }
+                }
+
+                // Always accumulate fees (epoch accounting is independent of UTxO availability)
+                utxo.epoch_fees.0 = utxo.epoch_fees.0.saturating_add(tx.body.fee.0);
+            }
+        }
+
+        Ok(diff)
+    }
+
+    /// Byron has no `is_valid` concept — all transactions are structurally valid
+    /// or rejected. Calling this for a Byron transaction is a programming error.
+    fn apply_invalid_tx(
+        &self,
+        tx: &Transaction,
+        _mode: BlockValidationMode,
+        _ctx: &RuleContext,
+        _utxo: &mut UtxoSubState,
+        _certs: &mut CertSubState,
+        _epochs: &mut EpochSubState,
+    ) -> Result<UtxoDiff, LedgerError> {
+        Err(LedgerError::InvalidTransaction(format!(
+            "Byron era does not support invalid transactions (is_valid flag). \
+             Transaction {} should not reach apply_invalid_tx.",
+            tx.hash.to_hex()
+        )))
+    }
+
+    /// Byron epoch transition is minimal.
+    ///
+    /// In Byron there is no staking, no governance, no reward distribution,
+    /// and no protocol parameter update mechanism. The epoch transition only
+    /// needs to advance the epoch counter and reset block production counters.
+    ///
+    /// Snapshot rotation and reward calculation are deferred to the Shelley
+    /// era transition, which will pick up the accumulated state.
+    fn process_epoch_transition(
+        &self,
+        new_epoch: EpochNo,
+        _ctx: &RuleContext,
+        _utxo: &mut UtxoSubState,
+        _certs: &mut CertSubState,
+        _gov: &mut GovSubState,
+        _epochs: &mut EpochSubState,
+        consensus: &mut ConsensusSubState,
+    ) -> Result<(), LedgerError> {
+        // Reset block production counters for the new epoch.
+        // Store the previous epoch's counts for potential Shelley transition use.
+        consensus.epoch_blocks_by_pool = Arc::new(std::collections::HashMap::new());
+        consensus.epoch_block_count = 0;
+
+        tracing::debug!(
+            epoch = new_epoch.0,
+            "Byron epoch transition: reset block counters"
+        );
+
+        Ok(())
+    }
+
+    /// Evolve nonce state after a Byron block header.
+    ///
+    /// Byron uses OBFT (not VRF), so:
+    /// - `lab_nonce` = `block.prev_hash` (prevHashToNonce from Haskell)
+    /// - `evolving_nonce` does NOT advance (no VRF output in Byron)
+    /// - Block production is tracked per issuer key hash
+    fn evolve_nonce(
+        &self,
+        header: &BlockHeader,
+        _ctx: &RuleContext,
+        consensus: &mut ConsensusSubState,
+    ) {
+        // lab_nonce = prevHashToNonce(block.prevHash)
+        // prevHashToNonce: GenesisHash -> NeutralNonce; BlockHash h -> Nonce(castHash h)
+        // castHash is a type cast only — no rehashing.
+        consensus.lab_nonce = header.prev_hash;
+
+        // Track block production by issuer key hash
+        if !header.issuer_vkey.is_empty() {
+            let pool_id = blake2b_224(&header.issuer_vkey);
+            *Arc::make_mut(&mut consensus.epoch_blocks_by_pool)
+                .entry(pool_id)
+                .or_insert(0) += 1;
+        }
+        consensus.epoch_block_count += 1;
+    }
+
+    /// Byron minimum fee: `min_fee_a * tx_size_bytes + min_fee_b`.
+    ///
+    /// Delegates to the existing `ByronFeePolicy` calculation.
+    fn min_fee(&self, tx: &Transaction, ctx: &RuleContext, _utxo: &UtxoSubState) -> u64 {
+        let policy = ByronFeePolicy {
+            min_fee_a: ctx.params.min_fee_a,
+            min_fee_b: ctx.params.min_fee_b,
+        };
+        let tx_size = tx.raw_cbor.as_ref().map_or(0, |b| b.len() as u64);
+        policy.min_fee(tx_size).unwrap_or(u64::MAX)
+    }
+
+    /// Byron is the first era — no hard fork transformation needed.
+    fn on_era_transition(
+        &self,
+        _from_era: Era,
+        _ctx: &RuleContext,
+        _utxo: &mut UtxoSubState,
+        _certs: &mut CertSubState,
+        _gov: &mut GovSubState,
+        _consensus: &mut ConsensusSubState,
+        _epochs: &mut EpochSubState,
+    ) -> Result<(), LedgerError> {
+        Ok(())
+    }
+
+    /// Compute required VKey witnesses for a Byron transaction.
+    ///
+    /// In Byron, only spending input keys are required (no scripts, no certs,
+    /// no withdrawals). For each input, we look up the UTxO output address
+    /// and, if it is a Shelley-type address with a verification key payment
+    /// credential, extract the pubkey hash.
+    ///
+    /// Byron addresses (`Address::Byron`) use bootstrap witnesses which are
+    /// verified separately — they don't contribute to the VKey witness set.
+    fn required_witnesses(
+        &self,
+        tx: &Transaction,
+        _ctx: &RuleContext,
+        utxo: &UtxoSubState,
+        _certs: &CertSubState,
+        _gov: &GovSubState,
+    ) -> HashSet<Hash28> {
+        let mut witnesses = HashSet::new();
+
+        for input in &tx.body.inputs {
+            if let Some(output) = utxo.utxo_set.lookup(input) {
+                // Extract the payment credential's key hash, if present.
+                // Byron addresses return None from payment_credential() —
+                // they use bootstrap witnesses verified by a different mechanism.
+                if let Some(dugite_primitives::credentials::Credential::VerificationKey(hash)) =
+                    output.address.payment_credential()
+                {
+                    witnesses.insert(*hash);
+                }
+            }
+        }
+
+        witnesses
+    }
+}
+
+// Keep the old name as an alias for backward compatibility during migration.
+pub type ByronLedger = ByronRules;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -832,5 +1099,463 @@ mod tests {
         assert_eq!(policy.min_fee(200), Some(164_181));
         // Zero-size tx — only the constant component
         assert_eq!(policy.min_fee(0), Some(155_381));
+    }
+
+    // -----------------------------------------------------------------------
+    // EraRules trait tests
+    //
+    // These tests verify the ByronRules EraRules implementation is callable
+    // and produces correct results when invoked through the trait interface.
+    // -----------------------------------------------------------------------
+
+    use crate::eras::{EraRules, EraRulesImpl, RuleContext};
+    use crate::state::{
+        BlockValidationMode, EpochSnapshots, GovernanceState, StakeDistributionState,
+    };
+    use crate::utxo::UtxoSet;
+    use crate::utxo_diff::DiffSeq;
+    use dugite_primitives::block::{BlockHeader, OperationalCert, ProtocolVersion, VrfOutput};
+    use dugite_primitives::era::Era;
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::time::{BlockNo, EpochNo, SlotNo};
+    use std::sync::Arc;
+
+    /// Build a minimal BlockHeader for tests.
+    fn make_block_header(prev_hash: Hash32, issuer_vkey: Vec<u8>) -> BlockHeader {
+        BlockHeader {
+            header_hash: Hash32::ZERO,
+            prev_hash,
+            issuer_vkey,
+            vrf_vkey: vec![],
+            vrf_result: VrfOutput {
+                output: vec![],
+                proof: vec![],
+            },
+            block_number: BlockNo(0),
+            slot: SlotNo(0),
+            epoch_nonce: Hash32::ZERO,
+            body_size: 0,
+            body_hash: Hash32::ZERO,
+            operational_cert: OperationalCert {
+                hot_vkey: vec![],
+                sequence_number: 0,
+                kes_period: 0,
+                sigma: vec![],
+            },
+            protocol_version: ProtocolVersion { major: 1, minor: 0 },
+            kes_signature: vec![],
+            nonce_vrf_output: vec![],
+            nonce_vrf_proof: vec![],
+        }
+    }
+
+    /// Build a minimal RuleContext for Byron era tests.
+    fn make_byron_ctx(params: &ProtocolParameters) -> RuleContext<'_> {
+        // Leak a static empty map for genesis_delegates since RuleContext
+        // borrows it, and we need it to live long enough for the test.
+        let delegates = Box::leak(Box::new(HashMap::new()));
+        RuleContext {
+            params,
+            current_slot: 1000,
+            current_epoch: EpochNo(0),
+            era: Era::Byron,
+            slot_config: None,
+            node_network: None,
+            genesis_delegates: delegates,
+            update_quorum: 5,
+            epoch_length: 21600,
+            shelley_transition_epoch: 0,
+            byron_epoch_length: 21600,
+            stability_window: 0,
+            stability_window_3kf: 0,
+            randomness_stabilisation_window: 0,
+            tx_index: 0,
+        }
+    }
+
+    /// Build a minimal UtxoSubState with given entries.
+    fn make_utxo_sub(entries: Vec<(TransactionInput, TransactionOutput)>) -> UtxoSubState {
+        let mut utxo_set = UtxoSet::new();
+        for (input, output) in entries {
+            utxo_set.insert(input, output);
+        }
+        UtxoSubState {
+            utxo_set,
+            diff_seq: DiffSeq::new(),
+            epoch_fees: Lovelace(0),
+            pending_donations: Lovelace(0),
+        }
+    }
+
+    fn make_cert_sub() -> CertSubState {
+        CertSubState {
+            delegations: Arc::new(HashMap::new()),
+            pool_params: Arc::new(HashMap::new()),
+            future_pool_params: HashMap::new(),
+            pending_retirements: HashMap::new(),
+            reward_accounts: Arc::new(HashMap::new()),
+            stake_key_deposits: HashMap::new(),
+            pool_deposits: HashMap::new(),
+            total_stake_key_deposits: 0,
+            pointer_map: HashMap::new(),
+            stake_distribution: StakeDistributionState {
+                stake_map: HashMap::new(),
+            },
+            script_stake_credentials: std::collections::HashSet::new(),
+        }
+    }
+
+    fn make_gov_sub() -> GovSubState {
+        GovSubState {
+            governance: Arc::new(GovernanceState::default()),
+        }
+    }
+
+    fn make_epoch_sub() -> EpochSubState {
+        EpochSubState {
+            snapshots: EpochSnapshots::default(),
+            treasury: Lovelace(0),
+            reserves: Lovelace(0),
+            pending_reward_update: None,
+            pending_pp_updates: BTreeMap::new(),
+            future_pp_updates: BTreeMap::new(),
+            needs_stake_rebuild: false,
+            ptr_stake: HashMap::new(),
+            ptr_stake_excluded: false,
+            protocol_params: ProtocolParameters::mainnet_defaults(),
+            prev_protocol_params: ProtocolParameters::mainnet_defaults(),
+            prev_protocol_version_major: 1,
+            prev_d: 1.0,
+        }
+    }
+
+    fn make_consensus_sub() -> ConsensusSubState {
+        use dugite_primitives::hash::Hash32;
+        ConsensusSubState {
+            evolving_nonce: Hash32::ZERO,
+            candidate_nonce: Hash32::ZERO,
+            epoch_nonce: Hash32::ZERO,
+            lab_nonce: Hash32::ZERO,
+            last_epoch_block_nonce: Hash32::ZERO,
+            rolling_nonce: Hash32::ZERO,
+            first_block_hash_of_epoch: None,
+            prev_epoch_first_block_hash: None,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
+            epoch_block_count: 0,
+            opcert_counters: HashMap::new(),
+        }
+    }
+
+    /// Verify that ByronRules can be constructed via EraRulesImpl::for_era(Byron).
+    #[test]
+    fn test_era_rules_impl_for_byron() {
+        let rules = EraRulesImpl::for_era(Era::Byron);
+        assert!(matches!(rules, EraRulesImpl::Byron(_)));
+    }
+
+    /// Verify validate_block_body always succeeds for Byron.
+    #[test]
+    fn test_byron_validate_block_body_succeeds() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+        let utxo = make_utxo_sub(vec![]);
+
+        // We need a minimal Block; since validate_block_body is a no-op for Byron,
+        // we just verify it doesn't panic or error.
+        let block = dugite_primitives::block::Block {
+            era: Era::Byron,
+            header: make_block_header(Hash32::ZERO, vec![]),
+            transactions: vec![],
+            raw_cbor: None,
+        };
+
+        let result = rules.validate_block_body(&block, &ctx, &utxo);
+        assert!(
+            result.is_ok(),
+            "Byron validate_block_body should always succeed"
+        );
+    }
+
+    /// Verify apply_valid_tx through the EraRules trait processes a valid Byron tx.
+    #[test]
+    fn test_byron_era_rules_apply_valid_tx() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+
+        let input = make_input(0xAA, 0);
+        let input_coin = 10_000_000u64;
+        let fee = TEST_POLICY.min_fee(200).unwrap();
+        let output_coin = input_coin - fee;
+
+        let mut utxo = make_utxo_sub(vec![(
+            input.clone(),
+            make_output(make_byron_address(0x01), input_coin),
+        )]);
+        let mut certs = make_cert_sub();
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+
+        let tx = make_tx(
+            0xBB,
+            vec![input.clone()],
+            vec![make_output(make_byron_address(0x02), output_coin)],
+            fee,
+        );
+
+        let result = rules.apply_valid_tx(
+            &tx,
+            BlockValidationMode::ValidateAll,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+        );
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        let diff = result.unwrap();
+
+        // Verify UTxO changes
+        assert_eq!(diff.deletes.len(), 1, "one input consumed");
+        assert_eq!(diff.inserts.len(), 1, "one output produced");
+
+        // Input should be removed from the UTxO set
+        assert!(utxo.utxo_set.lookup(&input).is_none(), "input consumed");
+
+        // New output should be present
+        let out = TransactionInput {
+            transaction_id: Hash32::from_bytes([0xBBu8; 32]),
+            index: 0,
+        };
+        assert!(utxo.utxo_set.lookup(&out).is_some(), "output produced");
+
+        // Fees accumulated
+        assert_eq!(utxo.epoch_fees, Lovelace(fee));
+    }
+
+    /// Verify apply_invalid_tx returns an error for Byron.
+    #[test]
+    fn test_byron_apply_invalid_tx_errors() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+        let mut utxo = make_utxo_sub(vec![]);
+
+        let tx = make_tx(0xAA, vec![], vec![], 0);
+
+        let mut certs = make_cert_sub();
+        let mut epochs = make_epoch_sub();
+        let result = rules.apply_invalid_tx(
+            &tx,
+            BlockValidationMode::ValidateAll,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut epochs,
+        );
+
+        assert!(
+            result.is_err(),
+            "Byron apply_invalid_tx should always error"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Byron era does not support invalid transactions"),
+            "Error message should mention Byron: {err_msg}"
+        );
+    }
+
+    /// Verify evolve_nonce sets lab_nonce and tracks block production.
+    #[test]
+    fn test_byron_evolve_nonce() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+        let mut consensus = make_consensus_sub();
+
+        let prev_hash = Hash32::from_bytes([0xABu8; 32]);
+        let issuer_vkey = vec![0x01u8; 32]; // 32 bytes = valid vkey
+
+        let header = make_block_header(prev_hash, issuer_vkey);
+
+        rules.evolve_nonce(&header, &ctx, &mut consensus);
+
+        // lab_nonce should be set to prev_hash
+        assert_eq!(consensus.lab_nonce, prev_hash, "lab_nonce = prev_hash");
+
+        // Block count should be incremented
+        assert_eq!(consensus.epoch_block_count, 1);
+
+        // Pool ID (blake2b-224 of issuer_vkey) should have 1 block
+        assert_eq!(consensus.epoch_blocks_by_pool.len(), 1);
+    }
+
+    /// Verify min_fee returns the correct Byron linear fee.
+    #[test]
+    fn test_byron_min_fee_via_trait() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+        let utxo = make_utxo_sub(vec![]);
+
+        let tx = make_tx(0xAA, vec![], vec![], 0);
+        // tx has 200 bytes of raw_cbor
+        let min = rules.min_fee(&tx, &ctx, &utxo);
+        // 44 * 200 + 155381 = 164181
+        assert_eq!(min, 164_181);
+    }
+
+    /// Verify process_epoch_transition resets block counters.
+    #[test]
+    fn test_byron_process_epoch_transition() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+
+        let mut utxo = make_utxo_sub(vec![]);
+        let mut certs = make_cert_sub();
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+        let mut consensus = make_consensus_sub();
+
+        // Simulate some block production
+        consensus.epoch_block_count = 42;
+        let mut blocks = HashMap::new();
+        blocks.insert(
+            dugite_primitives::hash::Hash28::from_bytes([1u8; 28]),
+            10u64,
+        );
+        consensus.epoch_blocks_by_pool = Arc::new(blocks);
+
+        let result = rules.process_epoch_transition(
+            EpochNo(1),
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+            &mut consensus,
+        );
+
+        assert!(result.is_ok());
+
+        // Block counters should be reset
+        assert_eq!(consensus.epoch_block_count, 0);
+        assert!(consensus.epoch_blocks_by_pool.is_empty());
+    }
+
+    /// Verify on_era_transition is a no-op for Byron.
+    #[test]
+    fn test_byron_on_era_transition_noop() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+
+        let mut utxo = make_utxo_sub(vec![]);
+        let mut certs = make_cert_sub();
+        let mut gov = make_gov_sub();
+        let mut consensus = make_consensus_sub();
+        let mut epochs = make_epoch_sub();
+
+        let result = rules.on_era_transition(
+            Era::Byron,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut consensus,
+            &mut epochs,
+        );
+
+        assert!(result.is_ok(), "Byron on_era_transition should be no-op");
+    }
+
+    /// Verify required_witnesses returns an empty set for Byron addresses.
+    ///
+    /// Byron addresses use bootstrap witnesses (not VKey witnesses), so
+    /// `required_witnesses` should return empty for pure Byron transactions.
+    #[test]
+    fn test_byron_required_witnesses_empty_for_byron_addresses() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+
+        let input = make_input(0xAA, 0);
+        let utxo = make_utxo_sub(vec![(
+            input.clone(),
+            make_output(make_byron_address(0x01), 10_000_000),
+        )]);
+        let certs = make_cert_sub();
+        let gov = make_gov_sub();
+
+        let tx = make_tx(0xBB, vec![input], vec![], 0);
+
+        let witnesses = rules.required_witnesses(&tx, &ctx, &utxo, &certs, &gov);
+
+        // Byron addresses don't have a payment_credential — empty set expected.
+        assert!(
+            witnesses.is_empty(),
+            "Byron addresses use bootstrap witnesses, not VKey"
+        );
+    }
+
+    /// Verify the EraRulesImpl enum correctly forwards to ByronRules.
+    #[test]
+    fn test_era_rules_impl_forwards_min_fee() {
+        let rules = EraRulesImpl::for_era(Era::Byron);
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+        let utxo = make_utxo_sub(vec![]);
+
+        let tx = make_tx(0xAA, vec![], vec![], 0);
+        let min = rules.min_fee(&tx, &ctx, &utxo);
+        assert_eq!(min, 164_181, "EraRulesImpl should forward to ByronRules");
+    }
+
+    /// Verify apply_valid_tx in ApplyOnly mode with missing inputs accumulates fees.
+    #[test]
+    fn test_byron_era_rules_apply_only_missing_input() {
+        let rules = ByronRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_byron_ctx(&params);
+
+        let input = make_input(0xAA, 0);
+        let fee = 200_000u64;
+
+        // Empty UTxO set — input will not be found
+        let mut utxo = make_utxo_sub(vec![]);
+        let mut certs = make_cert_sub();
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+
+        let tx = make_tx(
+            0xBB,
+            vec![input],
+            vec![make_output(make_byron_address(0x02), 800_000)],
+            fee,
+        );
+
+        let result = rules.apply_valid_tx(
+            &tx,
+            BlockValidationMode::ApplyOnly,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+        );
+
+        assert!(
+            result.is_ok(),
+            "ApplyOnly should succeed even with missing inputs"
+        );
+        let diff = result.unwrap();
+
+        // No UTxO changes but fee is accumulated
+        assert!(diff.inserts.is_empty());
+        assert!(diff.deletes.is_empty());
+        assert_eq!(utxo.epoch_fees, Lovelace(fee));
     }
 }

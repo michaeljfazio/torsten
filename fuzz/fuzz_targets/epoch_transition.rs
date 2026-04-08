@@ -79,9 +79,9 @@ fuzz_target!(|data: &[u8]| {
     let epoch_fees = read_u64(data, 24.min(data.len().saturating_sub(8))) % 1_000_000_000_000;
 
     state.epoch = EpochNo(epoch);
-    state.treasury = Lovelace(treasury);
-    state.reserves = Lovelace(reserves);
-    state.epoch_fees = Lovelace(epoch_fees);
+    state.epochs.treasury = Lovelace(treasury);
+    state.epochs.reserves = Lovelace(reserves);
+    state.utxo.epoch_fees = Lovelace(epoch_fees);
 
     // Seed pools from fuzz data (1-8 pools)
     let num_pools = ((data.get(32).copied().unwrap_or(0) % 8) + 1) as usize;
@@ -109,9 +109,9 @@ fuzz_target!(|data: &[u8]| {
         blocks_by_pool.insert(pool_id, block_count);
     }
     // Set epoch block count before moving blocks_by_pool into Arc
-    state.epoch_block_count = blocks_by_pool.values().sum::<u64>();
-    state.pool_params = Arc::new(pool_params);
-    state.epoch_blocks_by_pool = Arc::new(blocks_by_pool);
+    state.consensus.epoch_block_count = blocks_by_pool.values().sum::<u64>();
+    state.certs.pool_params = Arc::new(pool_params);
+    state.consensus.epoch_blocks_by_pool = Arc::new(blocks_by_pool);
 
     // Seed delegations (1-16 delegators)
     let num_delegators =
@@ -133,8 +133,8 @@ fuzz_target!(|data: &[u8]| {
         ) % 10_000_000_000_000;
         reward_accounts.insert(staker, Lovelace(stake));
     }
-    state.delegations = Arc::new(delegations);
-    state.reward_accounts = Arc::new(reward_accounts);
+    state.certs.delegations = Arc::new(delegations);
+    state.certs.reward_accounts = Arc::new(reward_accounts);
 
     // Trigger epoch transition — must never panic.
     // The transition processes: RUPD (rewards), SNAP (snapshot rotation),

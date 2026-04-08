@@ -5,6 +5,8 @@ mod governance;
 mod protocol_params;
 mod rewards;
 mod snapshot;
+pub mod snapshot_format;
+pub mod substates;
 
 // Re-export governance free functions and types for use by tests
 #[cfg(test)]
@@ -15,6 +17,8 @@ pub(crate) use governance::{
 };
 #[doc(hidden)]
 pub use rewards::Rat;
+pub use snapshot_format::LedgerStateSnapshot;
+pub use substates::{CertSubState, ConsensusSubState, EpochSubState, GovSubState, UtxoSubState};
 
 use crate::plutus::SlotConfig;
 use crate::utxo::UtxoSet;
@@ -28,8 +32,8 @@ use dugite_primitives::hash::{Hash28, Hash32};
 use dugite_primitives::protocol_params::ProtocolParameters;
 use dugite_primitives::time::{BlockNo, EpochNo, SlotNo};
 use dugite_primitives::transaction::{
-    Anchor, Constitution, DRep, GovActionId, ProposalProcedure, ProtocolParamUpdate, Rational,
-    Relay, Voter, VotingProcedure,
+    Anchor, Constitution, DRep, GovActionId, ProposalProcedure, Rational, Relay, Voter,
+    VotingProcedure,
 };
 use dugite_primitives::value::Lovelace;
 use serde::{Deserialize, Serialize};
@@ -72,7 +76,10 @@ fn default_prev_protocol_params() -> ProtocolParameters {
     ProtocolParameters::mainnet_defaults()
 }
 
-/// The complete ledger state.
+/// The complete ledger state, decomposed into component sub-states for granular borrowing.
+///
+/// Serialization goes through `LedgerStateSnapshot` (see `snapshot_format.rs`).
+/// Do NOT derive Serialize/Deserialize on this struct directly.
 ///
 /// Large collections (`delegations`, `pool_params`, `reward_accounts`,
 /// `governance`, `epoch_blocks_by_pool`) are wrapped in `Arc` for
@@ -80,10 +87,21 @@ fn default_prev_protocol_params() -> ProtocolParameters {
 /// it only bumps reference counts instead of deep-copying megabytes of
 /// data.  Mutations go through `Arc::make_mut()`, which clones the inner
 /// collection only when there are other outstanding references.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LedgerState {
-    /// Current UTxO set
-    pub utxo_set: UtxoSet,
+    // ── Component sub-states (independently borrowable) ──────────────
+    /// UTxO state: the unspent transaction output set, per-epoch fees, and UTxO diffs.
+    pub utxo: UtxoSubState,
+    /// Delegation and pool state: credentials, pool registrations, reward accounts.
+    pub certs: CertSubState,
+    /// Conway governance state: proposals, votes, DReps, constitutional committee.
+    pub gov: GovSubState,
+    /// Consensus-layer state: nonces, block production counters, opcert tracking.
+    pub consensus: ConsensusSubState,
+    /// Epoch-level state: snapshots, treasury/reserves, protocol parameters.
+    pub epochs: EpochSubState,
+
+    // ── Coordination (immutable config or cross-cutting bookkeeping) ──
     /// Current tip of the chain
     pub tip: Tip,
     /// Current era
@@ -92,7 +110,6 @@ pub struct LedgerState {
     /// Set when `block.era > self.era` during `apply_block`.
     /// Consumed by the node layer to update the consensus-level `EraHistory`.
     /// `(previous_era, new_era, transition_epoch)`.
-    #[serde(skip, default)]
     pub pending_era_transition: Option<(Era, Era, EpochNo)>,
     /// Current epoch
     pub epoch: EpochNo,
@@ -100,252 +117,30 @@ pub struct LedgerState {
     pub epoch_length: u64,
     /// Number of Byron epochs before the Shelley hard fork.
     /// Total Byron slots = byron_epoch_length * shelley_transition_epoch.
-    #[serde(default)]
     pub shelley_transition_epoch: u64,
     /// Byron epoch length in slots (10 * k). 0 = mainnet default (21600).
-    #[serde(default)]
     pub byron_epoch_length: u64,
-    /// Current protocol parameters (curPParams in Haskell).
-    pub protocol_params: ProtocolParameters,
-    /// Previous epoch's protocol parameters (Haskell's prevPParams).
-    ///
-    /// Haskell's NEWPP rule: prevPParams = old curPParams (BEFORE each PPUP).
-    /// The RUPD uses prevPParams for ALL parameter values: rho, tau, a0, n_opt,
-    /// active_slot_coeff, d (via ppDG), protocol_version, etc.
-    ///
-    /// Updated at each epoch boundary: prev_protocol_params = curPP before PPUP.
-    /// At genesis: initialized to the same as protocol_params.
-    #[serde(default = "default_prev_protocol_params")]
-    pub prev_protocol_params: ProtocolParameters,
-    /// Cached prev_d for backward compatibility and serde.
-    /// Derived from prev_protocol_params at each boundary.
-    #[serde(default = "default_d_one")]
-    pub prev_d: f64,
-    /// Cached prev protocol major version for backward compatibility.
-    #[serde(default = "default_prev_proto_major")]
-    pub prev_protocol_version_major: u64,
-    /// Stake distribution
-    pub stake_distribution: StakeDistributionState,
-    /// Treasury balance
-    pub treasury: Lovelace,
-    /// Pending treasury donations (Conway `TreasuryDonation` field from transaction bodies).
-    ///
-    /// In Haskell, `curTreasuryDonation` is accumulated in `UTxOState.utxosDonation` during
-    /// block processing and flushed into the treasury at each epoch boundary (NEWEPOCH rule,
-    /// step `applyRUpd`).  We mirror this by buffering here and draining in
-    /// `process_epoch_transition` before reward computation so that the treasury includes
-    /// donations from the epoch that just ended, matching Haskell's ordering exactly.
-    ///
-    /// The field must use a custom serde default so that ledger snapshots written before this
-    /// field was added deserialise correctly (missing field → `Lovelace(0)`).
-    #[serde(default = "default_lovelace_zero")]
-    pub pending_donations: Lovelace,
-    /// Reserves balance (ADA not yet in circulation)
-    pub reserves: Lovelace,
-    /// Delegation state: credential_hash -> pool_id (Arc for copy-on-write)
-    pub delegations: Arc<HashMap<Hash32, Hash28>>,
-    /// Pool registrations: pool_id -> pool registration (Arc for copy-on-write)
-    pub pool_params: Arc<HashMap<Hash28, PoolRegistration>>,
-    /// Future pool parameters for re-registrations (Haskell's futurePoolParams).
-    ///
-    /// In Cardano, pool re-registrations take effect at the NEXT epoch boundary.
-    /// When a pool that is already registered submits a new PoolRegistration
-    /// certificate, the new parameters are stored here and applied during
-    /// the next epoch transition's POOLREAP step (before retirement processing).
-    /// First registrations go directly to pool_params (active at epoch N+2).
-    #[serde(default)]
-    pub future_pool_params: HashMap<Hash28, PoolRegistration>,
-    /// Pool retirements pending: pool → retirement epoch.
-    /// Matches Haskell's `psRetiring :: Map (KeyHash StakePool) EpochNo`.
-    /// A pool can only have ONE pending retirement; a new retirement for the
-    /// same pool replaces the previous entry.
-    pub pending_retirements: HashMap<Hash28, EpochNo>,
-    /// Stake snapshots for the Cardano "mark/set/go" snapshot model
-    pub snapshots: EpochSnapshots,
-    /// Reward accounts: stake credential hash -> accumulated rewards (Arc for copy-on-write)
-    pub reward_accounts: Arc<HashMap<Hash32, Lovelace>>,
-    /// Pointer map: certificate pointers → credential hashes (Haskell's DState ptrs).
-    ///
-    /// When a StakeRegistration certificate is processed at (slot, tx_index, cert_index),
-    /// it creates a pointer entry mapping to the credential hash. Pointer addresses
-    /// (type 4/5) reference these pointers instead of embedding the credential directly.
-    /// Used by `stake_credential_hash` to resolve Pointer addresses.
-    #[serde(default)]
-    pub pointer_map: HashMap<dugite_primitives::credentials::Pointer, Hash32>,
-    /// Genesis delegates: genesis_key_hash (28 bytes) → (delegate_key_hash (28 bytes), vrf_key_hash (32 bytes)).
-    ///
-    /// Loaded from the Shelley genesis file. Used for BFT overlay schedule
-    /// validation during early Shelley era (when d > 0). Genesis delegates
-    /// produce blocks on overlay slots; the delegate_key_hash is Blake2b-224
-    /// of the delegate's cold verification key, and the vrf_key_hash is
-    /// Blake2b-256 of the delegate's VRF verification key.
-    ///
-    /// Not mutated after initialization — the genesis delegation map is static
-    /// for the lifetime of the Shelley-based eras.
-    #[serde(default)]
-    pub genesis_delegates: HashMap<Hash28, (Hash28, Hash32)>,
-    /// Fees collected in the current epoch
-    pub epoch_fees: Lovelace,
-    /// Number of blocks produced by each pool in the current epoch (Arc for copy-on-write)
-    pub epoch_blocks_by_pool: Arc<HashMap<Hash28, u64>>,
-    /// Total blocks in the current epoch
-    pub epoch_block_count: u64,
-    /// Evolving nonce (eta_v): accumulated hash of ALL VRF outputs (never reset).
-    /// Matches Haskell's `praosStateEvolvingNonce`.
-    pub evolving_nonce: Hash32,
-    /// Candidate nonce: snapshot of evolving_nonce that freezes in the last
-    /// randomness_stabilisation_window (4k/f) slots of each epoch.
-    /// Matches Haskell's `praosStateCandidateNonce`.
-    pub candidate_nonce: Hash32,
-    /// Current epoch nonce: hash(candidate_nonce || last_epoch_block_nonce) at epoch boundary.
-    /// Matches Haskell's `praosStateEpochNonce`.
-    pub epoch_nonce: Hash32,
-    /// LAB nonce: prev_hash of the most recent block (type-cast, no hashing).
-    /// Matches Haskell's `praosStateLabNonce`.
-    pub lab_nonce: Hash32,
-    /// Snapshot of lab_nonce at epoch boundary.
-    /// Matches Haskell's `praosStateLastEpochBlockNonce`.
-    pub last_epoch_block_nonce: Hash32,
-    /// Randomness stabilisation window: ceiling(4k/f) for Conway+.
-    pub randomness_stabilisation_window: u64,
-    /// Stability window: ceiling(3k/f) for Alonzo/Babbage (per Haskell erratum 17.3).
-    #[serde(default)]
-    pub stability_window_3kf: u64,
-    /// Shelley genesis hash (used for initial nonce state)
-    pub genesis_hash: Hash32,
-    // Legacy fields kept for serde backwards compatibility with existing snapshots
-    #[serde(default)]
-    rolling_nonce: Hash32,
-    #[serde(default)]
-    stability_window: u64,
-    #[serde(default)]
-    first_block_hash_of_epoch: Option<Hash32>,
-    #[serde(default)]
-    prev_epoch_first_block_hash: Option<Hash32>,
-    /// Current protocol parameter update proposals (pre-Conway, sgsCurProposals):
-    /// proposals where ppupEpoch == currentEpoch at submission time.
-    /// Maps target_epoch -> [(genesis_delegate_hash, proposed_update)]
-    pub pending_pp_updates: BTreeMap<EpochNo, Vec<(Hash32, ProtocolParamUpdate)>>,
-    /// Future protocol parameter update proposals (pre-Conway, sgsFutureProposals):
-    /// proposals where ppupEpoch == currentEpoch + 1 at submission time.
-    /// Promoted to `pending_pp_updates` at each epoch boundary (matching Haskell's
-    /// `updatePpup` which moves sgsFuture → sgsCur after evaluating sgsCur).
-    #[serde(default)]
-    pub future_pp_updates: BTreeMap<EpochNo, Vec<(Hash32, ProtocolParamUpdate)>>,
-    /// Quorum for pre-Conway protocol parameter updates (from Shelley genesis)
-    #[serde(default = "default_update_quorum")]
-    pub update_quorum: u64,
-    /// Conway governance state (Arc for copy-on-write)
-    pub governance: Arc<GovernanceState>,
     /// Slot configuration for Plutus time conversion
     pub slot_config: SlotConfig,
-    /// When true, `rebuild_stake_distribution()` runs at each epoch boundary.
-    /// Set after loading a snapshot (where incremental tracking may have drifted).
-    /// During replay from genesis, incremental tracking is always correct.
-    #[serde(skip)]
-    pub needs_stake_rebuild: bool,
-    /// Pointer-addressed UTxO stake: pointer → coin amount (Haskell's `sisPtrStake`).
+    /// Shelley genesis hash (used for initial nonce state)
+    pub genesis_hash: Hash32,
+    /// Genesis delegates: genesis_key_hash (28 bytes) -> (delegate_key_hash (28 bytes), vrf_key_hash (32 bytes)).
     ///
-    /// Haskell's `ShelleyInstantStake` tracks pointer-addressed UTxO coins separately
-    /// in `sisPtrStake` and resolves them to credentials at each SNAP boundary using
-    /// the current `saPtrs` map.  This deferred resolution means that if a credential
-    /// deregisters (removing its pointer_map entry), its pointer-addressed coins are
-    /// excluded from the snapshot — they are NOT credited to any pool.
-    ///
-    /// Dugite previously resolved pointer addresses eagerly at UTxO insertion time
-    /// and stored coins directly in `stake_distribution.stake_map`.  This diverged
-    /// from Haskell when a deregistration removed the pointer_map entry after the
-    /// UTxO was created — Dugite kept the coins in stake_map while Haskell excluded
-    /// them from the next snapshot.
-    ///
-    /// This field implements the deferred model: pointer UTxO coins are tracked here
-    /// by pointer key; they are resolved to credentials at each epoch boundary
-    /// (SNAP time) via the current `pointer_map`.  If a pointer has no entry in
-    /// `pointer_map` (deregistered credential), its coins are excluded from the snapshot.
-    ///
-    /// `#[serde(default)]` ensures backward compatibility: snapshots written before
-    /// this field was added deserialise with an empty map (safe because
-    /// `needs_stake_rebuild` will be set, triggering a full UTxO scan that
-    /// correctly populates both `stake_distribution.stake_map` and this field).
-    #[serde(default)]
-    pub ptr_stake: HashMap<dugite_primitives::credentials::Pointer, u64>,
-    /// Whether pointer-addressed UTxO stake has been excluded from `stake_distribution`.
-    ///
-    /// In Conway (protocol version >= 9), Haskell's `ConwayInstantStake` has no pointer
-    /// map — pointer-addressed UTxOs are silently excluded from pool stake calculations.
-    /// This flag ensures the one-time exclusion happens at the first Conway epoch boundary.
-    /// From that point forward, the incremental `apply_block` also skips pointer addresses.
-    #[serde(skip)]
-    pub ptr_stake_excluded: bool,
-    /// Pending reward update retained for backward compatibility with snapshots
-    /// written by the old deferred-RUPD code path.
-    ///
-    /// The corrected RUPD implementation computes AND applies the reward update in
-    /// the same `process_epoch_transition` call (matching Haskell's NEWEPOCH rule
-    /// exactly).  This field is therefore always `None` after a transition runs
-    /// under the new code.  It is kept here so that snapshots produced by older
-    /// node versions can still be loaded: the single pending update they carry will
-    /// be applied once at the very next epoch boundary and the field will be cleared.
-    ///
-    /// Do NOT populate this field in new code.  Use `apply_pending_reward_update`
-    /// only for the one-time migration path.
-    #[serde(default)]
-    pub pending_reward_update: Option<PendingRewardUpdate>,
-    /// Running total of all stake key deposits locked in the ledger (lovelace).
-    /// Incremented by `pp.key_deposit` on StakeRegistration / ConwayStakeRegistration /
-    /// combined registration certs. Decremented on deregistration.
-    /// Matches Haskell's `oblStake = sumDepositsAccounts accounts`.
-    #[serde(default)]
-    pub total_stake_key_deposits: u64,
-    /// Script-type stake credentials (credential_type = 1 for N2C queries).
-    /// Populated from StakeRegistration / ConwayStakeRegistration / RegStakeDeleg /
-    /// RegStakeVoteDeleg / VoteRegDeleg certificates when the credential is a
-    /// Credential::Script variant.  Used to correctly set credential_type in
-    /// GetStakeDelegDeposits and GetFilteredVoteDelegatees responses.
-    #[serde(default)]
-    pub script_stake_credentials: std::collections::HashSet<Hash32>,
-    /// Per-block UTxO diffs for the last k blocks, supporting fast diff-based
-    /// rollback without a snapshot reload + replay.
-    ///
-    /// Not persisted in snapshots (`#[serde(skip)]`): the diff window only
-    /// covers in-memory volatile blocks, so it resets to empty after any
-    /// snapshot load.  The snapshot-reload+replay path in `handle_rollback`
-    /// covers the case where the diff window is insufficient.
-    #[serde(skip)]
-    pub diff_seq: DiffSeq,
+    /// Loaded from the Shelley genesis file. Used for BFT overlay schedule
+    /// validation during early Shelley era (when d > 0). Not mutated after initialization.
+    pub genesis_delegates: HashMap<Hash28, (Hash28, Hash32)>,
+    /// Quorum for pre-Conway protocol parameter updates (from Shelley genesis)
+    pub update_quorum: u64,
     /// The network this node is running on (mainnet, testnet, etc.).
     ///
     /// Used for unconditional output/withdrawal address network checks during
     /// Phase-1 validation (Haskell's `Globals.networkId`).  Not persisted in
     /// snapshots — set from genesis/config at node startup.
-    ///
-    /// Defaults to `None` (check skipped) when not set, preserving backwards
-    /// compatibility with existing snapshot-loaded ledger states.
-    #[serde(skip)]
     pub node_network: Option<dugite_primitives::network::NetworkId>,
-    /// Operational certificate counters per pool (cold key hash → highest seen counter).
-    ///
-    /// Persisted across node restarts to prevent opcert replay attacks.
-    /// The canonical runtime copy lives in `OuroborosPraos.opcert_counters`;
-    /// this field is populated from consensus before each snapshot save and
-    /// used to seed consensus on snapshot load.
-    ///
-    /// `#[serde(default)]` ensures backward compatibility: snapshots written
-    /// before this field was added deserialise with an empty map (the node
-    /// then rebuilds counters from the chain, same as a fresh start).
-    #[serde(default)]
-    pub opcert_counters: HashMap<Hash28, u64>,
-    /// Per-credential deposit paid at stake key registration time (lovelace).
-    /// Maps credential_hash → deposit amount paid when this credential was registered.
-    /// Used for correct refund amounts when key_deposit changes via governance.
-    /// Matches Haskell's per-credential deposit in DState.dsUnified (UMap).
-    #[serde(default)]
-    pub stake_key_deposits: HashMap<Hash32, u64>,
-    /// Per-pool deposit paid at pool registration time (lovelace).
-    /// Maps pool_id → deposit amount paid when this pool was first registered.
-    /// Used for correct refund at pool retirement when pool_deposit changes.
-    #[serde(default)]
-    pub pool_deposits: HashMap<Hash28, u64>,
+    /// Randomness stabilisation window: ceiling(4k/f) for Conway+.
+    pub randomness_stabilisation_window: u64,
+    /// Stability window: ceiling(3k/f) for Alonzo/Babbage (per Haskell erratum 17.3).
+    pub stability_window_3kf: u64,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -824,7 +619,56 @@ impl LedgerState {
 
     pub fn new(params: ProtocolParameters) -> Self {
         LedgerState {
-            utxo_set: UtxoSet::new(),
+            utxo: UtxoSubState {
+                utxo_set: UtxoSet::new(),
+                diff_seq: DiffSeq::new(),
+                epoch_fees: Lovelace(0),
+                pending_donations: Lovelace(0),
+            },
+            certs: CertSubState {
+                delegations: Arc::new(HashMap::new()),
+                pool_params: Arc::new(HashMap::new()),
+                future_pool_params: HashMap::new(),
+                pending_retirements: HashMap::new(),
+                reward_accounts: Arc::new(HashMap::new()),
+                stake_key_deposits: HashMap::new(),
+                pool_deposits: HashMap::new(),
+                total_stake_key_deposits: 0,
+                pointer_map: HashMap::new(),
+                stake_distribution: StakeDistributionState::default(),
+                script_stake_credentials: std::collections::HashSet::new(),
+            },
+            gov: GovSubState {
+                governance: Arc::new(GovernanceState::default()),
+            },
+            consensus: ConsensusSubState {
+                evolving_nonce: Hash32::ZERO,
+                candidate_nonce: Hash32::ZERO,
+                epoch_nonce: Hash32::ZERO,
+                lab_nonce: Hash32::ZERO,
+                last_epoch_block_nonce: Hash32::ZERO,
+                rolling_nonce: Hash32::ZERO,
+                first_block_hash_of_epoch: None,
+                prev_epoch_first_block_hash: None,
+                epoch_blocks_by_pool: Arc::new(HashMap::new()),
+                epoch_block_count: 0,
+                opcert_counters: HashMap::new(),
+            },
+            epochs: EpochSubState {
+                snapshots: EpochSnapshots::default(),
+                treasury: Lovelace(0),
+                reserves: Lovelace(MAX_LOVELACE_SUPPLY),
+                pending_reward_update: None,
+                pending_pp_updates: BTreeMap::new(),
+                future_pp_updates: BTreeMap::new(),
+                needs_stake_rebuild: false,
+                ptr_stake: HashMap::new(),
+                ptr_stake_excluded: false,
+                protocol_params: params.clone(),
+                prev_protocol_params: params,
+                prev_protocol_version_major: 6, // Genesis: Alonzo (proto 6)
+                prev_d: 1.0,                    // Genesis: d=1
+            },
             tip: Tip::origin(),
             era: Era::Conway,
             pending_era_transition: None,
@@ -832,54 +676,13 @@ impl LedgerState {
             epoch_length: 432000,          // mainnet default
             shelley_transition_epoch: 208, // mainnet default
             byron_epoch_length: 21600,     // mainnet default (10 * 2160)
-            prev_protocol_params: params.clone(),
-            protocol_params: params,
-            prev_d: 1.0,                    // Genesis: d=1
-            prev_protocol_version_major: 6, // Genesis: Alonzo (proto 6)
-            stake_distribution: StakeDistributionState::default(),
-            treasury: Lovelace(0),
-            pending_donations: Lovelace(0),
-            reserves: Lovelace(MAX_LOVELACE_SUPPLY),
-            delegations: Arc::new(HashMap::new()),
-            pool_params: Arc::new(HashMap::new()),
-            future_pool_params: HashMap::new(),
-            pending_retirements: HashMap::new(),
-            snapshots: EpochSnapshots::default(),
-            reward_accounts: Arc::new(HashMap::new()),
-            pointer_map: HashMap::new(),
+            slot_config: SlotConfig::default(),
+            genesis_hash: Hash32::ZERO,
             genesis_delegates: HashMap::new(),
-            epoch_fees: Lovelace(0),
-            epoch_blocks_by_pool: Arc::new(HashMap::new()),
-            epoch_block_count: 0,
-            evolving_nonce: Hash32::ZERO,
-            candidate_nonce: Hash32::ZERO,
-            epoch_nonce: Hash32::ZERO,
-            lab_nonce: Hash32::ZERO,
-            last_epoch_block_nonce: Hash32::ZERO,
+            update_quorum: default_update_quorum(),
+            node_network: None,
             randomness_stabilisation_window: 172800, // 4k/f on mainnet: ceil(4*2160/0.05)
             stability_window_3kf: 129600,            // 3k/f on mainnet: ceil(3*2160/0.05)
-            genesis_hash: Hash32::ZERO,
-            // Legacy fields (serde compat)
-            rolling_nonce: Hash32::ZERO,
-            stability_window: 0,
-            first_block_hash_of_epoch: None,
-            prev_epoch_first_block_hash: None,
-            pending_pp_updates: BTreeMap::new(),
-            future_pp_updates: BTreeMap::new(),
-            update_quorum: default_update_quorum(),
-            governance: Arc::new(GovernanceState::default()),
-            slot_config: SlotConfig::default(),
-            needs_stake_rebuild: false,
-            ptr_stake: HashMap::new(),
-            ptr_stake_excluded: false,
-            total_stake_key_deposits: 0,
-            pending_reward_update: None,
-            script_stake_credentials: std::collections::HashSet::new(),
-            diff_seq: DiffSeq::new(),
-            node_network: None,
-            opcert_counters: HashMap::new(),
-            stake_key_deposits: HashMap::new(),
-            pool_deposits: HashMap::new(),
         }
     }
 
@@ -1100,7 +903,56 @@ impl LedgerState {
         );
 
         LedgerState {
-            utxo_set: UtxoSet::new(),
+            utxo: UtxoSubState {
+                utxo_set: UtxoSet::new(),
+                diff_seq: DiffSeq::new(),
+                epoch_fees: Lovelace(hs.new_epoch_state.fees),
+                pending_donations: Lovelace(hs.new_epoch_state.donation),
+            },
+            certs: CertSubState {
+                delegations: Arc::new(delegations),
+                pool_params: Arc::new(pool_params_map),
+                future_pool_params,
+                pending_retirements,
+                reward_accounts: Arc::new(reward_accounts),
+                stake_key_deposits,
+                pool_deposits,
+                total_stake_key_deposits,
+                pointer_map: HashMap::new(), // Conway era: pointers excluded
+                stake_distribution: StakeDistributionState { stake_map },
+                script_stake_credentials,
+            },
+            gov: GovSubState {
+                governance: Arc::new(gov),
+            },
+            consensus: ConsensusSubState {
+                evolving_nonce: hs.praos_state.evolving_nonce,
+                candidate_nonce: hs.praos_state.candidate_nonce,
+                epoch_nonce: hs.praos_state.epoch_nonce,
+                lab_nonce: hs.praos_state.lab_nonce,
+                last_epoch_block_nonce: hs.praos_state.last_epoch_block_nonce,
+                rolling_nonce: Hash32::ZERO,
+                first_block_hash_of_epoch: None,
+                prev_epoch_first_block_hash: None,
+                epoch_blocks_by_pool: Arc::new(epoch_blocks_by_pool),
+                epoch_block_count,
+                opcert_counters,
+            },
+            epochs: EpochSubState {
+                snapshots,
+                treasury: Lovelace(hs.new_epoch_state.treasury),
+                reserves: Lovelace(hs.new_epoch_state.reserves),
+                pending_reward_update: None,
+                pending_pp_updates: BTreeMap::new(),
+                future_pp_updates: BTreeMap::new(),
+                needs_stake_rebuild: false,
+                ptr_stake: HashMap::new(), // Conway: pointers excluded
+                ptr_stake_excluded: true,  // Conway: already excluded
+                protocol_params: cur_pparams,
+                prev_protocol_params: prev_pparams,
+                prev_protocol_version_major,
+                prev_d,
+            },
             tip,
             era: Era::Conway,
             pending_era_transition: None,
@@ -1109,55 +961,14 @@ impl LedgerState {
             epoch_length: 432000,
             shelley_transition_epoch: 0,
             byron_epoch_length: 0,
-            protocol_params: cur_pparams,
-            prev_protocol_params: prev_pparams,
-            prev_d,
-            prev_protocol_version_major,
-            stake_distribution: StakeDistributionState { stake_map },
-            treasury: Lovelace(hs.new_epoch_state.treasury),
-            pending_donations: Lovelace(hs.new_epoch_state.donation),
-            reserves: Lovelace(hs.new_epoch_state.reserves),
-            delegations: Arc::new(delegations),
-            pool_params: Arc::new(pool_params_map),
-            future_pool_params,
-            pending_retirements,
-            snapshots,
-            reward_accounts: Arc::new(reward_accounts),
-            pointer_map: HashMap::new(), // Conway era: pointers excluded
+            slot_config: SlotConfig::default(), // Will be set by set_slot_config()
+            genesis_hash: Hash32::ZERO,         // Will be set by set_genesis_hash()
             genesis_delegates,
-            epoch_fees: Lovelace(hs.new_epoch_state.fees),
-            epoch_blocks_by_pool: Arc::new(epoch_blocks_by_pool),
-            epoch_block_count,
-            evolving_nonce: hs.praos_state.evolving_nonce,
-            candidate_nonce: hs.praos_state.candidate_nonce,
-            epoch_nonce: hs.praos_state.epoch_nonce,
-            lab_nonce: hs.praos_state.lab_nonce,
-            last_epoch_block_nonce: hs.praos_state.last_epoch_block_nonce,
+            update_quorum: 5,
+            node_network: None, // Will be set by caller
             // Will be recalculated by set_epoch_length()
             randomness_stabilisation_window: 0,
             stability_window_3kf: 0,
-            genesis_hash: Hash32::ZERO, // Will be set by set_genesis_hash()
-            // Legacy fields
-            rolling_nonce: Hash32::ZERO,
-            stability_window: 0,
-            first_block_hash_of_epoch: None,
-            prev_epoch_first_block_hash: None,
-            pending_pp_updates: BTreeMap::new(),
-            future_pp_updates: BTreeMap::new(),
-            update_quorum: 5,
-            governance: Arc::new(gov),
-            slot_config: SlotConfig::default(), // Will be set by set_slot_config()
-            needs_stake_rebuild: false,
-            ptr_stake: HashMap::new(), // Conway: pointers excluded
-            ptr_stake_excluded: true,  // Conway: already excluded
-            total_stake_key_deposits,
-            pending_reward_update: None,
-            script_stake_credentials,
-            diff_seq: DiffSeq::new(),
-            node_network: None, // Will be set by caller
-            opcert_counters,
-            stake_key_deposits,
-            pool_deposits,
         }
     }
 
@@ -1176,7 +987,7 @@ impl LedgerState {
         // Compute BOTH stability windows:
         //   randomness_stabilisation_window = ceiling(4k/f) — Conway+ candidate freeze
         //   stability_window_3kf            = ceiling(3k/f) — Alonzo/Babbage candidate freeze
-        let (f_num, f_den) = self.protocol_params.active_slot_coeff_rational();
+        let (f_num, f_den) = self.epochs.protocol_params.active_slot_coeff_rational();
         self.randomness_stabilisation_window =
             dugite_primitives::protocol_params::ceiling_div_by_rational(
                 4,
@@ -1289,14 +1100,14 @@ impl LedgerState {
         let block_epoch = self.epoch_of_slot(slot);
         if block_epoch <= self.epoch.0 {
             // Same epoch (or behind, should not happen at tip): use current nonce.
-            return self.epoch_nonce;
+            return self.consensus.epoch_nonce;
         }
         if block_epoch == self.epoch.0.saturating_add(1) {
             // Block is in the immediately following epoch.  Pre-compute the TICKN
             // nonce: epochNonce' = candidate ⭒ lastEpochBlockNonce.
             // This mirrors process_epoch_transition Step 1 exactly.
-            let candidate = self.candidate_nonce;
-            let prev_hash_nonce = self.last_epoch_block_nonce;
+            let candidate = self.consensus.candidate_nonce;
+            let prev_hash_nonce = self.consensus.last_epoch_block_nonce;
             let zero = Hash32::ZERO;
             return if candidate == zero && prev_hash_nonce == zero {
                 zero
@@ -1315,7 +1126,7 @@ impl LedgerState {
         // because the intermediate epochs' VRF contributions are unknown.
         // Return the current nonce; validation will fail non-fatally (or produce
         // an informative error), and the node will retry after catching up.
-        self.epoch_nonce
+        self.consensus.epoch_nonce
     }
 
     /// Set the Shelley genesis hash.
@@ -1336,14 +1147,14 @@ impl LedgerState {
     pub fn set_genesis_hash(&mut self, hash: Hash32) {
         self.genesis_hash = hash;
         // evolving/candidate/epoch all start from the genesis file hash
-        self.evolving_nonce = hash;
-        self.candidate_nonce = hash;
-        self.epoch_nonce = hash;
+        self.consensus.evolving_nonce = hash;
+        self.consensus.candidate_nonce = hash;
+        self.consensus.epoch_nonce = hash;
         // lab and lastEpochBlockNonce start as NeutralNonce (ZERO)
         // This is critical: at the first epoch boundary, NeutralNonce identity
         // means epochNonce = candidateNonce (not hash(candidate || genesisHash))
-        self.lab_nonce = Hash32::ZERO;
-        self.last_epoch_block_nonce = Hash32::ZERO;
+        self.consensus.lab_nonce = Hash32::ZERO;
+        self.consensus.last_epoch_block_nonce = Hash32::ZERO;
         info!(
             epoch_nonce = %hash.to_hex(),
             evolving = %hash.to_hex(),
@@ -1429,7 +1240,7 @@ impl LedgerState {
                 raw_cbor: None,
             };
 
-            self.utxo_set.insert(input, output);
+            self.utxo.utxo_set.insert(input, output);
             seeded += 1;
             total_lovelace += lovelace;
         }
@@ -1439,11 +1250,11 @@ impl LedgerState {
         // Without this, monetary expansion (rho * reserves) is computed on too
         // large a reserves value, draining reserves too fast and overfilling
         // the treasury.
-        self.reserves.0 = self.reserves.0.saturating_sub(total_lovelace);
+        self.epochs.reserves.0 = self.epochs.reserves.0.saturating_sub(total_lovelace);
 
         debug!(
             "Ledger: seeded {} genesis UTxOs ({} lovelace, reserves now {})",
-            seeded, total_lovelace, self.reserves.0
+            seeded, total_lovelace, self.epochs.reserves.0
         );
     }
 
@@ -1455,7 +1266,7 @@ impl LedgerState {
         let pool_id = registration.pool_id;
         let reward_account = registration.reward_account.clone();
 
-        let pool_params = Arc::make_mut(&mut self.pool_params);
+        let pool_params = Arc::make_mut(&mut self.certs.pool_params);
         pool_params.insert(pool_id, registration);
 
         // Register reward account with zero balance if not already present
@@ -1465,7 +1276,7 @@ impl LedgerState {
             let mut cred = [0u8; 32];
             cred[..28].copy_from_slice(&reward_account[1..29]);
             let cred_hash = Hash32::from_bytes(cred);
-            let reward_accounts = Arc::make_mut(&mut self.reward_accounts);
+            let reward_accounts = Arc::make_mut(&mut self.certs.reward_accounts);
             reward_accounts.entry(cred_hash).or_insert(Lovelace(0));
         }
 
@@ -1477,11 +1288,11 @@ impl LedgerState {
     /// Maps a stake credential (as padded Hash32) to a pool ID (Hash28).
     /// Registers the credential in reward accounts with zero balance.
     pub fn seed_genesis_delegation(&mut self, stake_credential: Hash32, pool_id: Hash28) {
-        let delegations = Arc::make_mut(&mut self.delegations);
+        let delegations = Arc::make_mut(&mut self.certs.delegations);
         delegations.insert(stake_credential, pool_id);
 
         // Register stake credential in reward accounts if not present
-        let reward_accounts = Arc::make_mut(&mut self.reward_accounts);
+        let reward_accounts = Arc::make_mut(&mut self.certs.reward_accounts);
         reward_accounts
             .entry(stake_credential)
             .or_insert(Lovelace(0));
@@ -1585,17 +1396,17 @@ impl LedgerState {
         }
 
         // Pop the last n diffs from the sequence (most-recent first).
-        let diffs = self.diff_seq.rollback(n);
+        let diffs = self.utxo.diff_seq.rollback(n);
         let actually_rolled = diffs.len();
 
         for (_slot, _hash, diff) in &diffs {
             // Undo inserts: remove UTxOs that were created by this block.
             for (input, _output) in &diff.inserts {
-                self.utxo_set.remove(input);
+                self.utxo.utxo_set.remove(input);
             }
             // Undo deletes: restore UTxOs that were consumed by this block.
             for (input, output) in &diff.deletes {
-                self.utxo_set.insert(input.clone(), output.clone());
+                self.utxo.utxo_set.insert(input.clone(), output.clone());
             }
         }
 

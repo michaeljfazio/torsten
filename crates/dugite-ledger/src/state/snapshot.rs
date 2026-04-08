@@ -2,7 +2,7 @@
 //!
 //! # Snapshot format
 //!
-//! All snapshots use bincode serialization of [`LedgerState`].  The on-disk
+//! All snapshots use bincode serialization of [`LedgerStateSnapshot`](super::snapshot_format::LedgerStateSnapshot).  The on-disk
 //! layout is:
 //!
 //! ```text
@@ -59,7 +59,8 @@ impl LedgerState {
         let tmp_path = path.with_extension("tmp");
 
         // Serialize the ledger state to bincode.
-        let data = bincode::serialize(self).map_err(|e| {
+        let snapshot = super::snapshot_format::LedgerStateSnapshot::from(self);
+        let data = bincode::serialize(&snapshot).map_err(|e| {
             LedgerError::EpochTransition(format!("Failed to serialize ledger state: {e}"))
         })?;
 
@@ -96,7 +97,7 @@ impl LedgerState {
         info!(
             "Snapshot     saved (epoch={}, {} UTxOs, {:.1} MB)",
             self.epoch.0,
-            self.utxo_set.len(),
+            self.utxo.utxo_set.len(),
             total_bytes as f64 / 1_048_576.0,
         );
         Ok(())
@@ -192,7 +193,7 @@ impl LedgerState {
         // malicious payloads that encode enormous internal allocations.
         // Must use with_fixint_encoding() to match bincode::serialize() defaults.
         use bincode::Options;
-        let mut state: LedgerState = bincode::options()
+        let snapshot: super::snapshot_format::LedgerStateSnapshot = bincode::options()
             .with_fixint_encoding()
             .allow_trailing_bytes()
             .with_limit(MAX_SNAPSHOT_SIZE as u64)
@@ -200,10 +201,11 @@ impl LedgerState {
             .map_err(|e| {
                 LedgerError::EpochTransition(format!("Failed to deserialize ledger state: {e}"))
             })?;
-        state.utxo_set.rebuild_address_index();
+        let mut state = LedgerState::from(snapshot);
+        state.utxo.utxo_set.rebuild_address_index();
         // Re-enable indexing so subsequent insert/remove operations maintain the index.
         // The #[serde(skip)] on indexing_enabled defaults to false after deserialization.
-        state.utxo_set.set_indexing_enabled(true);
+        state.utxo.utxo_set.set_indexing_enabled(true);
         // After loading a snapshot, incremental stake tracking may have drifted.
         // Rebuild stake distribution from the full UTxO set, then recompute
         // pool_stake for all existing snapshots (mark/set/go).
@@ -213,42 +215,42 @@ impl LedgerState {
         // set is empty. Running rebuild_stake_distribution on an empty set would wipe
         // all pool_stake values, causing block producers to see zero stake. The caller
         // (dugite-node) runs rebuild + recompute again AFTER attaching the LSM store.
-        if !state.utxo_set.is_empty() {
+        if !state.utxo.utxo_set.is_empty() {
             state.rebuild_stake_distribution();
             state.recompute_snapshot_pool_stakes();
         }
         // Trigger one full rebuild at the next epoch boundary to correct any drift
         // from the snapshot (which may have been saved with stale incremental state).
         // After that single rebuild, incremental tracking takes over.
-        state.needs_stake_rebuild = true;
+        state.epochs.needs_stake_rebuild = true;
         // After loading a snapshot, the node is past genesis — RUPD should fire
         // at the next epoch boundary. Old snapshots without this field will
         // deserialize with rupd_ready=false (serde default), so set it here.
-        state.snapshots.rupd_ready = true;
+        state.epochs.snapshots.rupd_ready = true;
         // Migration: populate per-credential deposit maps from current protocol
         // parameters when loading snapshots written before per-credential deposit
         // tracking was added (version < 12). This is an approximation that is
         // correct for all networks where key_deposit/pool_deposit have never
         // changed via governance.
-        if state.stake_key_deposits.is_empty() && !state.reward_accounts.is_empty() {
-            let deposit = state.protocol_params.key_deposit.0;
-            for cred_hash in state.reward_accounts.keys() {
-                state.stake_key_deposits.insert(*cred_hash, deposit);
+        if state.certs.stake_key_deposits.is_empty() && !state.certs.reward_accounts.is_empty() {
+            let deposit = state.epochs.protocol_params.key_deposit.0;
+            for cred_hash in state.certs.reward_accounts.keys() {
+                state.certs.stake_key_deposits.insert(*cred_hash, deposit);
             }
             debug!(
                 "Migrated {} stake key deposits from current key_deposit={}",
-                state.stake_key_deposits.len(),
+                state.certs.stake_key_deposits.len(),
                 deposit,
             );
         }
-        if state.pool_deposits.is_empty() && !state.pool_params.is_empty() {
-            let deposit = state.protocol_params.pool_deposit.0;
-            for pool_id in state.pool_params.keys() {
-                state.pool_deposits.insert(*pool_id, deposit);
+        if state.certs.pool_deposits.is_empty() && !state.certs.pool_params.is_empty() {
+            let deposit = state.epochs.protocol_params.pool_deposit.0;
+            for pool_id in state.certs.pool_params.keys() {
+                state.certs.pool_deposits.insert(*pool_id, deposit);
             }
             debug!(
                 "Migrated {} pool deposits from current pool_deposit={}",
-                state.pool_deposits.len(),
+                state.certs.pool_deposits.len(),
                 deposit,
             );
         }
@@ -256,7 +258,7 @@ impl LedgerState {
             "Snapshot loaded from {} ({:.1} MB, {} UTxOs, epoch {})",
             path.display(),
             raw.len() as f64 / 1_048_576.0,
-            state.utxo_set.len(),
+            state.utxo.utxo_set.len(),
             state.epoch.0,
         );
         Ok(state)
@@ -267,7 +269,7 @@ impl LedgerState {
     /// Call this after `save_snapshot()` when using on-disk UTxO storage.
     /// Requires mutable access because `LsmTree::save_snapshot` is `&mut self`.
     pub fn save_utxo_snapshot(&mut self) -> Result<(), LedgerError> {
-        if let Some(store) = self.utxo_set.store_mut() {
+        if let Some(store) = self.utxo.utxo_set.store_mut() {
             // Delete any existing snapshot first to avoid "already exists" error
             let _ = store.delete_snapshot("ledger");
             store.save_snapshot("ledger").map_err(|e| {
@@ -285,23 +287,24 @@ impl LedgerState {
     /// they are migrated to the store before attachment.
     pub fn attach_utxo_store(&mut self, mut store: crate::utxo_store::UtxoStore) {
         // Migrate any in-memory UTxOs to the store
-        if !self.utxo_set.is_empty() && !self.utxo_set.has_store() {
-            let count = self.utxo_set.len();
+        if !self.utxo.utxo_set.is_empty() && !self.utxo.utxo_set.has_store() {
+            let count = self.utxo.utxo_set.len();
             tracing::info!("Migrating {} in-memory UTxOs to on-disk store", count);
-            for (input, output) in self.utxo_set.iter() {
+            for (input, output) in self.utxo.utxo_set.iter() {
                 store.insert(input, output);
             }
         }
         store.set_indexing_enabled(true);
         store.rebuild_address_index();
-        self.utxo_set.attach_store(store);
-        tracing::info!("UTxO store attached ({} entries)", self.utxo_set.len());
+        self.utxo.utxo_set.attach_store(store);
+        tracing::info!("UTxO store attached ({} entries)", self.utxo.utxo_set.len());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::LedgerStateSnapshot;
     use dugite_primitives::era::Era;
     use dugite_primitives::protocol_params::ProtocolParameters;
     use dugite_primitives::time::EpochNo;
@@ -320,7 +323,7 @@ mod tests {
 
         let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
         state.epoch = EpochNo(7);
-        state.treasury = Lovelace(42_000_000);
+        state.epochs.treasury = Lovelace(42_000_000);
         state.era = Era::Conway;
 
         state.save_snapshot(&path).unwrap();
@@ -328,7 +331,7 @@ mod tests {
 
         assert_eq!(loaded.epoch, EpochNo(7), "epoch must survive roundtrip");
         assert_eq!(
-            loaded.treasury,
+            loaded.epochs.treasury,
             Lovelace(42_000_000),
             "treasury must survive roundtrip"
         );
@@ -481,13 +484,15 @@ mod tests {
         let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
         state.epoch = EpochNo(3);
 
-        // Serialise directly with `bincode::serialize`, which uses the same
-        // default encoder that the legacy path deserialises with.
-        let raw_bincode = bincode::serialize(&state).unwrap();
+        // Serialise via LedgerStateSnapshot (LedgerState no longer implements
+        // Serialize directly), which uses the same bincode encoder that the
+        // legacy path deserialises with.
+        let snapshot = LedgerStateSnapshot::from(&state);
+        let raw_bincode = bincode::serialize(&snapshot).unwrap();
 
         // The file must NOT start with `DUGT` so the legacy path is taken.
-        // A plain bincode-serialised `LedgerState` starts with the u64 field
-        // count or the first field value, never with the ASCII string "DUGT".
+        // A plain bincode-serialised `LedgerStateSnapshot` starts with the u64
+        // field count or the first field value, never with the ASCII string "DUGT".
         std::fs::write(&path, &raw_bincode).unwrap();
 
         let loaded = LedgerState::load_snapshot(&path).unwrap();
