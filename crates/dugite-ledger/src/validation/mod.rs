@@ -25,7 +25,6 @@ mod tests;
 pub use scripts::evaluate_native_script;
 // Re-exported for use by the block-application layer (block-level ref script
 // size check in state/apply.rs — Haskell's `conwayBbodyTransition`).
-#[allow(unused_imports)]
 pub(crate) use scripts::script_ref_byte_size;
 // Re-export the tier cap so apply.rs can reuse the same constant for the
 // block-body check, keeping the tiered-fee short-circuit in sync.

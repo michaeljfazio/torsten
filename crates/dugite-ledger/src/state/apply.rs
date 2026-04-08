@@ -19,7 +19,6 @@
 use super::{credential_to_hash, BlockValidationMode, LedgerError, LedgerState};
 use crate::eras::byron::{apply_byron_block, ByronApplyMode, ByronFeePolicy};
 use crate::eras::{EraRules, EraRulesImpl, RuleContext};
-#[allow(unused_imports)]
 use crate::ledger_seq::{BlockFieldsDelta, LedgerDelta};
 use crate::plutus::evaluate_plutus_scripts;
 use crate::utxo_diff::UtxoDiff;
