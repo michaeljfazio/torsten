@@ -916,7 +916,7 @@ mod tests {
 
     /// Seed a UTxO entry in the ledger state.
     fn seed_utxo(state: &mut LedgerState, input: TransactionInput, output: TransactionOutput) {
-        state.utxo_set.insert(input, output);
+        state.utxo.utxo_set.insert(input, output);
     }
 
     // ── Test 1: Byron-era block with one tx consuming a UTxO ─────────────────
@@ -950,7 +950,7 @@ mod tests {
         // when raw_cbor is None → tx_size_bytes = 0 → min_fee = min_fee_b).
         // We set fee to min_fee_b (155381) so conservation holds:
         // input 10_000_000 = output 9_844_619 + fee 155_381.
-        let fee: u64 = state.protocol_params.min_fee_b;
+        let fee: u64 = state.epochs.protocol_params.min_fee_b;
         let output_value = 10_000_000u64 - fee;
 
         let _out_input = TransactionInput {
@@ -987,7 +987,7 @@ mod tests {
 
         // The genesis UTxO must have been consumed.
         assert!(
-            state.utxo_set.lookup(&genesis_input).is_none(),
+            state.utxo.utxo_set.lookup(&genesis_input).is_none(),
             "Spent Byron input must be removed"
         );
         // The new output at index 0 of the tx hash must exist.
@@ -996,7 +996,7 @@ mod tests {
             index: 0,
         };
         assert!(
-            state.utxo_set.lookup(&new_input).is_some(),
+            state.utxo.utxo_set.lookup(&new_input).is_some(),
             "Byron output must be created"
         );
         // Tip was advanced.
@@ -1025,13 +1025,13 @@ mod tests {
             .expect("Shelley+ block should apply");
 
         // Input was consumed.
-        assert!(state.utxo_set.lookup(&input).is_none());
+        assert!(state.utxo.utxo_set.lookup(&input).is_none());
         // New output at index 0 exists.
         let new_input = TransactionInput {
             transaction_id: Hash32::from_bytes([0x20u8; 32]),
             index: 0,
         };
-        assert!(state.utxo_set.lookup(&new_input).is_some());
+        assert!(state.utxo.utxo_set.lookup(&new_input).is_some());
         // Tip updated.
         assert_eq!(state.tip.block_number, BlockNo(1));
     }
@@ -1056,7 +1056,7 @@ mod tests {
             .expect("Empty block should apply");
 
         // UTxO untouched.
-        assert!(state.utxo_set.lookup(&input).is_some());
+        assert!(state.utxo.utxo_set.lookup(&input).is_some());
         // Tip updated.
         assert_eq!(state.tip.point.slot().unwrap(), SlotNo(2_000));
     }
@@ -1095,12 +1095,12 @@ mod tests {
 
         // Collateral was spent.
         assert!(
-            state.utxo_set.lookup(&collateral_input).is_none(),
+            state.utxo.utxo_set.lookup(&collateral_input).is_none(),
             "Collateral input must be consumed"
         );
         // Regular input survived.
         assert!(
-            state.utxo_set.lookup(&regular_input).is_some(),
+            state.utxo.utxo_set.lookup(&regular_input).is_some(),
             "Regular input of invalid tx must not be consumed"
         );
     }
@@ -1157,10 +1157,10 @@ mod tests {
     #[test]
     fn test_body_size_exceeds_max_warns_not_errors() {
         let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-        assert!(state.protocol_params.max_block_body_size > 0);
+        assert!(state.epochs.protocol_params.max_block_body_size > 0);
 
         // body_size is strictly greater than the protocol limit.
-        let oversized = state.protocol_params.max_block_body_size + 1;
+        let oversized = state.epochs.protocol_params.max_block_body_size + 1;
         let block = make_test_block(Era::Conway, 1_000, 1, 9, oversized, vec![]);
 
         // Must succeed — the oversized body_size only triggers a log warning.
@@ -1390,15 +1390,15 @@ mod tests {
             .expect("Sequential within-block spending should succeed");
 
         // Genesis input consumed.
-        assert!(state.utxo_set.lookup(&genesis_input).is_none());
+        assert!(state.utxo.utxo_set.lookup(&genesis_input).is_none());
         // tx1's intermediate output was consumed by tx2.
-        assert!(state.utxo_set.lookup(&tx1_output_input).is_none());
+        assert!(state.utxo.utxo_set.lookup(&tx1_output_input).is_none());
         // tx2's output exists.
         let tx2_out = TransactionInput {
             transaction_id: tx2_hash,
             index: 0,
         };
-        assert!(state.utxo_set.lookup(&tx2_out).is_some());
+        assert!(state.utxo.utxo_set.lookup(&tx2_out).is_some());
     }
 
     // ── Test 13: Conway pointer-stake exclusion ───────────────────────────────
@@ -1409,8 +1409,13 @@ mod tests {
 
         let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
 
+        // Set era to Babbage so the Conway block triggers an era transition,
+        // which is where the pointer-stake exclusion logic now lives
+        // (on_era_transition in conway.rs).
+        state.era = Era::Babbage;
+
         // Pre-seed ptr_stake entries that should be cleared on first Conway block.
-        state.ptr_stake.insert(
+        state.epochs.ptr_stake.insert(
             Pointer {
                 slot: 1,
                 tx_index: 0,
@@ -1418,7 +1423,7 @@ mod tests {
             },
             1_000_000,
         );
-        state.ptr_stake.insert(
+        state.epochs.ptr_stake.insert(
             Pointer {
                 slot: 2,
                 tx_index: 0,
@@ -1426,19 +1431,20 @@ mod tests {
             },
             2_000_000,
         );
-        assert_eq!(state.ptr_stake.len(), 2);
-        assert!(!state.ptr_stake_excluded);
+        assert_eq!(state.epochs.ptr_stake.len(), 2);
+        assert!(!state.epochs.ptr_stake_excluded);
 
-        // Apply a Conway-era block (era == Era::Conway triggers exclusion).
+        // Apply a Conway-era block — the era transition from Babbage to Conway
+        // triggers on_era_transition which sets ptr_stake_excluded = true.
         let block = make_test_block(Era::Conway, 1_000, 1, 9, 0, vec![]);
 
         state
             .apply_block(&block, BlockValidationMode::ApplyOnly)
             .expect("Conway block should apply");
 
-        // The one-time exclusion flag must be set after the first Conway block.
+        // The one-time exclusion flag must be set after the era transition.
         assert!(
-            state.ptr_stake_excluded,
+            state.epochs.ptr_stake_excluded,
             "ptr_stake_excluded must be true after first Conway block"
         );
     }
@@ -1512,7 +1518,7 @@ mod tests {
             .expect("Block with stake-registration certs should apply");
 
         // Both credentials must now have a reward-account entry.
-        let reward_accounts = &*state.reward_accounts;
+        let reward_accounts = &*state.certs.reward_accounts;
         assert!(
             reward_accounts.contains_key(&key1),
             "cred1 must be registered in reward_accounts"

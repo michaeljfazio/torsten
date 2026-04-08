@@ -20,12 +20,14 @@
 
 use libfuzzer_sys::fuzz_target;
 use dugite_ledger::LedgerState;
+use dugite_ledger::state::snapshot_format::LedgerStateSnapshot;
 
 fuzz_target!(|data: &[u8]| {
     // --- Test 1: Direct bincode deserialization ---
     // This bypasses the snapshot header and tests the bincode decoder directly
     // against arbitrary input. bincode::deserialize must not panic.
-    let _: Result<LedgerState, _> = bincode::deserialize(data);
+    // LedgerState is serialized via LedgerStateSnapshot (flat wire format).
+    let _: Result<LedgerStateSnapshot, _> = bincode::deserialize(data);
 
     // --- Test 2: Snapshot with valid-looking header but corrupt payload ---
     // Construct a buffer that looks like a valid DUGT snapshot header

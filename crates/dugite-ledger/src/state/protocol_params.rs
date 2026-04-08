@@ -228,18 +228,27 @@ mod tests {
             .expect("partial update should succeed");
 
         // The targeted field must have changed.
-        assert_eq!(state.protocol_params.min_fee_a, 50);
+        assert_eq!(state.epochs.protocol_params.min_fee_a, 50);
 
         // Every other scalar field must be untouched.
-        assert_eq!(state.protocol_params.min_fee_b, defaults.min_fee_b);
+        assert_eq!(state.epochs.protocol_params.min_fee_b, defaults.min_fee_b);
         assert_eq!(
-            state.protocol_params.max_block_body_size,
+            state.epochs.protocol_params.max_block_body_size,
             defaults.max_block_body_size
         );
-        assert_eq!(state.protocol_params.max_tx_size, defaults.max_tx_size);
-        assert_eq!(state.protocol_params.key_deposit, defaults.key_deposit);
-        assert_eq!(state.protocol_params.pool_deposit, defaults.pool_deposit);
-        assert_eq!(state.protocol_params.n_opt, defaults.n_opt);
+        assert_eq!(
+            state.epochs.protocol_params.max_tx_size,
+            defaults.max_tx_size
+        );
+        assert_eq!(
+            state.epochs.protocol_params.key_deposit,
+            defaults.key_deposit
+        );
+        assert_eq!(
+            state.epochs.protocol_params.pool_deposit,
+            defaults.pool_deposit
+        );
+        assert_eq!(state.epochs.protocol_params.n_opt, defaults.n_opt);
     }
 
     /// Applying an update with multiple fields set must change exactly those
@@ -260,20 +269,23 @@ mod tests {
             .apply_protocol_param_update(&update)
             .expect("multi-field update should succeed");
 
-        assert_eq!(state.protocol_params.min_fee_a, 100);
-        assert_eq!(state.protocol_params.min_fee_b, 200_000);
-        assert_eq!(state.protocol_params.max_tx_size, 32768);
+        assert_eq!(state.epochs.protocol_params.min_fee_a, 100);
+        assert_eq!(state.epochs.protocol_params.min_fee_b, 200_000);
+        assert_eq!(state.epochs.protocol_params.max_tx_size, 32768);
 
         // Fields not mentioned in the update remain unchanged.
         assert_eq!(
-            state.protocol_params.max_block_body_size,
+            state.epochs.protocol_params.max_block_body_size,
             defaults.max_block_body_size
         );
         assert_eq!(
-            state.protocol_params.max_block_header_size,
+            state.epochs.protocol_params.max_block_header_size,
             defaults.max_block_header_size
         );
-        assert_eq!(state.protocol_params.key_deposit, defaults.key_deposit);
+        assert_eq!(
+            state.epochs.protocol_params.key_deposit,
+            defaults.key_deposit
+        );
     }
 
     /// An update with all fields set to `None` is a legal no-op and must not
@@ -290,11 +302,17 @@ mod tests {
         assert!(result.is_ok(), "no-op update must not return an error");
 
         // Spot-check a handful of fields to confirm nothing changed.
-        assert_eq!(state.protocol_params.min_fee_a, defaults.min_fee_a);
-        assert_eq!(state.protocol_params.min_fee_b, defaults.min_fee_b);
-        assert_eq!(state.protocol_params.max_tx_size, defaults.max_tx_size);
-        assert_eq!(state.protocol_params.n_opt, defaults.n_opt);
-        assert_eq!(state.protocol_params.key_deposit, defaults.key_deposit);
+        assert_eq!(state.epochs.protocol_params.min_fee_a, defaults.min_fee_a);
+        assert_eq!(state.epochs.protocol_params.min_fee_b, defaults.min_fee_b);
+        assert_eq!(
+            state.epochs.protocol_params.max_tx_size,
+            defaults.max_tx_size
+        );
+        assert_eq!(state.epochs.protocol_params.n_opt, defaults.n_opt);
+        assert_eq!(
+            state.epochs.protocol_params.key_deposit,
+            defaults.key_deposit
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1345,14 +1345,14 @@ mod tests {
 
         // reward_accounts: key present, balance = 0
         assert_eq!(
-            state.reward_accounts.get(&key).copied(),
+            state.certs.reward_accounts.get(&key).copied(),
             Some(Lovelace(0)),
             "reward_accounts should contain the registered credential with zero balance"
         );
         // stake_key_deposits: key present, amount = key_deposit
         assert_eq!(
-            state.stake_key_deposits.get(&key).copied(),
-            Some(state.protocol_params.key_deposit.0),
+            state.certs.stake_key_deposits.get(&key).copied(),
+            Some(state.epochs.protocol_params.key_deposit.0),
             "stake_key_deposits should record the 2 ADA deposit"
         );
     }
@@ -1375,9 +1375,10 @@ mod tests {
         // Pre-register
         state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
         // Also add a delegation so we can verify it gets removed
-        Arc::make_mut(&mut state.delegations).insert(key, test_pool_hash());
+        Arc::make_mut(&mut state.certs.delegations).insert(key, test_pool_hash());
         // Manually plant a stake_map entry (simulating a UTxO at this credential)
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(key, Lovelace(5_000_000));
@@ -1387,22 +1388,22 @@ mod tests {
 
         // delegations: removed
         assert!(
-            !state.delegations.contains_key(&key),
+            !state.certs.delegations.contains_key(&key),
             "delegation should be removed on deregistration"
         );
         // reward_accounts: removed
         assert!(
-            !state.reward_accounts.contains_key(&key),
+            !state.certs.reward_accounts.contains_key(&key),
             "reward_accounts entry should be removed on deregistration"
         );
         // stake_map: NOT removed — UTxOs can still exist
         assert!(
-            state.stake_distribution.stake_map.contains_key(&key),
+            state.certs.stake_distribution.stake_map.contains_key(&key),
             "stake_map should NOT be removed on deregistration (UTxOs may still exist)"
         );
         // stake_key_deposits: removed
         assert!(
-            !state.stake_key_deposits.contains_key(&key),
+            !state.certs.stake_key_deposits.contains_key(&key),
             "stake_key_deposits should be removed after deregistration"
         );
     }
@@ -1426,7 +1427,7 @@ mod tests {
         });
 
         assert_eq!(
-            state.delegations.get(&key).copied(),
+            state.certs.delegations.get(&key).copied(),
             Some(pool),
             "delegations should map the credential hash to the target pool"
         );
@@ -1448,12 +1449,12 @@ mod tests {
         state.process_certificate(&Certificate::PoolRegistration(params));
 
         assert!(
-            state.pool_params.contains_key(&operator),
+            state.certs.pool_params.contains_key(&operator),
             "pool_params should contain the newly registered pool"
         );
         assert_eq!(
-            state.pool_deposits.get(&operator).copied(),
-            Some(state.protocol_params.pool_deposit.0),
+            state.certs.pool_deposits.get(&operator).copied(),
+            Some(state.epochs.protocol_params.pool_deposit.0),
             "pool_deposits should record the 500 ADA deposit"
         );
     }
@@ -1473,7 +1474,7 @@ mod tests {
 
         // First registration — goes to pool_params directly
         state.process_certificate(&Certificate::PoolRegistration(params.clone()));
-        let initial_deposit = state.pool_deposits.get(&operator).copied();
+        let initial_deposit = state.certs.pool_deposits.get(&operator).copied();
 
         // Second registration — must be deferred
         let mut updated_params = params;
@@ -1482,18 +1483,22 @@ mod tests {
 
         // New params must appear in future_pool_params
         assert!(
-            state.future_pool_params.contains_key(&operator),
+            state.certs.future_pool_params.contains_key(&operator),
             "re-registration should stage params in future_pool_params"
         );
         // pool_deposits must not gain a new entry (deposit was already paid)
         assert_eq!(
-            state.pool_deposits.get(&operator).copied(),
+            state.certs.pool_deposits.get(&operator).copied(),
             initial_deposit,
             "re-registration should not record a second deposit"
         );
         // The staged pledge must match what we submitted
         assert_eq!(
-            state.future_pool_params.get(&operator).map(|r| r.pledge),
+            state
+                .certs
+                .future_pool_params
+                .get(&operator)
+                .map(|r| r.pledge),
             Some(Lovelace(1_000_000_000)),
             "future_pool_params should hold the updated pledge"
         );
@@ -1517,7 +1522,7 @@ mod tests {
         });
 
         assert_eq!(
-            state.pending_retirements.get(&pool).copied(),
+            state.certs.pending_retirements.get(&pool).copied(),
             Some(EpochNo(retirement_epoch)),
             "pending_retirements should contain the pool at the requested epoch"
         );
@@ -1547,13 +1552,13 @@ mod tests {
 
         // The deposit stored is key_deposit (2 ADA), not the cert's 3 ADA
         assert_eq!(
-            state.stake_key_deposits.get(&key).copied(),
-            Some(state.protocol_params.key_deposit.0),
+            state.certs.stake_key_deposits.get(&key).copied(),
+            Some(state.epochs.protocol_params.key_deposit.0),
             "stake_key_deposits should store key_deposit, not the cert's explicit deposit"
         );
         // reward_accounts must be populated
         assert!(
-            state.reward_accounts.contains_key(&key),
+            state.certs.reward_accounts.contains_key(&key),
             "reward_accounts should contain the registered credential"
         );
     }
@@ -1575,7 +1580,7 @@ mod tests {
             credential: cred.clone(),
             deposit: Lovelace(2_000_000),
         });
-        Arc::make_mut(&mut state.delegations).insert(key, test_pool_hash());
+        Arc::make_mut(&mut state.certs.delegations).insert(key, test_pool_hash());
 
         // Deregister
         state.process_certificate(&Certificate::ConwayStakeDeregistration {
@@ -1584,15 +1589,15 @@ mod tests {
         });
 
         assert!(
-            !state.delegations.contains_key(&key),
+            !state.certs.delegations.contains_key(&key),
             "delegation should be removed after ConwayStakeDeregistration"
         );
         assert!(
-            !state.reward_accounts.contains_key(&key),
+            !state.certs.reward_accounts.contains_key(&key),
             "reward_accounts entry should be removed after ConwayStakeDeregistration"
         );
         assert!(
-            !state.stake_key_deposits.contains_key(&key),
+            !state.certs.stake_key_deposits.contains_key(&key),
             "stake_key_deposits should be removed after ConwayStakeDeregistration"
         );
     }
@@ -1616,7 +1621,7 @@ mod tests {
             anchor: None,
         });
 
-        let gov = &state.governance;
+        let gov = &state.gov.governance;
         let drep = gov
             .dreps
             .get(&key)
@@ -1659,11 +1664,12 @@ mod tests {
 
         // dreps entry must be gone
         assert!(
-            !state.governance.dreps.contains_key(&key),
+            !state.gov.governance.dreps.contains_key(&key),
             "governance.dreps should not contain the deregistered DRep"
         );
         // deposit must be refunded to reward account
         let balance = state
+            .certs
             .reward_accounts
             .get(&key)
             .copied()
@@ -1705,6 +1711,7 @@ mod tests {
         });
 
         let drep = state
+            .gov
             .governance
             .dreps
             .get(&key)
@@ -1739,7 +1746,7 @@ mod tests {
         });
 
         assert_eq!(
-            state.governance.vote_delegations.get(&key).cloned(),
+            state.gov.governance.vote_delegations.get(&key).cloned(),
             Some(DRep::Abstain),
             "governance.vote_delegations should map the credential to DRep::Abstain"
         );
@@ -1765,7 +1772,12 @@ mod tests {
         });
 
         assert_eq!(
-            state.governance.committee_hot_keys.get(&cold_key).copied(),
+            state
+                .gov
+                .governance
+                .committee_hot_keys
+                .get(&cold_key)
+                .copied(),
             Some(hot_key),
             "committee_hot_keys should map cold credential hash to hot credential hash"
         );
@@ -1790,7 +1802,11 @@ mod tests {
             hot_credential: hot_cred,
         });
         assert!(
-            state.governance.committee_hot_keys.contains_key(&cold_key),
+            state
+                .gov
+                .governance
+                .committee_hot_keys
+                .contains_key(&cold_key),
             "hot key should be present before resignation"
         );
 
@@ -1802,12 +1818,20 @@ mod tests {
 
         // committee_resigned must contain the cold key
         assert!(
-            state.governance.committee_resigned.contains_key(&cold_key),
+            state
+                .gov
+                .governance
+                .committee_resigned
+                .contains_key(&cold_key),
             "governance.committee_resigned should contain the cold credential hash"
         );
         // committee_hot_keys must no longer contain the cold key
         assert!(
-            !state.governance.committee_hot_keys.contains_key(&cold_key),
+            !state
+                .gov
+                .governance
+                .committee_hot_keys
+                .contains_key(&cold_key),
             "committee_hot_keys should be cleared on resignation"
         );
     }
@@ -1843,13 +1867,13 @@ mod tests {
         };
 
         assert_eq!(
-            state.pointer_map.get(&expected_pointer).copied(),
+            state.certs.pointer_map.get(&expected_pointer).copied(),
             Some(key),
             "pointer_map should map the (slot, tx_index, cert_index) pointer to the credential hash"
         );
         // The standard registration side-effects must also occur
         assert!(
-            state.reward_accounts.contains_key(&key),
+            state.certs.reward_accounts.contains_key(&key),
             "reward_accounts should be populated by process_certificate_with_pointer"
         );
     }

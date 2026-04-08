@@ -1170,27 +1170,30 @@ mod tests {
         let mut state = new_state();
 
         // Pre-populate mark/set/go with distinct epoch tags so we can track them.
-        state.snapshots.mark = Some(StakeSnapshot::empty(EpochNo(10)));
-        state.snapshots.set = Some(StakeSnapshot::empty(EpochNo(20)));
-        state.snapshots.go = Some(StakeSnapshot::empty(EpochNo(30)));
+        state.epochs.snapshots.mark = Some(StakeSnapshot::empty(EpochNo(10)));
+        state.epochs.snapshots.set = Some(StakeSnapshot::empty(EpochNo(20)));
+        state.epochs.snapshots.go = Some(StakeSnapshot::empty(EpochNo(30)));
 
         state.process_epoch_transition(EpochNo(1));
 
         // go ← old set (epoch 20), set ← old mark (epoch 10), new mark created.
         assert_eq!(
-            state.snapshots.go.as_ref().unwrap().epoch,
+            state.epochs.snapshots.go.as_ref().unwrap().epoch,
             EpochNo(20),
             "go should hold the old set snapshot"
         );
         assert_eq!(
-            state.snapshots.set.as_ref().unwrap().epoch,
+            state.epochs.snapshots.set.as_ref().unwrap().epoch,
             EpochNo(10),
             "set should hold the old mark snapshot"
         );
         // New mark is always Some — its epoch is the new epoch.
-        assert!(state.snapshots.mark.is_some(), "new mark must be created");
+        assert!(
+            state.epochs.snapshots.mark.is_some(),
+            "new mark must be created"
+        );
         assert_eq!(
-            state.snapshots.mark.as_ref().unwrap().epoch,
+            state.epochs.snapshots.mark.as_ref().unwrap().epoch,
             EpochNo(1),
             "new mark epoch should be new_epoch"
         );
@@ -1205,20 +1208,20 @@ mod tests {
         let mut state = new_state();
 
         let donation = Lovelace(1_000_000);
-        state.pending_donations = donation;
+        state.utxo.pending_donations = donation;
 
-        let treasury_before = state.treasury;
+        let treasury_before = state.epochs.treasury;
         state.process_epoch_transition(EpochNo(1));
 
         // Treasury must have grown by at least the donation amount.
         assert!(
-            state.treasury.0 >= treasury_before.0 + donation.0,
+            state.epochs.treasury.0 >= treasury_before.0 + donation.0,
             "treasury should include the flushed donation (was {}, now {})",
             treasury_before.0,
-            state.treasury.0
+            state.epochs.treasury.0
         );
         assert_eq!(
-            state.pending_donations,
+            state.utxo.pending_donations,
             Lovelace(0),
             "pending_donations must be zero after flush"
         );
@@ -1236,14 +1239,14 @@ mod tests {
         // Use Conway protocol version so the pre-Babbage prefilter is disabled,
         // allowing pool rewards regardless of whether the reward account is
         // pre-registered in DState. The prefilter only fires when proto <= 6.
-        state.prev_protocol_version_major = 9;
-        state.prev_protocol_params.protocol_version_major = 9;
+        state.epochs.prev_protocol_version_major = 9;
+        state.epochs.prev_protocol_params.protocol_version_major = 9;
 
         // Give the state some circulation (non-zero total_stake): set reserves
         // below maxSupply so (maxSupply - reserves) > 0.
-        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY / 2);
+        state.epochs.reserves = Lovelace(MAX_LOVELACE_SUPPLY / 2);
         // prev_d >= 0.8 → eta = 1 (full monetary expansion fires).
-        state.prev_d = 1.0;
+        state.epochs.prev_d = 1.0;
 
         let pool_id = Hash28::from_bytes([0x01u8; 28]);
         let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([0x42u8; 28]));
@@ -1305,24 +1308,25 @@ mod tests {
         };
 
         // Wire up GO snapshot and bprev block data so the RUPD fires.
-        state.snapshots.go = Some(go_snap);
-        state.snapshots.bprev_block_count = 1;
-        state.snapshots.bprev_blocks_by_pool = Arc::new({
+        state.epochs.snapshots.go = Some(go_snap);
+        state.epochs.snapshots.bprev_block_count = 1;
+        state.epochs.snapshots.bprev_blocks_by_pool = Arc::new({
             let mut m = HashMap::new();
             m.insert(pool_id, 1u64);
             m
         });
-        state.snapshots.rupd_ready = true;
+        state.epochs.snapshots.rupd_ready = true;
 
         // Register the delegator's reward account so rewards are credited (not
         // forwarded to treasury as unregistered).
-        Arc::make_mut(&mut state.reward_accounts).insert(delegator_hash, Lovelace(0));
+        Arc::make_mut(&mut state.certs.reward_accounts).insert(delegator_hash, Lovelace(0));
 
-        let before = *state.reward_accounts.get(&delegator_hash).unwrap();
+        let before = *state.certs.reward_accounts.get(&delegator_hash).unwrap();
 
         state.process_epoch_transition(EpochNo(1));
 
         let after = state
+            .certs
             .reward_accounts
             .get(&delegator_hash)
             .copied()
@@ -1345,16 +1349,16 @@ mod tests {
         let mut state = new_state();
 
         let captured_fees = Lovelace(5_000_000);
-        state.epoch_fees = captured_fees;
+        state.utxo.epoch_fees = captured_fees;
 
         state.process_epoch_transition(EpochNo(1));
 
         assert_eq!(
-            state.snapshots.ss_fee, captured_fees,
+            state.epochs.snapshots.ss_fee, captured_fees,
             "ss_fee must capture the epoch's fees"
         );
         assert_eq!(
-            state.epoch_fees,
+            state.utxo.epoch_fees,
             Lovelace(0),
             "epoch_fees accumulator must be reset to zero"
         );
@@ -1376,18 +1380,18 @@ mod tests {
         let expected_treasury_cut = 27_000_000_000_000u64;
         let expected_delta_reserves = 27_000_000_000_000u64;
 
-        let treasury_before = state.treasury;
-        let reserves_before = state.reserves;
+        let treasury_before = state.epochs.treasury;
+        let reserves_before = state.epochs.reserves;
 
         state.process_epoch_transition(EpochNo(1));
 
         assert_eq!(
-            state.treasury.0,
+            state.epochs.treasury.0,
             treasury_before.0 + expected_treasury_cut,
             "treasury should increase by tau * expansion"
         );
         assert_eq!(
-            state.reserves.0,
+            state.epochs.reserves.0,
             reserves_before.0 - expected_delta_reserves,
             "reserves should decrease by the net expansion"
         );
@@ -1402,8 +1406,8 @@ mod tests {
         let mut state = new_state();
 
         // Give the state some circulation so pool rewards fire.
-        state.reserves = Lovelace(MAX_LOVELACE_SUPPLY / 2);
-        state.prev_d = 1.0;
+        state.epochs.reserves = Lovelace(MAX_LOVELACE_SUPPLY / 2);
+        state.epochs.prev_d = 1.0;
 
         let pool_id = Hash28::from_bytes([0xAAu8; 28]);
         // Use a specific credential for the pool reward account.
@@ -1448,23 +1452,23 @@ mod tests {
             }),
         };
 
-        state.snapshots.go = Some(go_snap);
-        state.snapshots.bprev_blocks_by_pool = Arc::new({
+        state.epochs.snapshots.go = Some(go_snap);
+        state.epochs.snapshots.bprev_blocks_by_pool = Arc::new({
             let mut m = HashMap::new();
             m.insert(pool_id, 1u64);
             m
         });
-        state.snapshots.bprev_block_count = 1;
-        state.snapshots.rupd_ready = true;
+        state.epochs.snapshots.bprev_block_count = 1;
+        state.epochs.snapshots.rupd_ready = true;
 
         // Critically: do NOT register the operator reward account in reward_accounts.
         // The unregistered reward should be forwarded to treasury.
         assert!(
-            !state.reward_accounts.contains_key(&op_key),
+            !state.certs.reward_accounts.contains_key(&op_key),
             "precondition: op reward account must NOT be registered"
         );
 
-        let treasury_before = state.treasury;
+        let treasury_before = state.epochs.treasury;
 
         state.process_epoch_transition(EpochNo(1));
 
@@ -1472,12 +1476,12 @@ mod tests {
         // also be the forwarded unregistered pool reward on top of delta_treasury).
         // The forwarded reward means the final treasury > treasury_before + delta_treasury_base.
         assert!(
-            state.treasury.0 > treasury_before.0,
+            state.epochs.treasury.0 > treasury_before.0,
             "treasury should grow when unregistered rewards are forwarded"
         );
         // The credential must still not be in reward_accounts (never registered).
         assert!(
-            !state.reward_accounts.contains_key(&op_key),
+            !state.certs.reward_accounts.contains_key(&op_key),
             "unregistered credential should not appear in reward_accounts"
         );
     }
@@ -1496,14 +1500,14 @@ mod tests {
         let mut reward_account = vec![0xe0u8];
         reward_account.extend_from_slice(&[0x77u8; 28]);
         let op_key = LedgerState::reward_account_to_hash(&reward_account);
-        Arc::make_mut(&mut state.reward_accounts).insert(op_key, Lovelace(0));
+        Arc::make_mut(&mut state.certs.reward_accounts).insert(op_key, Lovelace(0));
 
         state.process_certificate(&Certificate::PoolRegistration(pool_params_for(
             pool_id,
             reward_account,
         )));
         assert!(
-            state.pool_params.contains_key(&pool_id),
+            state.certs.pool_params.contains_key(&pool_id),
             "pool must be registered before test"
         );
 
@@ -1512,17 +1516,17 @@ mod tests {
             pool_hash: pool_id,
             epoch: 3,
         });
-        assert!(state.pending_retirements.contains_key(&pool_id));
+        assert!(state.certs.pending_retirements.contains_key(&pool_id));
 
         // Transition to epoch 3: pool should be retired.
         state.process_epoch_transition(EpochNo(3));
 
         assert!(
-            !state.pool_params.contains_key(&pool_id),
+            !state.certs.pool_params.contains_key(&pool_id),
             "pool must be removed from pool_params after retirement epoch"
         );
         assert!(
-            !state.pending_retirements.contains_key(&pool_id),
+            !state.certs.pending_retirements.contains_key(&pool_id),
             "pending_retirements must not contain the retired pool"
         );
     }
@@ -1541,7 +1545,7 @@ mod tests {
         reward_account.extend_from_slice(&[0x88u8; 28]);
         let op_key = LedgerState::reward_account_to_hash(&reward_account);
         assert!(
-            !state.reward_accounts.contains_key(&op_key),
+            !state.certs.reward_accounts.contains_key(&op_key),
             "precondition: op reward account must be unregistered"
         );
 
@@ -1556,20 +1560,20 @@ mod tests {
             epoch: 5,
         });
 
-        let treasury_before = state.treasury;
+        let treasury_before = state.epochs.treasury;
         state.process_epoch_transition(EpochNo(5));
 
         // Pool must be gone.
-        assert!(!state.pool_params.contains_key(&pool_id));
+        assert!(!state.certs.pool_params.contains_key(&pool_id));
         // Treasury must have increased by at least the pool deposit refund amount.
         // The pool_deposit from mainnet defaults is 500 ADA.
-        let pool_deposit = state.protocol_params.pool_deposit.0;
+        let pool_deposit = state.epochs.protocol_params.pool_deposit.0;
         assert!(
-            state.treasury.0 >= treasury_before.0 + pool_deposit,
+            state.epochs.treasury.0 >= treasury_before.0 + pool_deposit,
             "treasury should receive unregistered pool operator's deposit \
              (treasury_before={}, treasury_after={}, deposit={})",
             treasury_before.0,
-            state.treasury.0,
+            state.epochs.treasury.0,
             pool_deposit
         );
     }
@@ -1584,24 +1588,24 @@ mod tests {
 
         // Ensure we are in Conway (protocol_version_major >= 9) so ratify path runs.
         assert!(
-            state.protocol_params.protocol_version_major >= 9,
+            state.epochs.protocol_params.protocol_version_major >= 9,
             "test requires Conway era (PV >= 9)"
         );
         // No proposals → governance is trivially stable.
-        assert!(state.governance.proposals.is_empty());
+        assert!(state.gov.governance.proposals.is_empty());
 
-        let dormant_before = state.governance.num_dormant_epochs;
+        let dormant_before = state.gov.governance.num_dormant_epochs;
 
         state.process_epoch_transition(EpochNo(1));
 
         // With no proposals the epoch is dormant — counter increments by 1.
         assert_eq!(
-            state.governance.num_dormant_epochs,
+            state.gov.governance.num_dormant_epochs,
             dormant_before + 1,
             "dormant epoch counter must increment when there are no active proposals"
         );
         // State is consistent after ratification (no panic, no removed proposals).
-        assert!(state.governance.proposals.is_empty());
+        assert!(state.gov.governance.proposals.is_empty());
     }
 
     // ── Test 10: Genesis epoch transition (0→1) ───────────────────────────────
@@ -1613,23 +1617,23 @@ mod tests {
         let mut state = new_state();
 
         assert_eq!(state.epoch, EpochNo(0));
-        assert!(state.snapshots.mark.is_none());
-        assert!(state.snapshots.set.is_none());
-        assert!(state.snapshots.go.is_none());
+        assert!(state.epochs.snapshots.mark.is_none());
+        assert!(state.epochs.snapshots.set.is_none());
+        assert!(state.epochs.snapshots.go.is_none());
 
         state.process_epoch_transition(EpochNo(1));
 
         assert_eq!(state.epoch, EpochNo(1), "epoch must advance to 1");
         assert!(
-            state.snapshots.mark.is_some(),
+            state.epochs.snapshots.mark.is_some(),
             "mark must exist after first transition"
         );
         assert!(
-            state.snapshots.set.is_none(),
+            state.epochs.snapshots.set.is_none(),
             "set must be None after first transition"
         );
         assert!(
-            state.snapshots.go.is_none(),
+            state.epochs.snapshots.go.is_none(),
             "go must be None after first transition"
         );
     }
@@ -1643,22 +1647,22 @@ mod tests {
         let mut state = new_state();
 
         let blocks_this_epoch = 42u64;
-        state.epoch_block_count = blocks_this_epoch;
+        state.consensus.epoch_block_count = blocks_this_epoch;
         let pool_id = Hash28::from_bytes([0x10u8; 28]);
-        Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, blocks_this_epoch);
+        Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool).insert(pool_id, blocks_this_epoch);
 
         state.process_epoch_transition(EpochNo(1));
 
         assert_eq!(
-            state.snapshots.bprev_block_count, blocks_this_epoch,
+            state.epochs.snapshots.bprev_block_count, blocks_this_epoch,
             "bprev_block_count must capture this epoch's block count"
         );
         assert_eq!(
-            state.epoch_block_count, 0,
+            state.consensus.epoch_block_count, 0,
             "epoch_block_count must be reset to 0 after transition"
         );
         assert!(
-            state.epoch_blocks_by_pool.is_empty(),
+            state.consensus.epoch_blocks_by_pool.is_empty(),
             "epoch_blocks_by_pool must be cleared after transition"
         );
     }
@@ -1674,9 +1678,9 @@ mod tests {
         let candidate = Hash32::from_bytes([0xCAu8; 32]);
         let prev_hash = Hash32::from_bytes([0xBBu8; 32]);
 
-        state.candidate_nonce = candidate;
-        state.last_epoch_block_nonce = prev_hash;
-        let epoch_nonce_before = state.epoch_nonce;
+        state.consensus.candidate_nonce = candidate;
+        state.consensus.last_epoch_block_nonce = prev_hash;
+        let epoch_nonce_before = state.consensus.epoch_nonce;
 
         state.process_epoch_transition(EpochNo(1));
 
@@ -1687,17 +1691,17 @@ mod tests {
         let expected = dugite_primitives::hash::blake2b_256(&input);
 
         assert_eq!(
-            state.epoch_nonce, expected,
+            state.consensus.epoch_nonce, expected,
             "epoch_nonce must be blake2b_256(candidate || prev_hash_nonce)"
         );
         assert_ne!(
-            state.epoch_nonce, epoch_nonce_before,
+            state.consensus.epoch_nonce, epoch_nonce_before,
             "epoch_nonce must change when inputs are non-zero"
         );
         // prev_hash_nonce is updated to lab_nonce at the boundary.
         // lab_nonce starts as ZERO in new(); verify last_epoch_block_nonce = ZERO.
         assert_eq!(
-            state.last_epoch_block_nonce, state.lab_nonce,
+            state.consensus.last_epoch_block_nonce, state.consensus.lab_nonce,
             "last_epoch_block_nonce must be updated to lab_nonce"
         );
     }
@@ -1716,7 +1720,7 @@ mod tests {
 
         // Set a known non-zero fee on the second state's ss_fee.
         let fee = Lovelace(10_000_000); // 10 ADA
-        state_with_fee.snapshots.ss_fee = fee;
+        state_with_fee.epochs.snapshots.ss_fee = fee;
 
         state_no_fee.process_epoch_transition(EpochNo(1));
         state_with_fee.process_epoch_transition(EpochNo(1));
@@ -1724,10 +1728,10 @@ mod tests {
         // With a positive ss_fee, the reward pot = expansion + fee, and treasury
         // cut = tau * (expansion + fee) > tau * expansion alone.
         assert!(
-            state_with_fee.treasury.0 > state_no_fee.treasury.0,
+            state_with_fee.epochs.treasury.0 > state_no_fee.epochs.treasury.0,
             "treasury must be larger when ss_fee > 0 (was {}, with fee {})",
-            state_no_fee.treasury.0,
-            state_with_fee.treasury.0,
+            state_no_fee.epochs.treasury.0,
+            state_with_fee.epochs.treasury.0,
         );
     }
 
@@ -1771,10 +1775,10 @@ mod tests {
             is_legacy: false,
             raw_cbor: None,
         };
-        state.utxo_set.insert(input, output);
+        state.utxo.utxo_set.insert(input, output);
 
         // Set flag to trigger the full UTxO walk at the epoch boundary.
-        state.needs_stake_rebuild = true;
+        state.epochs.needs_stake_rebuild = true;
 
         // Register the stake credential so it has an entry in delegations and
         // reward_accounts (required for rebuild_stake_distribution to include it).
@@ -1789,6 +1793,7 @@ mod tests {
 
         // After the rebuild, stake_map must contain the UTxO's lovelace for the cred.
         let stake = state
+            .certs
             .stake_distribution
             .stake_map
             .get(&stake_key)
@@ -1801,7 +1806,7 @@ mod tests {
         );
         // The flag must be cleared for subsequent epochs.
         assert!(
-            !state.needs_stake_rebuild,
+            !state.epochs.needs_stake_rebuild,
             "needs_stake_rebuild must be cleared after the rebuild"
         );
     }

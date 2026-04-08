@@ -304,6 +304,7 @@ impl LedgerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::LedgerStateSnapshot;
     use dugite_primitives::era::Era;
     use dugite_primitives::protocol_params::ProtocolParameters;
     use dugite_primitives::time::EpochNo;
@@ -322,7 +323,7 @@ mod tests {
 
         let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
         state.epoch = EpochNo(7);
-        state.treasury = Lovelace(42_000_000);
+        state.epochs.treasury = Lovelace(42_000_000);
         state.era = Era::Conway;
 
         state.save_snapshot(&path).unwrap();
@@ -330,7 +331,7 @@ mod tests {
 
         assert_eq!(loaded.epoch, EpochNo(7), "epoch must survive roundtrip");
         assert_eq!(
-            loaded.treasury,
+            loaded.epochs.treasury,
             Lovelace(42_000_000),
             "treasury must survive roundtrip"
         );
@@ -483,13 +484,15 @@ mod tests {
         let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
         state.epoch = EpochNo(3);
 
-        // Serialise directly with `bincode::serialize`, which uses the same
-        // default encoder that the legacy path deserialises with.
-        let raw_bincode = bincode::serialize(&state).unwrap();
+        // Serialise via LedgerStateSnapshot (LedgerState no longer implements
+        // Serialize directly), which uses the same bincode encoder that the
+        // legacy path deserialises with.
+        let snapshot = LedgerStateSnapshot::from(&state);
+        let raw_bincode = bincode::serialize(&snapshot).unwrap();
 
         // The file must NOT start with `DUGT` so the legacy path is taken.
-        // A plain bincode-serialised `LedgerState` starts with the u64 field
-        // count or the first field value, never with the ASCII string "DUGT".
+        // A plain bincode-serialised `LedgerStateSnapshot` starts with the u64
+        // field count or the first field value, never with the ASCII string "DUGT".
         std::fs::write(&path, &raw_bincode).unwrap();
 
         let loaded = LedgerState::load_snapshot(&path).unwrap();
