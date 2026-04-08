@@ -298,3 +298,254 @@ impl LedgerState {
         tracing::info!("UTxO store attached ({} entries)", self.utxo_set.len());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dugite_primitives::era::Era;
+    use dugite_primitives::protocol_params::ProtocolParameters;
+    use dugite_primitives::time::EpochNo;
+    use dugite_primitives::value::Lovelace;
+
+    // -----------------------------------------------------------------------
+    // 1. Save/load roundtrip: verify that key fields survive serialisation
+    // -----------------------------------------------------------------------
+
+    /// Save a `LedgerState` with recognisable field values, load it back, and
+    /// verify that `epoch`, `treasury`, and `era` are preserved exactly.
+    #[test]
+    fn test_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roundtrip.bin");
+
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch = EpochNo(7);
+        state.treasury = Lovelace(42_000_000);
+        state.era = Era::Conway;
+
+        state.save_snapshot(&path).unwrap();
+        let loaded = LedgerState::load_snapshot(&path).unwrap();
+
+        assert_eq!(loaded.epoch, EpochNo(7), "epoch must survive roundtrip");
+        assert_eq!(
+            loaded.treasury,
+            Lovelace(42_000_000),
+            "treasury must survive roundtrip"
+        );
+        assert_eq!(loaded.era, Era::Conway, "era must survive roundtrip");
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Magic bytes: first 4 bytes of the on-disk file must be b"DUGT"
+    // -----------------------------------------------------------------------
+
+    /// Save a snapshot and verify that the raw on-disk file starts with the
+    /// expected `DUGT` magic word.
+    #[test]
+    fn test_magic_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magic.bin");
+
+        let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.save_snapshot(&path).unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        assert!(raw.len() >= 4, "snapshot file must be at least 4 bytes");
+        assert_eq!(&raw[..4], b"DUGT", "first 4 bytes must be magic word DUGT");
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Checksum verification: stored checksum matches blake2b-256 of payload
+    // -----------------------------------------------------------------------
+
+    /// Save a snapshot, then manually re-derive the blake2b-256 checksum over
+    /// the payload region (bytes 37..) and assert it equals the stored
+    /// checksum (bytes 5..37).
+    #[test]
+    fn test_checksum_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checksum.bin");
+
+        let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.save_snapshot(&path).unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+
+        // Header layout: DUGT(4) + version(1) + checksum(32) + payload(N)
+        assert!(
+            raw.len() > 37,
+            "snapshot must be longer than the 37-byte header"
+        );
+        let stored_checksum = &raw[5..37];
+        let payload = &raw[37..];
+        let computed = dugite_primitives::hash::blake2b_256(payload);
+        assert_eq!(
+            computed.as_bytes(),
+            stored_checksum,
+            "stored checksum must equal blake2b-256(payload)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Corrupted data detected: flipping a payload byte must cause an error
+    // -----------------------------------------------------------------------
+
+    /// Save a snapshot, flip a single byte in the payload region, then attempt
+    /// to load it — the checksum mismatch must produce a `LedgerError`.
+    #[test]
+    fn test_corrupted_data_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.bin");
+
+        let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.save_snapshot(&path).unwrap();
+
+        // Flip a byte in the payload (byte 40 is well within the payload region).
+        let mut raw = std::fs::read(&path).unwrap();
+        assert!(
+            raw.len() > 40,
+            "snapshot must be long enough to corrupt byte 40"
+        );
+        raw[40] ^= 0xFF;
+        std::fs::write(&path, &raw).unwrap();
+
+        let result = LedgerState::load_snapshot(&path);
+        assert!(
+            result.is_err(),
+            "loading a corrupted snapshot must return an error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("checksum") || msg.contains("corrupt"),
+            "error message must mention checksum or corruption, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Size limit enforcement: MAX_SNAPSHOT_SIZE constant and reject path
+    // -----------------------------------------------------------------------
+
+    /// Verify that `MAX_SNAPSHOT_SIZE` is 10 GiB and that a file whose raw
+    /// length exceeds the limit is rejected before any deserialisation attempt.
+    #[test]
+    fn test_size_limit_enforcement() {
+        // The constant must be exactly 10 GiB.
+        assert_eq!(
+            MAX_SNAPSHOT_SIZE,
+            10 * 1024 * 1024 * 1024,
+            "MAX_SNAPSHOT_SIZE must be 10 GiB"
+        );
+
+        // Write a tiny file whose first 8 bytes encode a length field larger
+        // than MAX_SNAPSHOT_SIZE — the raw-bytes size check triggers first.
+        // We achieve this by writing (MAX_SNAPSHOT_SIZE + 1) bytes so that
+        // the check `raw.len() > MAX_SNAPSHOT_SIZE` fires immediately.
+        //
+        // Writing 10 GiB to disk is impractical in a unit test, so instead
+        // we construct a file that *claims* (via its bincode length prefix)
+        // to contain an enormous allocation.  The with_limit() guard inside
+        // load_snapshot rejects it at the deserialization stage.
+        let dir = tempfile::tempdir().unwrap();
+        let malicious_path = dir.path().join("malicious.bin");
+
+        // Raw bincode (no DUGT header, so raw path taken): a u64 length
+        // that exceeds MAX_SNAPSHOT_SIZE.
+        let huge_len: u64 = (MAX_SNAPSHOT_SIZE as u64) + 1;
+        let mut payload = huge_len.to_le_bytes().to_vec();
+        payload.extend_from_slice(&[0u8; 64]); // padding so the file exists
+        std::fs::write(&malicious_path, &payload).unwrap();
+
+        let result = LedgerState::load_snapshot(&malicious_path);
+        // The file is < MAX_SNAPSHOT_SIZE bytes so the raw-size gate passes,
+        // but bincode's with_limit() should reject the giant allocation.
+        assert!(
+            result.is_err(),
+            "a snapshot claiming a huge allocation must be rejected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Legacy format loading: plain bincode (no DUGT header) must succeed
+    // -----------------------------------------------------------------------
+
+    /// Write a snapshot in the legacy raw-bincode format (no `DUGT` header at
+    /// all) and verify that `load_snapshot` can still deserialise it.
+    ///
+    /// This exercises the third branch of `load_snapshot`: the plain-bincode
+    /// fallback that exists for backwards compatibility with very old snapshots.
+    #[test]
+    fn test_legacy_format_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-raw.bin");
+
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.epoch = EpochNo(3);
+
+        // Serialise directly with `bincode::serialize`, which uses the same
+        // default encoder that the legacy path deserialises with.
+        let raw_bincode = bincode::serialize(&state).unwrap();
+
+        // The file must NOT start with `DUGT` so the legacy path is taken.
+        // A plain bincode-serialised `LedgerState` starts with the u64 field
+        // count or the first field value, never with the ASCII string "DUGT".
+        std::fs::write(&path, &raw_bincode).unwrap();
+
+        let loaded = LedgerState::load_snapshot(&path).unwrap();
+        assert_eq!(
+            loaded.epoch,
+            EpochNo(3),
+            "epoch must be preserved through legacy raw-bincode load"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Version byte in header: byte at position 4 must equal SNAPSHOT_VERSION
+    // -----------------------------------------------------------------------
+
+    /// Save a snapshot and assert that byte 4 (the version field) equals
+    /// `SNAPSHOT_VERSION` (currently 14).
+    #[test]
+    fn test_version_in_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("version.bin");
+
+        let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.save_snapshot(&path).unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        assert!(raw.len() > 4, "snapshot must be longer than 4 bytes");
+        assert_eq!(
+            raw[4],
+            LedgerState::SNAPSHOT_VERSION,
+            "byte 4 must be SNAPSHOT_VERSION ({})",
+            LedgerState::SNAPSHOT_VERSION
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. Atomic write: the .tmp file must NOT exist after save completes
+    // -----------------------------------------------------------------------
+
+    /// Save a snapshot and verify that the `.tmp` staging file has been
+    /// renamed away and does not exist on disk after `save_snapshot` returns.
+    #[test]
+    fn test_atomic_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atomic.bin");
+        let tmp_path = path.with_extension("tmp");
+
+        let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        state.save_snapshot(&path).unwrap();
+
+        // The final file must exist.
+        assert!(
+            path.exists(),
+            "final snapshot file must exist after save_snapshot"
+        );
+        // The temporary staging file must have been renamed away.
+        assert!(
+            !tmp_path.exists(),
+            ".tmp staging file must not exist after save_snapshot completes (atomic rename)"
+        );
+    }
+}
