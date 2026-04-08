@@ -5,6 +5,8 @@
 //! encapsulates all era-varying behavior, dispatched via `EraRulesImpl`.
 
 pub mod byron;
+// Helpers are building blocks for era rule impls (Tasks 9-11); not yet called.
+#[allow(dead_code)]
 pub mod common;
 pub mod conway;
 pub mod shelley;
