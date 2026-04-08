@@ -4,16 +4,14 @@
 //! backward compatibility with previous eras. The `EraRules` trait
 //! encapsulates all era-varying behavior, dispatched via `EraRulesImpl`.
 
+pub mod alonzo;
+pub mod babbage;
 pub mod byron;
 // Helpers are building blocks for era rule impls (Tasks 9-11); not yet called.
 #[allow(dead_code)]
 pub mod common;
 pub mod conway;
 pub mod shelley;
-
-// These will be added in later tasks:
-// pub mod alonzo;
-// pub mod babbage;
 
 use std::collections::{HashMap, HashSet};
 
@@ -149,7 +147,9 @@ pub trait EraRules {
 pub enum EraRulesImpl {
     Byron(byron::ByronRules),
     Shelley(shelley::ShelleyRules),
-    // Alonzo, Babbage, Conway added in later tasks
+    Alonzo(alonzo::AlonzoRules),
+    Babbage(babbage::BabbageRules),
+    // Conway added in Task 11
 }
 
 impl EraRulesImpl {
@@ -162,6 +162,8 @@ impl EraRulesImpl {
         match era {
             Era::Byron => Self::Byron(byron::ByronRules),
             Era::Shelley | Era::Allegra | Era::Mary => Self::Shelley(shelley::ShelleyRules),
+            Era::Alonzo => Self::Alonzo(alonzo::AlonzoRules),
+            Era::Babbage => Self::Babbage(babbage::BabbageRules),
             _ => todo!("Era rule implementations for {:?} not yet added", era),
         }
     }
@@ -177,6 +179,8 @@ impl EraRules for EraRulesImpl {
         match self {
             Self::Byron(r) => r.validate_block_body(block, ctx, utxo),
             Self::Shelley(r) => r.validate_block_body(block, ctx, utxo),
+            Self::Alonzo(r) => r.validate_block_body(block, ctx, utxo),
+            Self::Babbage(r) => r.validate_block_body(block, ctx, utxo),
         }
     }
 
@@ -193,6 +197,8 @@ impl EraRules for EraRulesImpl {
         match self {
             Self::Byron(r) => r.apply_valid_tx(tx, mode, ctx, utxo, certs, gov, epochs),
             Self::Shelley(r) => r.apply_valid_tx(tx, mode, ctx, utxo, certs, gov, epochs),
+            Self::Alonzo(r) => r.apply_valid_tx(tx, mode, ctx, utxo, certs, gov, epochs),
+            Self::Babbage(r) => r.apply_valid_tx(tx, mode, ctx, utxo, certs, gov, epochs),
         }
     }
 
@@ -206,6 +212,8 @@ impl EraRules for EraRulesImpl {
         match self {
             Self::Byron(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
             Self::Shelley(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
+            Self::Alonzo(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
+            Self::Babbage(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
         }
     }
 
@@ -226,6 +234,12 @@ impl EraRules for EraRulesImpl {
             Self::Shelley(r) => {
                 r.process_epoch_transition(new_epoch, ctx, utxo, certs, gov, epochs, consensus)
             }
+            Self::Alonzo(r) => {
+                r.process_epoch_transition(new_epoch, ctx, utxo, certs, gov, epochs, consensus)
+            }
+            Self::Babbage(r) => {
+                r.process_epoch_transition(new_epoch, ctx, utxo, certs, gov, epochs, consensus)
+            }
         }
     }
 
@@ -238,6 +252,8 @@ impl EraRules for EraRulesImpl {
         match self {
             Self::Byron(r) => r.evolve_nonce(header, ctx, consensus),
             Self::Shelley(r) => r.evolve_nonce(header, ctx, consensus),
+            Self::Alonzo(r) => r.evolve_nonce(header, ctx, consensus),
+            Self::Babbage(r) => r.evolve_nonce(header, ctx, consensus),
         }
     }
 
@@ -245,6 +261,8 @@ impl EraRules for EraRulesImpl {
         match self {
             Self::Byron(r) => r.min_fee(tx, ctx, utxo),
             Self::Shelley(r) => r.min_fee(tx, ctx, utxo),
+            Self::Alonzo(r) => r.min_fee(tx, ctx, utxo),
+            Self::Babbage(r) => r.min_fee(tx, ctx, utxo),
         }
     }
 
@@ -265,6 +283,12 @@ impl EraRules for EraRulesImpl {
             Self::Shelley(r) => {
                 r.on_era_transition(from_era, ctx, utxo, certs, gov, consensus, epochs)
             }
+            Self::Alonzo(r) => {
+                r.on_era_transition(from_era, ctx, utxo, certs, gov, consensus, epochs)
+            }
+            Self::Babbage(r) => {
+                r.on_era_transition(from_era, ctx, utxo, certs, gov, consensus, epochs)
+            }
         }
     }
 
@@ -279,6 +303,8 @@ impl EraRules for EraRulesImpl {
         match self {
             Self::Byron(r) => r.required_witnesses(tx, ctx, utxo, certs, gov),
             Self::Shelley(r) => r.required_witnesses(tx, ctx, utxo, certs, gov),
+            Self::Alonzo(r) => r.required_witnesses(tx, ctx, utxo, certs, gov),
+            Self::Babbage(r) => r.required_witnesses(tx, ctx, utxo, certs, gov),
         }
     }
 }
