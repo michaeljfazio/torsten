@@ -437,7 +437,7 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
     // proposals requiring CC approval can ratify).
     if let Some((num, den)) = conway_committee_threshold {
         use dugite_primitives::transaction::Rational;
-        std::sync::Arc::make_mut(&mut ledger.governance).committee_threshold = Some(Rational {
+        std::sync::Arc::make_mut(&mut ledger.gov.governance).committee_threshold = Some(Rational {
             numerator: num,
             denominator: den,
         });
@@ -446,7 +446,7 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         use dugite_primitives::hash::Hash32;
         for (hash_bytes, expiration) in &conway_committee_members {
             let cold_key = Hash32::from_bytes(*hash_bytes);
-            std::sync::Arc::make_mut(&mut ledger.governance)
+            std::sync::Arc::make_mut(&mut ledger.gov.governance)
                 .committee_expiration
                 .insert(cold_key, dugite_primitives::EpochNo(*expiration));
         }
@@ -465,13 +465,13 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         // reserves = maxLovelaceSupply - initial fund distribution (Byron genesis)
         // The Byron nonAvvmBalances are distributed at genesis and enter
         // circulation immediately, reducing the reserve pool.
-        ledger.reserves = dugite_primitives::value::Lovelace(
+        ledger.epochs.reserves = dugite_primitives::value::Lovelace(
             sg.max_lovelace_supply.saturating_sub(byron_initial_funds),
         );
         info!(
             max_supply = sg.max_lovelace_supply,
             initial_funds = byron_initial_funds,
-            reserves = ledger.reserves.0,
+            reserves = ledger.epochs.reserves.0,
             "Reserves initialized (maxSupply - initialFunds)"
         );
     }
@@ -572,7 +572,7 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         // Capture the ledger's accumulated epoch fees BEFORE apply_block, so we
         // can compute the delta (actual fees collected by the ledger, which correctly
         // handles invalid tx collateral fees vs declared fees).
-        let fees_before = ledger.epoch_fees.0;
+        let fees_before = ledger.utxo.epoch_fees.0;
 
         if let Err(e) = ledger.apply_block(&block, dugite_ledger::BlockValidationMode::ApplyOnly) {
             if !format!("{e}").contains("Block does not connect") {
@@ -604,9 +604,9 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
             epochs_written += 1;
             info!(
                 epoch = current_epoch,
-                treasury = ledger.treasury.0,
-                reserves = ledger.reserves.0,
-                pools = ledger.pool_params.len(),
+                treasury = ledger.epochs.treasury.0,
+                reserves = ledger.epochs.reserves.0,
+                pools = ledger.certs.pool_params.len(),
                 fees = epoch_fees,
                 era = %format!("{}", ledger.era),
                 "Epoch snapshot dumped"
@@ -616,10 +616,10 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         }
 
         // Use the ledger's own fee tracking (which correctly handles invalid tx
-        // collateral fees). After the epoch transition, ledger.epoch_fees is reset
+        // collateral fees). After the epoch transition, ledger.utxo.epoch_fees is reset
         // and only includes the current block's fees. For inter-epoch blocks, it
         // accumulates the delta since fees_before.
-        let ledger_fees_now = ledger.epoch_fees.0;
+        let ledger_fees_now = ledger.utxo.epoch_fees.0;
         if current_epoch > last_epoch && last_epoch != u64::MAX {
             // Epoch transitioned: fees_before was the OLD epoch's total.
             // The ledger reset epoch_fees and then added this block's fee.
@@ -837,10 +837,11 @@ fn build_epoch_snapshot(
     max_lovelace_supply: u64,
 ) -> serde_json::Value {
     // RC2: totalStake = maxLovelaceSupply - reserves (matches cstreamer).
-    let total_stake = max_lovelace_supply.saturating_sub(ledger.reserves.0);
+    let total_stake = max_lovelace_supply.saturating_sub(ledger.epochs.reserves.0);
 
     // Active stake from the "go" snapshot (used for reward distribution).
     let active_stake: u64 = ledger
+        .epochs
         .snapshots
         .go
         .as_ref()
@@ -849,6 +850,7 @@ fn build_epoch_snapshot(
 
     // Pool distribution from the "set" snapshot with extended cstreamer fields.
     let total_active_stake = ledger
+        .epochs
         .snapshots
         .set
         .as_ref()
@@ -856,6 +858,7 @@ fn build_epoch_snapshot(
         .unwrap_or(0);
 
     let pool_distribution: Vec<serde_json::Value> = ledger
+        .epochs
         .snapshots
         .set
         .as_ref()
@@ -890,10 +893,17 @@ fn build_epoch_snapshot(
         .unwrap_or_default();
 
     // Deposit accounting.
-    let deposit_stake_key = ledger.total_stake_key_deposits;
-    let deposit_pool: u64 = ledger.pool_deposits.values().sum();
-    let deposit_drep: u64 = ledger.governance.dreps.values().map(|r| r.deposit.0).sum();
+    let deposit_stake_key = ledger.certs.total_stake_key_deposits;
+    let deposit_pool: u64 = ledger.certs.pool_deposits.values().sum();
+    let deposit_drep: u64 = ledger
+        .gov
+        .governance
+        .dreps
+        .values()
+        .map(|r| r.deposit.0)
+        .sum();
     let deposit_proposal: u64 = ledger
+        .gov
         .governance
         .proposals
         .values()
@@ -922,7 +932,7 @@ fn build_epoch_snapshot(
 
     // Proposal details for cross-validation debugging.
     let proposal_details: Vec<serde_json::Value> = ledger
-        .governance
+        .gov.governance
         .proposals
         .iter()
         .map(|(id, state)| {
@@ -949,7 +959,7 @@ fn build_epoch_snapshot(
     // Use prev_protocol_params (esPrevPp) to match cstreamer's convention:
     // cstreamer dumps the params that governed the PREVIOUS epoch, not the
     // post-UPEC params for the current epoch.
-    let prev_pp = &ledger.prev_protocol_params;
+    let prev_pp = &ledger.epochs.prev_protocol_params;
     let protocol_params = serde_json::json!({
         "a0": { "numerator": prev_pp.a0.numerator, "denominator": prev_pp.a0.denominator },
         "d":  { "numerator": prev_pp.d.numerator,  "denominator": prev_pp.d.denominator  },
@@ -964,7 +974,7 @@ fn build_epoch_snapshot(
     });
 
     // Pending reward update.
-    let rupd_next: serde_json::Value = match &ledger.pending_reward_update {
+    let rupd_next: serde_json::Value = match &ledger.epochs.pending_reward_update {
         None => serde_json::Value::Null,
         Some(pu) => {
             let total_distributed: u64 = pu.rewards.values().map(|v| v.0).sum();
@@ -982,26 +992,35 @@ fn build_epoch_snapshot(
     //   set  → no blocks (not a Haskell concept)
     //   go   → nesBprev (blocks from previous epoch)
     let snap_mark = ledger
+        .epochs
         .snapshots
         .mark
         .as_ref()
-        .map(|s| serialize_stake_snapshot("mark", s, Some(ledger.epoch_blocks_by_pool.as_ref())))
+        .map(|s| {
+            serialize_stake_snapshot(
+                "mark",
+                s,
+                Some(ledger.consensus.epoch_blocks_by_pool.as_ref()),
+            )
+        })
         .unwrap_or(serde_json::Value::Null);
     let snap_set = ledger
+        .epochs
         .snapshots
         .set
         .as_ref()
         .map(|s| serialize_stake_snapshot("set", s, None))
         .unwrap_or(serde_json::Value::Null);
-    let snap_go = if let Some(s) = ledger.snapshots.go.as_ref() {
+    let snap_go = if let Some(s) = ledger.epochs.snapshots.go.as_ref() {
         serialize_stake_snapshot(
             "go",
             s,
-            Some(ledger.snapshots.bprev_blocks_by_pool.as_ref()),
+            Some(ledger.epochs.snapshots.bprev_blocks_by_pool.as_ref()),
         )
     } else {
         // In Haskell, snapshots are never null — empty SnapShot with nesBprev blocks.
         let bprev_blocks: serde_json::Map<String, serde_json::Value> = ledger
+            .epochs
             .snapshots
             .bprev_blocks_by_pool
             .iter()
@@ -1025,24 +1044,24 @@ fn build_epoch_snapshot(
     serde_json::json!({
         "epoch": epoch,
         "epochFees": epoch_fees,
-        "reserves": ledger.reserves.0,
-        "treasury": ledger.treasury.0,
+        "reserves": ledger.epochs.reserves.0,
+        "treasury": ledger.epochs.treasury.0,
         "totalStake": total_stake,
         "activeStake": active_stake,
         "totalPools": pool_distribution.len(),
         "poolDistribution": pool_distribution,
         "snapshotEraName": format!("{}", ledger.era),
         "enactedRoots": {
-            "PParamUpdate": ledger.governance.enacted_pparam_update.as_ref()
+            "PParamUpdate": ledger.gov.governance.enacted_pparam_update.as_ref()
                 .map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
-            "HardFork": ledger.governance.enacted_hard_fork.as_ref()
+            "HardFork": ledger.gov.governance.enacted_hard_fork.as_ref()
                 .map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
-            "Committee": ledger.governance.enacted_committee.as_ref()
+            "Committee": ledger.gov.governance.enacted_committee.as_ref()
                 .map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
-            "Constitution": ledger.governance.enacted_constitution.as_ref()
+            "Constitution": ledger.gov.governance.enacted_constitution.as_ref()
                 .map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
         },
-        "epochNonce": hex::encode(ledger.epoch_nonce.0),
+        "epochNonce": hex::encode(ledger.consensus.epoch_nonce.0),
         "deposits": {
             "stakeKey": deposit_stake_key,
             "pool": deposit_pool,

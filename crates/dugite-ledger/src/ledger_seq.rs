@@ -728,10 +728,10 @@ pub fn apply_delta_to_state(state: &mut LedgerState, delta: &LedgerDelta) {
 
 fn apply_utxo_diff(state: &mut LedgerState, diff: &UtxoDiff) {
     for (input, output) in &diff.inserts {
-        state.utxo_set.insert(input.clone(), output.clone());
+        state.utxo.utxo_set.insert(input.clone(), output.clone());
     }
     for (input, _output) in &diff.deletes {
-        state.utxo_set.remove(input);
+        state.utxo.utxo_set.remove(input);
     }
 }
 
@@ -745,35 +745,38 @@ fn apply_delegation_change(state: &mut LedgerState, change: &DelegationChange) {
             pointer,
         } => {
             // Ensure reward account exists (registered with 0 balance).
-            Arc::make_mut(&mut state.reward_accounts)
+            Arc::make_mut(&mut state.certs.reward_accounts)
                 .entry(*credential_hash)
                 .or_insert(Lovelace(0));
             if *is_script {
-                state.script_stake_credentials.insert(*credential_hash);
+                state
+                    .certs
+                    .script_stake_credentials
+                    .insert(*credential_hash);
             }
             if let Some(ptr) = pointer {
-                state.pointer_map.insert(*ptr, *credential_hash);
+                state.certs.pointer_map.insert(*ptr, *credential_hash);
             }
         }
         DelegationChange::Deregister {
             credential_hash,
             pointer,
         } => {
-            Arc::make_mut(&mut state.delegations).remove(credential_hash);
-            Arc::make_mut(&mut state.reward_accounts).remove(credential_hash);
-            state.script_stake_credentials.remove(credential_hash);
+            Arc::make_mut(&mut state.certs.delegations).remove(credential_hash);
+            Arc::make_mut(&mut state.certs.reward_accounts).remove(credential_hash);
+            state.certs.script_stake_credentials.remove(credential_hash);
             if let Some(ptr) = pointer {
-                state.pointer_map.remove(ptr);
+                state.certs.pointer_map.remove(ptr);
             }
         }
         DelegationChange::Delegate {
             credential_hash,
             pool_id,
         } => {
-            Arc::make_mut(&mut state.delegations).insert(*credential_hash, *pool_id);
+            Arc::make_mut(&mut state.certs.delegations).insert(*credential_hash, *pool_id);
         }
         DelegationChange::Undelegate { credential_hash } => {
-            Arc::make_mut(&mut state.delegations).remove(credential_hash);
+            Arc::make_mut(&mut state.certs.delegations).remove(credential_hash);
         }
     }
 }
@@ -783,18 +786,19 @@ fn apply_delegation_change(state: &mut LedgerState, change: &DelegationChange) {
 fn apply_pool_change(state: &mut LedgerState, change: &PoolChange) {
     match change {
         PoolChange::Register { params } => {
-            Arc::make_mut(&mut state.pool_params).insert(params.pool_id, params.clone());
+            Arc::make_mut(&mut state.certs.pool_params).insert(params.pool_id, params.clone());
         }
         PoolChange::Reregister { params } => {
             state
+                .certs
                 .future_pool_params
                 .insert(params.pool_id, params.clone());
         }
         PoolChange::Retire { pool_id, epoch } => {
-            state.pending_retirements.insert(*pool_id, *epoch);
+            state.certs.pending_retirements.insert(*pool_id, *epoch);
         }
         PoolChange::CancelRetirement { pool_id } => {
-            state.pending_retirements.remove(pool_id);
+            state.certs.pending_retirements.remove(pool_id);
         }
     }
 }
@@ -807,7 +811,7 @@ fn apply_reward_change(state: &mut LedgerState, change: &RewardChange) {
             credential_hash,
             amount,
         } => {
-            let accounts = Arc::make_mut(&mut state.reward_accounts);
+            let accounts = Arc::make_mut(&mut state.certs.reward_accounts);
             let entry = accounts.entry(*credential_hash).or_insert(Lovelace(0));
             entry.0 = entry.0.saturating_add(amount.0);
         }
@@ -815,18 +819,18 @@ fn apply_reward_change(state: &mut LedgerState, change: &RewardChange) {
             credential_hash,
             amount,
         } => {
-            let accounts = Arc::make_mut(&mut state.reward_accounts);
+            let accounts = Arc::make_mut(&mut state.certs.reward_accounts);
             if let Some(bal) = accounts.get_mut(credential_hash) {
                 bal.0 = bal.0.saturating_sub(amount.0);
             }
         }
         RewardChange::Create { credential_hash } => {
-            Arc::make_mut(&mut state.reward_accounts)
+            Arc::make_mut(&mut state.certs.reward_accounts)
                 .entry(*credential_hash)
                 .or_insert(Lovelace(0));
         }
         RewardChange::Destroy { credential_hash } => {
-            Arc::make_mut(&mut state.reward_accounts).remove(credential_hash);
+            Arc::make_mut(&mut state.certs.reward_accounts).remove(credential_hash);
         }
     }
 }
@@ -834,7 +838,7 @@ fn apply_reward_change(state: &mut LedgerState, change: &RewardChange) {
 // ── Governance ───────────────────────────────────────────────────────────────
 
 fn apply_governance_change(state: &mut LedgerState, change: &GovernanceChange) {
-    let gov = Arc::make_mut(&mut state.governance);
+    let gov = Arc::make_mut(&mut state.gov.governance);
     match change {
         GovernanceChange::DRepRegister {
             credential_hash,
@@ -963,25 +967,25 @@ fn apply_governance_change(state: &mut LedgerState, change: &GovernanceChange) {
 
 fn apply_epoch_transition_delta(state: &mut LedgerState, et: &EpochTransitionDelta) {
     state.epoch = et.new_epoch;
-    state.treasury = et.treasury;
-    state.reserves = et.reserves;
-    state.snapshots = et.snapshots.clone();
-    state.protocol_params = et.protocol_params.clone();
-    state.prev_protocol_params = et.prev_protocol_params.clone();
-    state.prev_d = et.prev_d;
-    state.prev_protocol_version_major = et.prev_protocol_version_major;
-    state.epoch_nonce = et.epoch_nonce;
-    state.last_epoch_block_nonce = et.last_epoch_block_nonce;
-    state.stake_distribution = et.stake_distribution.clone();
+    state.epochs.treasury = et.treasury;
+    state.epochs.reserves = et.reserves;
+    state.epochs.snapshots = et.snapshots.clone();
+    state.epochs.protocol_params = et.protocol_params.clone();
+    state.epochs.prev_protocol_params = et.prev_protocol_params.clone();
+    state.epochs.prev_d = et.prev_d;
+    state.epochs.prev_protocol_version_major = et.prev_protocol_version_major;
+    state.consensus.epoch_nonce = et.epoch_nonce;
+    state.consensus.last_epoch_block_nonce = et.last_epoch_block_nonce;
+    state.certs.stake_distribution = et.stake_distribution.clone();
 
     if et.pending_pp_updates_cleared {
-        state.pending_pp_updates.clear();
-        state.future_pp_updates.clear();
+        state.epochs.pending_pp_updates.clear();
+        state.epochs.future_pp_updates.clear();
     }
 
     // Apply reward credits.
     {
-        let accounts = Arc::make_mut(&mut state.reward_accounts);
+        let accounts = Arc::make_mut(&mut state.certs.reward_accounts);
         for (cred, amount) in &et.reward_credits {
             let bal = accounts.entry(*cred).or_insert(Lovelace(0));
             bal.0 = bal.0.saturating_add(amount.0);
@@ -990,27 +994,30 @@ fn apply_epoch_transition_delta(state: &mut LedgerState, et: &EpochTransitionDel
 
     // Remove retired pools.
     {
-        let pools = Arc::make_mut(&mut state.pool_params);
+        let pools = Arc::make_mut(&mut state.certs.pool_params);
         for pool_id in &et.pools_retired {
             pools.remove(pool_id);
-            state.future_pool_params.remove(pool_id);
+            state.certs.future_pool_params.remove(pool_id);
         }
     }
     // Clean up pending retirements for the epoch just processed.
-    state.pending_retirements.retain(|_, ep| *ep > et.new_epoch);
+    state
+        .certs
+        .pending_retirements
+        .retain(|_, ep| *ep > et.new_epoch);
 
     // Promote future pool params.
     {
-        let pools = Arc::make_mut(&mut state.pool_params);
+        let pools = Arc::make_mut(&mut state.certs.pool_params);
         for (pool_id, params) in &et.future_params_promoted {
             pools.insert(*pool_id, params.clone());
-            state.future_pool_params.remove(pool_id);
+            state.certs.future_pool_params.remove(pool_id);
         }
     }
 
     // Update DRep activity flags.
     {
-        let gov = Arc::make_mut(&mut state.governance);
+        let gov = Arc::make_mut(&mut state.gov.governance);
         for (cred, active) in &et.drep_activity_updates {
             if let Some(drep) = gov.dreps.get_mut(cred) {
                 drep.active = *active;
@@ -1057,9 +1064,9 @@ fn apply_epoch_transition_delta(state: &mut LedgerState, et: &EpochTransitionDel
     }
 
     // Reset per-epoch counters.
-    state.epoch_fees = Lovelace(0);
-    Arc::make_mut(&mut state.epoch_blocks_by_pool).clear();
-    state.epoch_block_count = 0;
+    state.utxo.epoch_fees = Lovelace(0);
+    Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool).clear();
+    state.consensus.epoch_block_count = 0;
 }
 
 // ── Per-block scalar / nonce fields ──────────────────────────────────────────
@@ -1067,14 +1074,14 @@ fn apply_epoch_transition_delta(state: &mut LedgerState, et: &EpochTransitionDel
 fn apply_block_fields(state: &mut LedgerState, fields: &BlockFieldsDelta) {
     // epoch_fees and epoch_block_count are already in the delta as the
     // running totals AFTER this block so we can just assign.
-    state.epoch_fees = fields.epoch_fees;
-    state.epoch_block_count = fields.epoch_block_count;
-    state.evolving_nonce = fields.evolving_nonce;
-    state.candidate_nonce = fields.candidate_nonce;
-    state.lab_nonce = fields.lab_nonce;
+    state.utxo.epoch_fees = fields.epoch_fees;
+    state.consensus.epoch_block_count = fields.epoch_block_count;
+    state.consensus.evolving_nonce = fields.evolving_nonce;
+    state.consensus.candidate_nonce = fields.candidate_nonce;
+    state.consensus.lab_nonce = fields.lab_nonce;
 
     if let Some(pool_id) = fields.pool_block_increment {
-        *Arc::make_mut(&mut state.epoch_blocks_by_pool)
+        *Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool)
             .entry(pool_id)
             .or_insert(0) += 1;
     }
@@ -1295,13 +1302,13 @@ mod tests {
         seq.push(make_delta(1, 1, 5_000_000));
 
         let pre_advance_tip = seq.tip_state();
-        assert_eq!(pre_advance_tip.epoch_fees.0, 5_000_000);
+        assert_eq!(pre_advance_tip.utxo.epoch_fees.0, 5_000_000);
 
         seq.advance_anchor();
         assert!(seq.is_empty());
 
         // Anchor itself should now reflect the fee change.
-        assert_eq!(seq.anchor.epoch_fees.0, 5_000_000);
+        assert_eq!(seq.anchor.utxo.epoch_fees.0, 5_000_000);
     }
 
     #[test]
@@ -1367,7 +1374,7 @@ mod tests {
         }
 
         let tip = seq.tip_state();
-        assert_eq!(tip.epoch_fees.0, 5_000_000);
+        assert_eq!(tip.utxo.epoch_fees.0, 5_000_000);
     }
 
     #[test]
@@ -1387,7 +1394,7 @@ mod tests {
         let state = seq
             .state_at(SlotNo(3), &make_hash(3))
             .expect("slot 3 should be in window");
-        assert_eq!(state.epoch_fees.0, 3_000_000);
+        assert_eq!(state.utxo.epoch_fees.0, 3_000_000);
     }
 
     #[test]
@@ -1435,15 +1442,15 @@ mod tests {
 
         // Verify checkpoint at index 2 has epoch_fees = 3_000_000.
         let cp_state = seq.checkpoints.get(&2).expect("checkpoint at 2");
-        assert_eq!(cp_state.epoch_fees.0, 3_000_000);
+        assert_eq!(cp_state.utxo.epoch_fees.0, 3_000_000);
 
         // Verify checkpoint at index 5 has epoch_fees = 6_000_000.
         let cp_state = seq.checkpoints.get(&5).expect("checkpoint at 5");
-        assert_eq!(cp_state.epoch_fees.0, 6_000_000);
+        assert_eq!(cp_state.utxo.epoch_fees.0, 6_000_000);
 
         // Verify tip (index 8) has epoch_fees = 9_000_000.
         let tip = seq.tip_state();
-        assert_eq!(tip.epoch_fees.0, 9_000_000);
+        assert_eq!(tip.utxo.epoch_fees.0, 9_000_000);
     }
 
     // ── Push / rollback cycle ─────────────────────────────────────────────────
@@ -1461,12 +1468,12 @@ mod tests {
             delta.block_fields.epoch_fees = Lovelace(running);
             seq.push(delta);
         }
-        assert_eq!(seq.tip_state().epoch_fees.0, 5_000_000);
+        assert_eq!(seq.tip_state().utxo.epoch_fees.0, 5_000_000);
 
         // Roll back 2.
         seq.rollback(2);
         assert_eq!(seq.len(), 3);
-        assert_eq!(seq.tip_state().epoch_fees.0, 3_000_000);
+        assert_eq!(seq.tip_state().utxo.epoch_fees.0, 3_000_000);
 
         // Reapply 3 different deltas (fork scenario).
         let mut running = 3_000_000u64;
@@ -1477,7 +1484,7 @@ mod tests {
             seq.push(delta);
         }
         assert_eq!(seq.len(), 6);
-        assert_eq!(seq.tip_state().epoch_fees.0, 4_500_000);
+        assert_eq!(seq.tip_state().utxo.epoch_fees.0, 4_500_000);
     }
 
     // ── Reset anchor ──────────────────────────────────────────────────────────

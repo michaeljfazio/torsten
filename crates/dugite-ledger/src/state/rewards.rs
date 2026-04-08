@@ -114,12 +114,12 @@ impl LedgerState {
     /// computed during the previous epoch transition, matching Haskell's RUPD
     /// deferred application pattern.
     pub(crate) fn apply_pending_reward_update(&mut self) {
-        if let Some(rupd) = self.pending_reward_update.take() {
+        if let Some(rupd) = self.epochs.pending_reward_update.take() {
             // Apply reserves decrease (monetary expansion)
-            self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
+            self.epochs.reserves.0 = self.epochs.reserves.0.saturating_sub(rupd.delta_reserves);
 
             // Apply treasury increase (tau cut + undistributed)
-            self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
+            self.epochs.treasury.0 = self.epochs.treasury.0.saturating_add(rupd.delta_treasury);
 
             // Apply per-account rewards (matching Haskell's applyRUpdFiltered):
             // registered credentials → reward account; unregistered → treasury.
@@ -127,13 +127,13 @@ impl LedgerState {
             let mut unregistered_total = 0u64;
             for (cred_hash, reward) in &rupd.rewards {
                 if reward.0 > 0 {
-                    if self.reward_accounts.contains_key(cred_hash) {
-                        *Arc::make_mut(&mut self.reward_accounts)
+                    if self.certs.reward_accounts.contains_key(cred_hash) {
+                        *Arc::make_mut(&mut self.certs.reward_accounts)
                             .entry(*cred_hash)
                             .or_insert(Lovelace(0)) += *reward;
                         total_applied += reward.0;
                     } else {
-                        self.treasury.0 = self.treasury.0.saturating_add(reward.0);
+                        self.epochs.treasury.0 = self.epochs.treasury.0.saturating_add(reward.0);
                         unregistered_total += reward.0;
                     }
                 }
@@ -207,7 +207,7 @@ impl LedgerState {
     ) -> PendingRewardUpdate {
         // Use prev_protocol_params for ALL parameter values, matching Haskell's
         // startStep which reads from prevPParams (= curPP before the last PPUP).
-        let pp = &self.prev_protocol_params;
+        let pp = &self.epochs.prev_protocol_params;
         let rho_num = pp.rho.numerator as i128;
         let rho_den = pp.rho.denominator.max(1) as i128;
         let tau_num = pp.tau.numerator as i128;
@@ -232,14 +232,14 @@ impl LedgerState {
         // prevPParams = curPParams from the PREVIOUS epoch, captured at
         // the last NEWEPOCH boundary AFTER PPUP updated curPP.
         //
-        // self.prev_d stores the effective d from the previous epoch:
+        // self.epochs.prev_d stores the effective d from the previous epoch:
         // - Alonzo (proto < 7): actual d field value (e.g., 0 from PPUP)
         // - Babbage+ (proto >= 7): 0 (ppDG returns minBound = 0)
         //
         // This two-tier approach ensures:
         // - bprev uses curPP.d (from incrBlocks during the epoch)
         // - RUPD uses prevPP.d (from the previous epoch's curPP)
-        let d = self.prev_d;
+        let d = self.epochs.prev_d;
 
         // Block count comes from the snapshot (Haskell's bprev = BlocksMade
         // from the previous epoch, passed to startStep). For the first RUPD,
@@ -256,7 +256,7 @@ impl LedgerState {
         let expansion = if d >= 0.8 {
             // When d >= 0.8 (highly federated): eta = 1, full expansion.
             // This matches Haskell: "eta | d >= 0.8 = 1"
-            rho.mul(&Rat::from_i128(self.reserves.0 as i128, 1))
+            rho.mul(&Rat::from_i128(self.epochs.reserves.0 as i128, 1))
                 .floor_u64()
         } else {
             // expectedBlocks = floor((1 - d) * f * epochLength)
@@ -299,7 +299,7 @@ impl LedgerState {
 
             // eta = min(1, actual/expected)
             let effective_blocks = actual_blocks.min(expected_blocks);
-            rho.mul(&Rat::from_i128(self.reserves.0 as i128, 1))
+            rho.mul(&Rat::from_i128(self.epochs.reserves.0 as i128, 1))
                 .mul(&Rat::from_i128(
                     effective_blocks as i128,
                     expected_blocks as i128,
@@ -328,7 +328,7 @@ impl LedgerState {
         // where circulation = supply <-> casReserves (maxSupply - reserves).
         // This is distinct from total_active_stake (used only for sigmaA in
         // apparent performance).
-        let total_stake = MAX_LOVELACE_SUPPLY.saturating_sub(self.reserves.0);
+        let total_stake = MAX_LOVELACE_SUPPLY.saturating_sub(self.epochs.reserves.0);
         if total_stake == 0 {
             // No circulation → no rewards. Fee offset still applies.
             let net = treasury_cut.saturating_sub(epoch_fees);
@@ -443,10 +443,10 @@ impl LedgerState {
             // reward pulser. The dropped rewards stay in deltaR2 (back to reserves).
             // For proto > 6 (Babbage+), the prefilter is disabled.
             {
-                let prefilter_active = self.prev_protocol_version_major <= 6;
+                let prefilter_active = self.epochs.prev_protocol_version_major <= 6;
                 if prefilter_active {
                     let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
-                    if !self.reward_accounts.contains_key(&op_key) {
+                    if !self.certs.reward_accounts.contains_key(&op_key) {
                         debug!(
                             pool = ?pool_id.as_bytes()[..4],
                             "Pool excluded: pre-Babbage prefilter (proto <= 6, unregistered reward account)"
@@ -661,15 +661,16 @@ impl LedgerState {
     /// Haskell-compatible RUPD timing.
     #[cfg(test)]
     pub(crate) fn calculate_and_distribute_rewards(&mut self, rupd_snapshot: StakeSnapshot) {
-        // Use self.epoch_fees (matching the live path which uses ss_fee from SNAP).
-        // Tests set state.epoch_fees before calling this function.
-        let rupd = self.calculate_rewards_inner(&rupd_snapshot, &rupd_snapshot, self.epoch_fees.0);
+        // Use self.utxo.epoch_fees (matching the live path which uses ss_fee from SNAP).
+        // Tests set state.utxo.epoch_fees before calling this function.
+        let rupd =
+            self.calculate_rewards_inner(&rupd_snapshot, &rupd_snapshot, self.utxo.epoch_fees.0);
         // Apply immediately (legacy behavior for test compatibility)
-        self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
-        self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
+        self.epochs.reserves.0 = self.epochs.reserves.0.saturating_sub(rupd.delta_reserves);
+        self.epochs.treasury.0 = self.epochs.treasury.0.saturating_add(rupd.delta_treasury);
         for (cred_hash, reward) in &rupd.rewards {
             if reward.0 > 0 {
-                *Arc::make_mut(&mut self.reward_accounts)
+                *Arc::make_mut(&mut self.certs.reward_accounts)
                     .entry(*cred_hash)
                     .or_insert(Lovelace(0)) += *reward;
             }

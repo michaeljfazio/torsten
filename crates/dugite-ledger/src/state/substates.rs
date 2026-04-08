@@ -28,7 +28,6 @@ use super::{
 use dugite_primitives::protocol_params::ProtocolParameters;
 
 /// UTxO state: the unspent transaction output set and per-epoch fee accumulator.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct UtxoSubState {
     pub utxo_set: UtxoSet,
@@ -38,7 +37,6 @@ pub struct UtxoSubState {
 }
 
 /// Delegation and pool state: stake credentials, pool registrations, reward accounts.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CertSubState {
     pub delegations: Arc<HashMap<Hash32, Hash28>>,
@@ -55,14 +53,12 @@ pub struct CertSubState {
 }
 
 /// Governance state: proposals, votes, DReps, committee.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct GovSubState {
     pub governance: Arc<GovernanceState>,
 }
 
 /// Consensus-layer state: nonces, block production counters, opcert tracking.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ConsensusSubState {
     pub evolving_nonce: Hash32,
@@ -83,7 +79,6 @@ pub struct ConsensusSubState {
 /// Protocol parameters live here because they change at epoch boundaries
 /// (via governance enactment or pre-Conway PP update proposals). This allows
 /// `process_epoch_transition` to mutate them via `&mut EpochSubState`.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct EpochSubState {
     pub snapshots: EpochSnapshots,

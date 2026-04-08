@@ -35,13 +35,14 @@ fn add_stake_utxo(state: &mut LedgerState, cred: &Credential, amount: u64) {
         is_legacy: false,
         raw_cbor: None,
     };
-    state.utxo_set.insert(input, output);
+    state.utxo.utxo_set.insert(input, output);
     // Also update the incremental stake_map to mirror what block processing does.
     // In production, stake_map is populated by rebuild_stake_distribution or
     // incrementally during apply_block; tests that bypass block processing need
     // this manual update.
     let key = credential_to_hash(cred);
     *state
+        .certs
         .stake_distribution
         .stake_map
         .entry(key)
@@ -95,7 +96,7 @@ fn setup_dreps_with_stake(state: &mut LedgerState, count: usize, stake_per_drep:
     for i in 0..count {
         let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
         let key = credential_to_hash(&cred);
-        Arc::make_mut(&mut state.governance).dreps.insert(
+        Arc::make_mut(&mut state.gov.governance).dreps.insert(
             key,
             DRepRegistration {
                 credential: cred,
@@ -108,16 +109,17 @@ fn setup_dreps_with_stake(state: &mut LedgerState, count: usize, stake_per_drep:
         );
         // Set up vote delegation and stake
         let stake_key = Hash32::from_bytes([200 + i as u8; 32]);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .vote_delegations
             .insert(stake_key, DRep::KeyHash(key));
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(stake_key, Lovelace(stake_per_drep));
     }
     // Prevent epoch transitions from clearing manually-set stake
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 }
 
 /// Register SPOs with proper delegations and stake.
@@ -126,7 +128,7 @@ fn setup_dreps_with_stake(state: &mut LedgerState, count: usize, stake_per_drep:
 fn setup_spos_with_stake(state: &mut LedgerState, count: usize, stake_per_spo: u64) {
     for i in 0..count {
         let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
-        Arc::make_mut(&mut state.pool_params).insert(
+        Arc::make_mut(&mut state.certs.pool_params).insert(
             pool_id,
             PoolRegistration {
                 pool_id,
@@ -144,14 +146,15 @@ fn setup_spos_with_stake(state: &mut LedgerState, count: usize, stake_per_spo: u
         );
         // Add delegation and stake
         let stake_key = Hash32::from_bytes([150 + i as u8; 32]);
-        Arc::make_mut(&mut state.delegations).insert(stake_key, pool_id);
+        Arc::make_mut(&mut state.certs.delegations).insert(stake_key, pool_id);
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(stake_key, Lovelace(stake_per_spo));
     }
     // Prevent epoch transitions from clearing manually-set stake
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 }
 
 #[test]
@@ -159,7 +162,7 @@ fn test_new_ledger_state() {
     let params = ProtocolParameters::mainnet_defaults();
     let state = LedgerState::new(params);
     assert_eq!(state.tip, Tip::origin());
-    assert!(state.utxo_set.is_empty());
+    assert!(state.utxo.utxo_set.is_empty());
     assert_eq!(state.epoch, EpochNo(0));
 }
 
@@ -183,7 +186,10 @@ fn test_apply_block_with_transaction() {
         is_legacy: false,
         raw_cbor: None,
     };
-    state.utxo_set.insert(genesis_input.clone(), genesis_output);
+    state
+        .utxo
+        .utxo_set
+        .insert(genesis_input.clone(), genesis_output);
 
     let tx_hash = Hash32::from_bytes([2u8; 32]);
     let tx = Transaction {
@@ -247,12 +253,12 @@ fn test_apply_block_with_transaction() {
         .unwrap();
 
     // The genesis UTxO should be spent, new one created
-    assert_eq!(state.utxo_set.len(), 1);
+    assert_eq!(state.utxo.utxo_set.len(), 1);
     let new_input = TransactionInput {
         transaction_id: tx_hash,
         index: 0,
     };
-    assert!(state.utxo_set.contains(&new_input));
+    assert!(state.utxo.utxo_set.contains(&new_input));
     assert_eq!(state.tip.block_number, BlockNo(1));
 }
 
@@ -265,7 +271,7 @@ fn test_apply_block_skips_invalid_tx() {
         transaction_id: Hash32::from_bytes([1u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         genesis_input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -332,8 +338,8 @@ fn test_apply_block_skips_invalid_tx() {
         .unwrap();
 
     // UTxO should be unchanged since tx was invalid
-    assert_eq!(state.utxo_set.len(), 1);
-    assert!(state.utxo_set.contains(&genesis_input));
+    assert_eq!(state.utxo.utxo_set.len(), 1);
+    assert!(state.utxo.utxo_set.contains(&genesis_input));
 }
 
 #[test]
@@ -346,7 +352,7 @@ fn test_process_stake_registration() {
     state.process_certificate(&cert);
 
     let key = credential_to_hash(&cred);
-    assert!(state.stake_distribution.stake_map.contains_key(&key));
+    assert!(state.certs.stake_distribution.stake_map.contains_key(&key));
 }
 
 #[test]
@@ -366,7 +372,7 @@ fn test_process_stake_delegation() {
     });
 
     let key = credential_to_hash(&cred);
-    assert_eq!(state.delegations.get(&key), Some(&pool_hash));
+    assert_eq!(state.certs.delegations.get(&key), Some(&pool_hash));
 }
 
 #[test]
@@ -391,8 +397,11 @@ fn test_process_pool_registration() {
     };
 
     state.process_certificate(&Certificate::PoolRegistration(pool_params));
-    assert!(state.pool_params.contains_key(&pool_id));
-    assert_eq!(state.pool_params[&pool_id].pledge, Lovelace(500_000_000));
+    assert!(state.certs.pool_params.contains_key(&pool_id));
+    assert_eq!(
+        state.certs.pool_params[&pool_id].pledge,
+        Lovelace(500_000_000)
+    );
 }
 
 #[test]
@@ -416,7 +425,7 @@ fn test_process_stake_deregistration() {
 
     // stake_map preserves UTxO-based balances after deregistration
     // (deregistration only removes reward_accounts and delegations)
-    assert!(!state.delegations.contains_key(&key));
+    assert!(!state.certs.delegations.contains_key(&key));
 }
 
 #[test]
@@ -441,7 +450,7 @@ fn test_process_pool_retirement() {
     };
 
     state.process_certificate(&Certificate::PoolRegistration(pool_params));
-    assert!(state.pool_params.contains_key(&pool_id));
+    assert!(state.certs.pool_params.contains_key(&pool_id));
 
     // Schedule retirement at epoch 2
     state.process_certificate(&Certificate::PoolRetirement {
@@ -449,13 +458,13 @@ fn test_process_pool_retirement() {
         epoch: 2,
     });
     // Pool still exists (retirement is pending)
-    assert!(state.pool_params.contains_key(&pool_id));
-    assert!(state.pending_retirements.get(&pool_id) == Some(&EpochNo(2)));
+    assert!(state.certs.pool_params.contains_key(&pool_id));
+    assert!(state.certs.pending_retirements.get(&pool_id) == Some(&EpochNo(2)));
 
     // Trigger epoch transition to epoch 2
     state.process_epoch_transition(EpochNo(2));
     // Now the pool should be retired
-    assert!(!state.pool_params.contains_key(&pool_id));
+    assert!(!state.certs.pool_params.contains_key(&pool_id));
 }
 
 #[test]
@@ -495,29 +504,29 @@ fn test_epoch_transition_snapshots() {
 
     // Epoch 0 -> 1: first snapshot taken
     state.process_epoch_transition(EpochNo(1));
-    assert!(state.snapshots.mark.is_some());
-    assert!(state.snapshots.set.is_none());
-    assert!(state.snapshots.go.is_none());
+    assert!(state.epochs.snapshots.mark.is_some());
+    assert!(state.epochs.snapshots.set.is_none());
+    assert!(state.epochs.snapshots.go.is_none());
 
-    let mark = state.snapshots.mark.as_ref().unwrap();
+    let mark = state.epochs.snapshots.mark.as_ref().unwrap();
     assert_eq!(mark.pool_stake[&pool_id], Lovelace(1_000_000));
 
     // Epoch 1 -> 2: mark becomes set
     state.process_epoch_transition(EpochNo(2));
-    assert!(state.snapshots.mark.is_some());
-    assert!(state.snapshots.set.is_some());
-    assert!(state.snapshots.go.is_none());
+    assert!(state.epochs.snapshots.mark.is_some());
+    assert!(state.epochs.snapshots.set.is_some());
+    assert!(state.epochs.snapshots.go.is_none());
 
-    let set = state.snapshots.set.as_ref().unwrap();
+    let set = state.epochs.snapshots.set.as_ref().unwrap();
     assert_eq!(set.epoch, EpochNo(1));
 
     // Epoch 2 -> 3: set becomes go
     state.process_epoch_transition(EpochNo(3));
-    assert!(state.snapshots.mark.is_some());
-    assert!(state.snapshots.set.is_some());
-    assert!(state.snapshots.go.is_some());
+    assert!(state.epochs.snapshots.mark.is_some());
+    assert!(state.epochs.snapshots.set.is_some());
+    assert!(state.epochs.snapshots.go.is_some());
 
-    let go = state.snapshots.go.as_ref().unwrap();
+    let go = state.epochs.snapshots.go.as_ref().unwrap();
     assert_eq!(go.epoch, EpochNo(1));
 }
 
@@ -542,7 +551,7 @@ fn test_epoch_transition_in_apply_block() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
     assert_eq!(state.epoch, EpochNo(1));
-    assert!(state.snapshots.mark.is_some());
+    assert!(state.epochs.snapshots.mark.is_some());
 }
 
 #[test]
@@ -555,7 +564,7 @@ fn test_fee_accumulation() {
         transaction_id: Hash32::from_bytes([1u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         genesis_input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -629,7 +638,7 @@ fn test_fee_accumulation() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
 
-    assert_eq!(state.epoch_fees, Lovelace(200_000));
+    assert_eq!(state.utxo.epoch_fees, Lovelace(200_000));
 }
 
 #[test]
@@ -638,7 +647,7 @@ fn test_reward_calculation() {
     let mut state = LedgerState::new(params);
     state.epoch_length = 432000; // Mainnet epoch length
                                  // Realistic reserves: 10 billion ADA
-    state.reserves = Lovelace(10_000_000_000_000_000);
+    state.epochs.reserves = Lovelace(10_000_000_000_000_000);
 
     let owner_hash = Hash28::from_bytes([42u8; 28]);
     let cred = Credential::VerificationKey(owner_hash);
@@ -680,9 +689,9 @@ fn test_reward_calculation() {
 
     // Pool produced blocks proportional to its stake
     // expected_blocks = epoch_length * active_slot_coeff = 432000 * 0.05 = 21600
-    state.epoch_fees = Lovelace(500_000_000_000); // 500k ADA fees
-    Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
-    state.epoch_block_count = 21600;
+    state.utxo.epoch_fees = Lovelace(500_000_000_000); // 500k ADA fees
+    Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool).insert(pool_id, 21600);
+    state.consensus.epoch_block_count = 21600;
 
     // Epoch 3->4: triggers reward CALCULATION using "go" snapshot.
     // With RUPD deferred timing, rewards are computed here but not yet applied.
@@ -693,13 +702,13 @@ fn test_reward_calculation() {
     state.process_epoch_transition(EpochNo(5));
 
     // Treasury should have increased (rewards applied at 4->5)
-    assert!(state.treasury.0 > 0);
+    assert!(state.epochs.treasury.0 > 0);
 
     // Reserves should have decreased
-    assert!(state.reserves.0 < 10_000_000_000_000_000);
+    assert!(state.epochs.reserves.0 < 10_000_000_000_000_000);
 
     // Reward accounts should have received rewards
-    let total_rewards: u64 = state.reward_accounts.values().map(|l| l.0).sum();
+    let total_rewards: u64 = state.certs.reward_accounts.values().map(|l| l.0).sum();
     assert!(
         total_rewards > 0,
         "Expected rewards > 0, got {total_rewards}"
@@ -711,7 +720,7 @@ fn test_reward_calculation_no_blocks_no_rewards() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 432000;
-    state.reserves = Lovelace(10_000_000_000_000_000);
+    state.epochs.reserves = Lovelace(10_000_000_000_000_000);
 
     let owner_hash = Hash28::from_bytes([42u8; 28]);
     let cred = Credential::VerificationKey(owner_hash);
@@ -724,6 +733,7 @@ fn test_reward_calculation_no_blocks_no_rewards() {
     // Setup delegation
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(key, Lovelace(50_000_000_000_000));
@@ -754,9 +764,9 @@ fn test_reward_calculation_no_blocks_no_rewards() {
     state.process_epoch_transition(EpochNo(3));
 
     // No blocks produced but some fees collected
-    state.epoch_fees = Lovelace(100_000_000); // Some fees from prior blocks
-                                              // epoch_blocks_by_pool is empty — no pool produced blocks
-    state.epoch_block_count = 0;
+    state.utxo.epoch_fees = Lovelace(100_000_000); // Some fees from prior blocks
+                                                   // epoch_blocks_by_pool is empty — no pool produced blocks
+    state.consensus.epoch_block_count = 0;
 
     // Epoch 3->4: computes rewards (deferred via RUPD)
     state.process_epoch_transition(EpochNo(4));
@@ -766,10 +776,10 @@ fn test_reward_calculation_no_blocks_no_rewards() {
     // Pool produced no blocks, so performance = 0, no pool rewards
     // eta = 0, so expansion = 0, but fees still contribute to reward pot
     // All pool pot (from fees) goes to treasury as undistributed
-    let member_rewards: u64 = state.reward_accounts.values().map(|l| l.0).sum();
+    let member_rewards: u64 = state.certs.reward_accounts.values().map(|l| l.0).sum();
     assert_eq!(member_rewards, 0);
     // Treasury gets treasury_cut from fees + undistributed
-    assert!(state.treasury.0 > 0);
+    assert!(state.epochs.treasury.0 > 0);
 }
 
 #[test]
@@ -782,7 +792,7 @@ fn test_expected_blocks_zero_clamped_to_one() {
     params.active_slots_coeff = 1e-10;
     let mut state = LedgerState::new(params);
     state.epoch_length = 432000;
-    state.reserves = Lovelace(10_000_000_000_000_000);
+    state.epochs.reserves = Lovelace(10_000_000_000_000_000);
 
     let owner_hash = Hash28::from_bytes([42u8; 28]);
     let cred = Credential::VerificationKey(owner_hash);
@@ -820,12 +830,12 @@ fn test_expected_blocks_zero_clamped_to_one() {
     state.process_epoch_transition(EpochNo(3));
 
     // Simulate 1 block produced and some fees — should NOT panic
-    state.epoch_fees = Lovelace(500_000_000_000);
-    Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 1);
-    state.epoch_block_count = 1;
+    state.utxo.epoch_fees = Lovelace(500_000_000_000);
+    Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool).insert(pool_id, 1);
+    state.consensus.epoch_block_count = 1;
 
-    let reserves_before = state.reserves.0;
-    let treasury_before = state.treasury.0;
+    let reserves_before = state.epochs.reserves.0;
+    let treasury_before = state.epochs.treasury.0;
 
     // Epoch 3->4: computes rewards (deferred via RUPD); would divide by zero without the fix
     state.process_epoch_transition(EpochNo(4));
@@ -834,14 +844,14 @@ fn test_expected_blocks_zero_clamped_to_one() {
 
     // Verify the system did not panic and rewards were distributed
     assert!(
-        state.treasury.0 > treasury_before,
+        state.epochs.treasury.0 > treasury_before,
         "Treasury should increase from reward distribution"
     );
     assert!(
-        state.reserves.0 < reserves_before,
+        state.epochs.reserves.0 < reserves_before,
         "Reserves should decrease from monetary expansion"
     );
-    let total_rewards: u64 = state.reward_accounts.values().map(|l| l.0).sum();
+    let total_rewards: u64 = state.certs.reward_accounts.values().map(|l| l.0).sum();
     assert!(
         total_rewards > 0,
         "Expected rewards > 0 with clamped expected_blocks, got {total_rewards}"
@@ -854,7 +864,7 @@ fn test_reward_pledge_not_met_zero_rewards() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 432000;
-    state.reserves = Lovelace(10_000_000_000_000_000);
+    state.epochs.reserves = Lovelace(10_000_000_000_000_000);
 
     let owner_hash = Hash28::from_bytes([42u8; 28]);
     let cred = Credential::VerificationKey(owner_hash);
@@ -867,6 +877,7 @@ fn test_reward_pledge_not_met_zero_rewards() {
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
     // Owner has only 1M ADA delegated
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(key, Lovelace(1_000_000_000_000));
@@ -896,21 +907,21 @@ fn test_reward_pledge_not_met_zero_rewards() {
     state.process_epoch_transition(EpochNo(3));
 
     // expected_blocks = 432000 * 0.05 = 21600
-    state.epoch_fees = Lovelace(500_000_000_000);
-    Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
-    state.epoch_block_count = 21600;
+    state.utxo.epoch_fees = Lovelace(500_000_000_000);
+    Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool).insert(pool_id, 21600);
+    state.consensus.epoch_block_count = 21600;
     // Epoch 3->4: computes rewards (deferred via RUPD)
     state.process_epoch_transition(EpochNo(4));
     // Epoch 4->5: applies the deferred rewards
     state.process_epoch_transition(EpochNo(5));
 
     // No pool rewards when pledge not met — all goes to treasury as undistributed
-    let member_rewards: u64 = state.reward_accounts.values().map(|l| l.0).sum();
+    let member_rewards: u64 = state.certs.reward_accounts.values().map(|l| l.0).sum();
     assert_eq!(
         member_rewards, 0,
         "Pledge-unmet pool should get zero rewards"
     );
-    assert!(state.treasury.0 > 0);
+    assert!(state.epochs.treasury.0 > 0);
 }
 
 #[test]
@@ -919,7 +930,7 @@ fn test_reward_operator_gets_registered_reward_account() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 432000;
-    state.reserves = Lovelace(10_000_000_000_000_000);
+    state.epochs.reserves = Lovelace(10_000_000_000_000_000);
 
     let owner_hash = Hash28::from_bytes([42u8; 28]);
     let cred = Credential::VerificationKey(owner_hash);
@@ -957,9 +968,9 @@ fn test_reward_operator_gets_registered_reward_account() {
     state.process_epoch_transition(EpochNo(3));
 
     // expected_blocks = 432000 * 0.05 = 21600
-    state.epoch_fees = Lovelace(500_000_000_000);
-    Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 21600);
-    state.epoch_block_count = 21600;
+    state.utxo.epoch_fees = Lovelace(500_000_000_000);
+    Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool).insert(pool_id, 21600);
+    state.consensus.epoch_block_count = 21600;
     // Epoch 3->4: computes rewards (deferred via RUPD)
     state.process_epoch_transition(EpochNo(4));
     // Epoch 4->5: applies the deferred rewards
@@ -968,6 +979,7 @@ fn test_reward_operator_gets_registered_reward_account() {
     // Operator reward should go to owner_hash credential, not pool_id padded to 32
     let reward_key = credential_to_hash(&Credential::VerificationKey(owner_hash));
     let owner_reward = state
+        .certs
         .reward_accounts
         .get(&reward_key)
         .copied()
@@ -980,6 +992,7 @@ fn test_reward_operator_gets_registered_reward_account() {
     // Pool_id padded to 32 bytes should NOT have rewards (old bug)
     let pool_key = pool_id.to_hash32_padded();
     let pool_id_reward = state
+        .certs
         .reward_accounts
         .get(&pool_key)
         .copied()
@@ -999,8 +1012,8 @@ fn test_stake_registration_creates_reward_account() {
     let key = credential_to_hash(&cred);
 
     state.process_certificate(&Certificate::StakeRegistration(cred));
-    assert!(state.reward_accounts.contains_key(&key));
-    assert_eq!(state.reward_accounts[&key], Lovelace(0));
+    assert!(state.certs.reward_accounts.contains_key(&key));
+    assert_eq!(state.certs.reward_accounts[&key], Lovelace(0));
 }
 
 #[test]
@@ -1012,10 +1025,10 @@ fn test_stake_deregistration_removes_reward_account() {
     let key = credential_to_hash(&cred);
 
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
-    assert!(state.reward_accounts.contains_key(&key));
+    assert!(state.certs.reward_accounts.contains_key(&key));
 
     state.process_certificate(&Certificate::StakeDeregistration(cred));
-    assert!(!state.reward_accounts.contains_key(&key));
+    assert!(!state.certs.reward_accounts.contains_key(&key));
 }
 
 #[test]
@@ -1024,14 +1037,14 @@ fn test_epoch_fee_reset_on_transition() {
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
 
-    state.epoch_fees = Lovelace(1_000_000);
-    state.epoch_block_count = 10;
+    state.utxo.epoch_fees = Lovelace(1_000_000);
+    state.consensus.epoch_block_count = 10;
 
     state.process_epoch_transition(EpochNo(1));
 
-    assert_eq!(state.epoch_fees, Lovelace(0));
-    assert_eq!(state.epoch_block_count, 0);
-    assert!(state.epoch_blocks_by_pool.is_empty());
+    assert_eq!(state.utxo.epoch_fees, Lovelace(0));
+    assert_eq!(state.consensus.epoch_block_count, 0);
+    assert!(state.consensus.epoch_blocks_by_pool.is_empty());
 }
 
 #[test]
@@ -1055,12 +1068,12 @@ fn test_epoch_nonce_computation() {
     state.set_genesis_hash(genesis_hash);
 
     // evolving, candidate, epoch all start from genesis hash
-    assert_eq!(state.evolving_nonce, genesis_hash);
-    assert_eq!(state.candidate_nonce, genesis_hash);
-    assert_eq!(state.epoch_nonce, genesis_hash);
+    assert_eq!(state.consensus.evolving_nonce, genesis_hash);
+    assert_eq!(state.consensus.candidate_nonce, genesis_hash);
+    assert_eq!(state.consensus.epoch_nonce, genesis_hash);
     // lab and lastEpochBlock start as NeutralNonce (ZERO)
-    assert_eq!(state.lab_nonce, Hash32::ZERO);
-    assert_eq!(state.last_epoch_block_nonce, Hash32::ZERO);
+    assert_eq!(state.consensus.lab_nonce, Hash32::ZERO);
+    assert_eq!(state.consensus.last_epoch_block_nonce, Hash32::ZERO);
 
     // Apply a block BEFORE the stabilisation window (slot 10; epoch ends at slot 100;
     // stabilisation starts at slot 60; so slot 10 < 60 means candidate tracks evolving).
@@ -1092,18 +1105,21 @@ fn test_epoch_nonce_computation() {
     expected_evolving.extend_from_slice(genesis_hash.as_bytes());
     expected_evolving.extend_from_slice(eta_hash.as_bytes());
     assert_eq!(
-        state.evolving_nonce,
+        state.consensus.evolving_nonce,
         dugite_primitives::hash::blake2b_256(&expected_evolving),
         "evolving_nonce should be blake2b_256(genesis || blake2b_256(nonce_vrf_output))"
     );
     // Candidate nonce tracks evolving (not in stabilisation window)
-    assert_eq!(state.candidate_nonce, state.evolving_nonce);
+    assert_eq!(
+        state.consensus.candidate_nonce,
+        state.consensus.evolving_nonce
+    );
     // LAB nonce = prevHashToNonce(block.prevHash) = prev_hash of the applied block
-    assert_eq!(state.lab_nonce, block.header.prev_hash);
+    assert_eq!(state.consensus.lab_nonce, block.header.prev_hash);
 
     // Apply a block INSIDE the stabilisation window (slot 70 + 40 >= 100)
-    let evolving_before = state.evolving_nonce;
-    let candidate_before = state.candidate_nonce;
+    let evolving_before = state.consensus.evolving_nonce;
+    let candidate_before = state.consensus.candidate_nonce;
     let mut block2 = make_test_block(70, 2, *block.hash(), vec![]);
     block2.header.nonce_vrf_output = vec![0x63u8; 32];
     block2.header.vrf_result.output = vec![0x63u8; 32];
@@ -1113,11 +1129,11 @@ fn test_epoch_nonce_computation() {
         .unwrap();
 
     // Evolving nonce STILL updates (evolving_nonce advances for every block)
-    assert_ne!(state.evolving_nonce, evolving_before);
+    assert_ne!(state.consensus.evolving_nonce, evolving_before);
     // Candidate nonce is FROZEN (in stabilisation window, slot >= epoch_end - rsw)
-    assert_eq!(state.candidate_nonce, candidate_before);
+    assert_eq!(state.consensus.candidate_nonce, candidate_before);
     // LAB nonce = prevHashToNonce(block2.prevHash) = prev_hash of block2 applied
-    assert_eq!(state.lab_nonce, block2.header.prev_hash);
+    assert_eq!(state.consensus.lab_nonce, block2.header.prev_hash);
 
     // Trigger epoch transition (epoch 0 → 1).
     //
@@ -1134,18 +1150,18 @@ fn test_epoch_nonce_computation() {
     //   - lastEpochBlockNonce = NeutralNonce (initialized in set_genesis_hash)
     //   - epochNonce' = candidateNonce ⭒ NeutralNonce = candidateNonce  (identity)
     //   - lastEpochBlockNonce' = labNonce (= block2.header.prev_hash)
-    let nonce_before_transition = state.epoch_nonce;
-    let candidate_at_transition = state.candidate_nonce;
-    let lab_at_transition = state.lab_nonce;
-    let last_epoch_block_before = state.last_epoch_block_nonce; // ZERO at first transition
+    let nonce_before_transition = state.consensus.epoch_nonce;
+    let candidate_at_transition = state.consensus.candidate_nonce;
+    let lab_at_transition = state.consensus.lab_nonce;
+    let last_epoch_block_before = state.consensus.last_epoch_block_nonce; // ZERO at first transition
     state.process_epoch_transition(EpochNo(1));
 
     // epoch_nonce should have been updated from genesis_hash
-    assert_ne!(state.epoch_nonce, nonce_before_transition);
+    assert_ne!(state.consensus.epoch_nonce, nonce_before_transition);
     // evolving_nonce carries forward (NOT reset at epoch boundary)
-    assert_ne!(state.evolving_nonce, Hash32::ZERO);
+    assert_ne!(state.consensus.evolving_nonce, Hash32::ZERO);
     // last_epoch_block_nonce is updated to lab_nonce AFTER epoch_nonce is computed
-    assert_eq!(state.last_epoch_block_nonce, lab_at_transition);
+    assert_eq!(state.consensus.last_epoch_block_nonce, lab_at_transition);
 
     assert_eq!(
         last_epoch_block_before,
@@ -1161,7 +1177,7 @@ fn test_epoch_nonce_computation() {
     // designed for normal epochs where lastEpochBlockNonce is always a real hash.
     // At genesis, the Haskell type system gives NeutralNonce identity behavior.
     assert_eq!(
-        state.epoch_nonce,
+        state.consensus.epoch_nonce,
         candidate_at_transition,
         "At first epoch boundary (lastEpochBlockNonce=NeutralNonce), epoch_nonce = candidateNonce (⭒ identity)"
     );
@@ -1184,9 +1200,12 @@ fn test_drep_registration() {
         }),
     });
 
-    assert!(state.governance.dreps.contains_key(&key));
-    assert_eq!(state.governance.dreps[&key].deposit, Lovelace(500_000_000));
-    assert_eq!(state.governance.drep_registration_count, 1);
+    assert!(state.gov.governance.dreps.contains_key(&key));
+    assert_eq!(
+        state.gov.governance.dreps[&key].deposit,
+        Lovelace(500_000_000)
+    );
+    assert_eq!(state.gov.governance.drep_registration_count, 1);
 }
 
 #[test]
@@ -1203,14 +1222,14 @@ fn test_drep_deregistration() {
         deposit: Lovelace(500_000_000),
         anchor: None,
     });
-    assert!(state.governance.dreps.contains_key(&key));
+    assert!(state.gov.governance.dreps.contains_key(&key));
 
     // Deregister
     state.process_certificate(&Certificate::UnregDRep {
         credential: cred,
         refund: Lovelace(500_000_000),
     });
-    assert!(!state.governance.dreps.contains_key(&key));
+    assert!(!state.gov.governance.dreps.contains_key(&key));
 }
 
 #[test]
@@ -1227,7 +1246,7 @@ fn test_drep_update() {
         deposit: Lovelace(500_000_000),
         anchor: None,
     });
-    assert!(state.governance.dreps[&key].anchor.is_none());
+    assert!(state.gov.governance.dreps[&key].anchor.is_none());
 
     // Update with anchor
     state.process_certificate(&Certificate::UpdateDRep {
@@ -1237,7 +1256,7 @@ fn test_drep_update() {
             data_hash: Hash32::ZERO,
         }),
     });
-    assert!(state.governance.dreps[&key].anchor.is_some());
+    assert!(state.gov.governance.dreps[&key].anchor.is_some());
 }
 
 #[test]
@@ -1261,7 +1280,7 @@ fn test_drep_activity_tracking() {
             v.extend_from_slice(&[0xAAu8; 28]);
             v
         };
-        let gov = Arc::make_mut(&mut state.governance);
+        let gov = Arc::make_mut(&mut state.gov.governance);
         gov.proposals.insert(
             GovActionId {
                 transaction_id: Hash32::from_bytes([0xDDu8; 32]),
@@ -1298,7 +1317,10 @@ fn test_drep_activity_tracking() {
         deposit: Lovelace(500_000_000),
         anchor: None,
     });
-    assert_eq!(state.governance.dreps[&key].last_active_epoch, EpochNo(0));
+    assert_eq!(
+        state.gov.governance.dreps[&key].last_active_epoch,
+        EpochNo(0)
+    );
 
     // Update at epoch 3 — should update last_active_epoch
     state.epoch = EpochNo(3);
@@ -1306,20 +1328,26 @@ fn test_drep_activity_tracking() {
         credential: cred,
         anchor: None,
     });
-    assert_eq!(state.governance.dreps[&key].last_active_epoch, EpochNo(3));
+    assert_eq!(
+        state.gov.governance.dreps[&key].last_active_epoch,
+        EpochNo(3)
+    );
 
     // Epoch transition to epoch 7 — DRep last active at epoch 3, threshold is 5
     // 7 - 3 = 4, which is not > 5, so DRep should remain active
     state.process_epoch_transition(EpochNo(7));
-    assert!(state.governance.dreps.contains_key(&key));
-    assert!(state.governance.dreps[&key].active);
+    assert!(state.gov.governance.dreps.contains_key(&key));
+    assert!(state.gov.governance.dreps[&key].active);
 
     // Epoch transition to epoch 9 — 9 - 3 = 6 > 5, so DRep should be marked inactive
     // Per CIP-1694: inactive DReps remain registered but are excluded from voting power
     state.process_epoch_transition(EpochNo(9));
-    assert!(state.governance.dreps.contains_key(&key)); // Still registered
-    assert!(!state.governance.dreps[&key].active); // But inactive
-    assert_eq!(state.governance.dreps[&key].deposit, Lovelace(500_000_000));
+    assert!(state.gov.governance.dreps.contains_key(&key)); // Still registered
+    assert!(!state.gov.governance.dreps[&key].active); // But inactive
+    assert_eq!(
+        state.gov.governance.dreps[&key].deposit,
+        Lovelace(500_000_000)
+    );
     // Deposit retained
 }
 
@@ -1334,29 +1362,33 @@ fn test_committee_expiration_during_epoch_transition() {
     let hot1 = Hash32::from_bytes([11u8; 32]);
     let hot2 = Hash32::from_bytes([12u8; 32]);
 
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .committee_hot_keys
         .insert(cold1, hot1);
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .committee_expiration
         .insert(cold1, EpochNo(5));
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .committee_hot_keys
         .insert(cold2, hot2);
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .committee_expiration
         .insert(cold2, EpochNo(10));
 
     // At epoch 5, cold1 should be expired
     state.process_epoch_transition(EpochNo(5));
-    assert!(!state.governance.committee_hot_keys.contains_key(&cold1));
-    assert!(!state.governance.committee_expiration.contains_key(&cold1));
+    assert!(!state.gov.governance.committee_hot_keys.contains_key(&cold1));
+    assert!(!state
+        .gov
+        .governance
+        .committee_expiration
+        .contains_key(&cold1));
     // cold2 should remain
-    assert!(state.governance.committee_hot_keys.contains_key(&cold2));
+    assert!(state.gov.governance.committee_hot_keys.contains_key(&cold2));
 
     // At epoch 10, cold2 should be expired
     state.process_epoch_transition(EpochNo(10));
-    assert!(!state.governance.committee_hot_keys.contains_key(&cold2));
+    assert!(!state.gov.governance.committee_hot_keys.contains_key(&cold2));
 }
 
 #[test]
@@ -1364,7 +1396,7 @@ fn test_constitution_storage() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
 
-    assert!(state.governance.constitution.is_none());
+    assert!(state.gov.governance.constitution.is_none());
 
     // Enact a NewConstitution governance action
     let constitution = Constitution {
@@ -1379,7 +1411,7 @@ fn test_constitution_storage() {
         constitution: constitution.clone(),
     });
 
-    let stored = state.governance.constitution.as_ref().unwrap();
+    let stored = state.gov.governance.constitution.as_ref().unwrap();
     assert_eq!(stored.anchor.url, "https://constitution.cardano.org");
     assert!(stored.script_hash.is_some());
 }
@@ -1405,7 +1437,7 @@ fn test_drep_marked_inactive_on_expiry() {
             v.extend_from_slice(&[0xAAu8; 28]);
             v
         };
-        let gov = Arc::make_mut(&mut state.governance);
+        let gov = Arc::make_mut(&mut state.gov.governance);
         gov.proposals.insert(
             GovActionId {
                 transaction_id: Hash32::from_bytes([0xDDu8; 32]),
@@ -1442,17 +1474,20 @@ fn test_drep_marked_inactive_on_expiry() {
         deposit: Lovelace(500_000_000),
         anchor: None,
     });
-    assert!(state.governance.dreps.contains_key(&key));
-    assert!(state.governance.dreps[&key].active);
+    assert!(state.gov.governance.dreps.contains_key(&key));
+    assert!(state.gov.governance.dreps[&key].active);
 
     // At epoch 3 (0 + 2 < 3, so inactive): DRep should be marked inactive but NOT removed
     state.process_epoch_transition(EpochNo(3));
-    assert!(state.governance.dreps.contains_key(&key)); // Still registered
-    assert!(!state.governance.dreps[&key].active); // But inactive
-    assert_eq!(state.governance.dreps[&key].deposit, Lovelace(500_000_000)); // Deposit retained
+    assert!(state.gov.governance.dreps.contains_key(&key)); // Still registered
+    assert!(!state.gov.governance.dreps[&key].active); // But inactive
+    assert_eq!(
+        state.gov.governance.dreps[&key].deposit,
+        Lovelace(500_000_000)
+    ); // Deposit retained
 
     // Deposit should NOT be refunded (DRep still registered)
-    assert!(!state.reward_accounts.contains_key(&key));
+    assert!(!state.certs.reward_accounts.contains_key(&key));
 }
 
 #[test]
@@ -1467,7 +1502,7 @@ fn test_governance_proposal_deposit_refund() {
     let reward_key = Hash28::from_bytes([42u8; 28]).to_hash32_padded();
     // Register the return credential so the deposit refund goes to the
     // reward account (not treasury, per Haskell `returnProposalDeposits`).
-    Arc::make_mut(&mut state.reward_accounts).insert(reward_key, Lovelace(0));
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(reward_key, Lovelace(0));
 
     // Submit a proposal with deposit
     let proposal = ProposalProcedure {
@@ -1480,24 +1515,24 @@ fn test_governance_proposal_deposit_refund() {
         },
     };
     state.process_proposal(&Hash32::from_bytes([1u8; 32]), 0, &proposal);
-    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
 
     // Advance past expiry (default lifetime is 6, expires_epoch = 0+6=6)
     // Expiry filter: expires_epoch < self.epoch (old epoch before transition)
     // At transition to 7, self.epoch=6, 6 < 6 = false → still active
     // At transition to 8, self.epoch=7, 6 < 7 = true → expired
     state.process_epoch_transition(EpochNo(6));
-    assert_eq!(state.governance.proposals.len(), 1); // still active through epoch 6
+    assert_eq!(state.gov.governance.proposals.len(), 1); // still active through epoch 6
     state.process_epoch_transition(EpochNo(7));
-    assert_eq!(state.governance.proposals.len(), 1); // still active (6 < 6 = false)
+    assert_eq!(state.gov.governance.proposals.len(), 1); // still active (6 < 6 = false)
     state.process_epoch_transition(EpochNo(8));
 
     // Proposal should be expired
-    assert!(state.governance.proposals.is_empty());
+    assert!(state.gov.governance.proposals.is_empty());
 
     // Deposit should be refunded
     assert_eq!(
-        state.reward_accounts.get(&reward_key),
+        state.certs.reward_accounts.get(&reward_key),
         Some(&Lovelace(100_000_000_000))
     );
 }
@@ -1508,7 +1543,7 @@ fn test_treasury_withdrawal_credits_reward_account() {
     let mut state = LedgerState::new(params);
 
     // Give treasury some funds
-    state.treasury = Lovelace(1_000_000_000_000);
+    state.epochs.treasury = Lovelace(1_000_000_000_000);
 
     // Build recipient reward address
     let mut reward_addr = vec![0xE1u8];
@@ -1525,11 +1560,11 @@ fn test_treasury_withdrawal_credits_reward_account() {
     });
 
     // Treasury should be debited
-    assert_eq!(state.treasury.0, 950_000_000_000);
+    assert_eq!(state.epochs.treasury.0, 950_000_000_000);
 
     // Reward account should be credited
     assert_eq!(
-        state.reward_accounts.get(&reward_key),
+        state.certs.reward_accounts.get(&reward_key),
         Some(&Lovelace(50_000_000_000))
     );
 }
@@ -1547,7 +1582,7 @@ fn test_vote_delegation() {
         drep: DRep::Abstain,
     });
 
-    assert_eq!(state.governance.vote_delegations[&key], DRep::Abstain);
+    assert_eq!(state.gov.governance.vote_delegations[&key], DRep::Abstain);
 }
 
 #[test]
@@ -1566,8 +1601,11 @@ fn test_stake_vote_delegation() {
     });
 
     // Both delegations should be set
-    assert_eq!(state.delegations[&key], pool_id);
-    assert_eq!(state.governance.vote_delegations[&key], DRep::NoConfidence);
+    assert_eq!(state.certs.delegations[&key], pool_id);
+    assert_eq!(
+        state.gov.governance.vote_delegations[&key],
+        DRep::NoConfidence
+    );
 }
 
 #[test]
@@ -1585,7 +1623,7 @@ fn test_committee_hot_auth() {
         hot_credential: hot,
     });
 
-    assert_eq!(state.governance.committee_hot_keys[&cold_key], hot_key);
+    assert_eq!(state.gov.governance.committee_hot_keys[&cold_key], hot_key);
 }
 
 #[test]
@@ -1602,15 +1640,27 @@ fn test_committee_cold_resign() {
         cold_credential: cold.clone(),
         hot_credential: hot,
     });
-    assert!(state.governance.committee_hot_keys.contains_key(&cold_key));
+    assert!(state
+        .gov
+        .governance
+        .committee_hot_keys
+        .contains_key(&cold_key));
 
     // Then resign
     state.process_certificate(&Certificate::CommitteeColdResign {
         cold_credential: cold,
         anchor: None,
     });
-    assert!(!state.governance.committee_hot_keys.contains_key(&cold_key));
-    assert!(state.governance.committee_resigned.contains_key(&cold_key));
+    assert!(!state
+        .gov
+        .governance
+        .committee_hot_keys
+        .contains_key(&cold_key));
+    assert!(state
+        .gov
+        .governance
+        .committee_resigned
+        .contains_key(&cold_key));
 }
 
 /// Issue #157: script-based CC hot key type must be tracked and reported correctly.
@@ -1635,6 +1685,7 @@ fn test_committee_hot_auth_script_hot_key_tracked() {
 
     assert!(
         state
+            .gov
             .governance
             .script_committee_hot_credentials
             .contains(&hot_key),
@@ -1659,6 +1710,7 @@ fn test_committee_hot_auth_key_hot_key_not_tracked() {
 
     assert!(
         !state
+            .gov
             .governance
             .script_committee_hot_credentials
             .contains(&hot_key_hash),
@@ -1695,12 +1747,13 @@ fn test_committee_hot_auth_reauth_script_to_key() {
 
     // The committee_hot_keys map now points to the new key hot credential
     assert_eq!(
-        state.governance.committee_hot_keys[&cold_key], new_hot_key,
+        state.gov.governance.committee_hot_keys[&cold_key], new_hot_key,
         "committee_hot_keys must point to the new hot key"
     );
     // The new hot key is a key credential — it must not be in the script set
     assert!(
         !state
+            .gov
             .governance
             .script_committee_hot_credentials
             .contains(&new_hot_key),
@@ -1734,11 +1787,12 @@ fn test_committee_hot_auth_reauth_key_to_script() {
     });
 
     assert_eq!(
-        state.governance.committee_hot_keys[&cold_key], new_hot_key,
+        state.gov.governance.committee_hot_keys[&cold_key], new_hot_key,
         "committee_hot_keys must point to the new script hot key"
     );
     assert!(
         state
+            .gov
             .governance
             .script_committee_hot_credentials
             .contains(&new_hot_key),
@@ -1763,8 +1817,8 @@ fn test_governance_proposal_and_vote() {
     };
 
     state.process_proposal(&tx_hash, 0, &proposal);
-    assert_eq!(state.governance.proposals.len(), 1);
-    assert_eq!(state.governance.proposal_count, 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposal_count, 1);
 
     let action_id = GovActionId {
         transaction_id: tx_hash,
@@ -1786,12 +1840,13 @@ fn test_governance_proposal_and_vote() {
     };
     state.process_vote(&spo_voter, &action_id, &no_vote);
 
-    let p = &state.governance.proposals[&action_id];
+    let p = &state.gov.governance.proposals[&action_id];
     assert_eq!(p.yes_votes, 1);
     assert_eq!(p.no_votes, 1);
     assert_eq!(p.abstain_votes, 0);
     // 2 votes for the same action_id should be in the same Vec
     let total_votes: usize = state
+        .gov
         .governance
         .votes_by_action
         .values()
@@ -1829,7 +1884,7 @@ fn test_governance_proposal_expiry() {
     // Register at least one DRep so threshold checks don't pass with 0/0
     let cred = Credential::VerificationKey(Hash28::from_bytes([1u8; 28]));
     let key = credential_to_hash(&cred);
-    Arc::make_mut(&mut state.governance).dreps.insert(
+    Arc::make_mut(&mut state.gov.governance).dreps.insert(
         key,
         DRepRegistration {
             credential: cred,
@@ -1843,7 +1898,7 @@ fn test_governance_proposal_expiry() {
 
     // Submit at epoch 0 → expires at epoch 6 (0 + 6, per Haskell gasExpiresAfter)
     state.process_proposal(&tx_hash, 0, &proposal);
-    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
 
     // Advance to epoch 7 — should still be active (expires_epoch = 6, active through epoch 7)
     // Expiry filter: expires_epoch < self.epoch (old epoch before transition)
@@ -1852,11 +1907,11 @@ fn test_governance_proposal_expiry() {
     for e in 1..=7 {
         state.process_epoch_transition(EpochNo(e));
     }
-    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
 
     // Advance to epoch 8 — should expire (self.epoch=7, 6 < 7 = true)
     state.process_epoch_transition(EpochNo(8));
-    assert_eq!(state.governance.proposals.len(), 0);
+    assert_eq!(state.gov.governance.proposals.len(), 0);
 }
 
 #[test]
@@ -1918,12 +1973,12 @@ fn test_treasury_donation() {
     // Per Haskell spec, donations are buffered in pending_donations during block
     // processing and flushed to treasury only at the epoch boundary (NEWEPOCH).
     assert_eq!(
-        state.pending_donations,
+        state.utxo.pending_donations,
         Lovelace(1_000_000),
         "Donation should sit in pending_donations mid-epoch"
     );
     assert_eq!(
-        state.treasury,
+        state.epochs.treasury,
         Lovelace(0),
         "Treasury should not yet reflect the donation mid-epoch"
     );
@@ -1965,25 +2020,25 @@ fn test_info_action_never_ratified() {
     };
 
     state.process_proposal(&tx_hash, 0, &proposal);
-    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
 
     // InfoAction should NOT be ratified at epoch transition — it stays active
     state.process_epoch_transition(EpochNo(1));
-    assert_eq!(state.governance.proposals.len(), 1); // still active
-    assert!(state.governance.last_ratified.is_empty()); // not ratified
+    assert_eq!(state.gov.governance.proposals.len(), 1); // still active
+    assert!(state.gov.governance.last_ratified.is_empty()); // not ratified
 
     // expires_epoch = 0 + 3 = 3; expiry filter: expires_epoch < self.epoch (old epoch)
     // At transition to 4, self.epoch=3, 3 < 3 = false → still active
     // At transition to 5, self.epoch=4, 3 < 4 = true → expired
     state.process_epoch_transition(EpochNo(2));
-    assert_eq!(state.governance.proposals.len(), 1); // still active
+    assert_eq!(state.gov.governance.proposals.len(), 1); // still active
     state.process_epoch_transition(EpochNo(3));
-    assert_eq!(state.governance.proposals.len(), 1); // still active (self.epoch=2, 3 < 2 = false)
+    assert_eq!(state.gov.governance.proposals.len(), 1); // still active (self.epoch=2, 3 < 2 = false)
     state.process_epoch_transition(EpochNo(4));
-    assert_eq!(state.governance.proposals.len(), 1); // still active (self.epoch=3, 3 < 3 = false)
+    assert_eq!(state.gov.governance.proposals.len(), 1); // still active (self.epoch=3, 3 < 3 = false)
     state.process_epoch_transition(EpochNo(5));
-    assert_eq!(state.governance.proposals.len(), 0); // expired (self.epoch=4, 3 < 4 = true)
-    assert_eq!(state.governance.last_expired.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 0); // expired (self.epoch=4, 3 < 4 = true)
+    assert_eq!(state.gov.governance.last_expired.len(), 1);
 }
 
 #[test]
@@ -1994,7 +2049,7 @@ fn test_ratify_state_tracks_expired_proposals() {
     params.protocol_version_major = 10;
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
-    state.protocol_params.gov_action_lifetime = 2; // Expires in 2 epochs
+    state.epochs.protocol_params.gov_action_lifetime = 2; // Expires in 2 epochs
 
     let tx_hash = Hash32::from_bytes([77u8; 32]);
     let proposal = ProposalProcedure {
@@ -2011,32 +2066,32 @@ fn test_ratify_state_tracks_expired_proposals() {
 
     // Submit at epoch 0 — expires at epoch 2 (0 + 2, per Haskell gasExpiresAfter)
     state.process_proposal(&tx_hash, 0, &proposal);
-    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
 
     // Epoch 1: proposal still active, not expired, not ratified (no votes)
     state.process_epoch_transition(EpochNo(1));
-    assert_eq!(state.governance.proposals.len(), 1);
-    assert!(state.governance.last_ratified.is_empty());
-    assert!(state.governance.last_expired.is_empty());
+    assert_eq!(state.gov.governance.proposals.len(), 1);
+    assert!(state.gov.governance.last_ratified.is_empty());
+    assert!(state.gov.governance.last_expired.is_empty());
 
     // Epoch 2: still active (expires_epoch = 2, self.epoch=1, 2 < 1 = false)
     state.process_epoch_transition(EpochNo(2));
-    assert_eq!(state.governance.proposals.len(), 1);
-    assert!(state.governance.last_ratified.is_empty());
-    assert!(state.governance.last_expired.is_empty());
+    assert_eq!(state.gov.governance.proposals.len(), 1);
+    assert!(state.gov.governance.last_ratified.is_empty());
+    assert!(state.gov.governance.last_expired.is_empty());
 
     // Epoch 3: still active (self.epoch=2, 2 < 2 = false)
     state.process_epoch_transition(EpochNo(3));
-    assert_eq!(state.governance.proposals.len(), 1);
-    assert!(state.governance.last_ratified.is_empty());
-    assert!(state.governance.last_expired.is_empty());
+    assert_eq!(state.gov.governance.proposals.len(), 1);
+    assert!(state.gov.governance.last_ratified.is_empty());
+    assert!(state.gov.governance.last_expired.is_empty());
 
     // Epoch 4: proposal expires (self.epoch=3, 2 < 3 = true)
     state.process_epoch_transition(EpochNo(4));
-    assert_eq!(state.governance.proposals.len(), 0);
-    assert!(state.governance.last_ratified.is_empty());
-    assert_eq!(state.governance.last_expired.len(), 1);
-    assert_eq!(state.governance.last_expired[0].transaction_id, tx_hash);
+    assert_eq!(state.gov.governance.proposals.len(), 0);
+    assert!(state.gov.governance.last_ratified.is_empty());
+    assert_eq!(state.gov.governance.last_expired.len(), 1);
+    assert_eq!(state.gov.governance.last_expired[0].transaction_id, tx_hash);
 }
 
 #[test]
@@ -2045,9 +2100,9 @@ fn test_parameter_change_ratification() {
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
     // Post-bootstrap: ParameterChange requires actual DRep votes (not auto-pass)
-    state.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_major = 10;
     // Set CC threshold to 0 so CC auto-approves (we're testing DRep voting here)
-    Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+    Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
     });
@@ -2110,13 +2165,13 @@ fn test_parameter_change_ratification() {
         );
     }
 
-    assert_eq!(state.protocol_params.n_opt, 500); // original value
+    assert_eq!(state.epochs.protocol_params.n_opt, 500); // original value
 
     // Epoch transition should ratify and enact
     state.process_epoch_transition(EpochNo(1));
 
-    assert_eq!(state.protocol_params.n_opt, 1000); // updated
-    assert_eq!(state.governance.proposals.len(), 0); // removed after enactment
+    assert_eq!(state.epochs.protocol_params.n_opt, 1000); // updated
+    assert_eq!(state.gov.governance.proposals.len(), 0); // removed after enactment
 }
 
 #[test]
@@ -2125,13 +2180,13 @@ fn test_parameter_change_not_ratified_below_threshold() {
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
     // Post-bootstrap: ParameterChange requires actual DRep votes
-    state.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_major = 10;
 
     // Register 10 DReps with equal stake-weighted voting power
     for i in 0..10 {
         let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
         let key = credential_to_hash(&cred);
-        Arc::make_mut(&mut state.governance).dreps.insert(
+        Arc::make_mut(&mut state.gov.governance).dreps.insert(
             key,
             DRepRegistration {
                 credential: cred.clone(),
@@ -2144,13 +2199,14 @@ fn test_parameter_change_not_ratified_below_threshold() {
         );
         // Set up vote delegation and stake for each DRep
         let stake_key = Hash32::from_bytes([100 + i as u8; 32]);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .vote_delegations
             .insert(
                 stake_key,
                 DRep::KeyHash(Hash28::from_bytes([i as u8; 28]).to_hash32_padded()),
             );
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(stake_key, Lovelace(1_000_000_000));
@@ -2198,8 +2254,8 @@ fn test_parameter_change_not_ratified_below_threshold() {
 
     state.process_epoch_transition(EpochNo(1));
 
-    assert_eq!(state.protocol_params.max_tx_size, 16384); // unchanged
-    assert_eq!(state.governance.proposals.len(), 1); // still active
+    assert_eq!(state.epochs.protocol_params.max_tx_size, 16384); // unchanged
+    assert_eq!(state.gov.governance.proposals.len(), 1); // still active
 }
 
 #[test]
@@ -2207,12 +2263,12 @@ fn test_treasury_withdrawal_ratification() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
-    state.reserves = Lovelace(0); // Prevent RUPD expansion from inflating treasury
-    state.needs_stake_rebuild = false;
-    state.treasury = Lovelace(10_000_000_000);
+    state.epochs.reserves = Lovelace(0); // Prevent RUPD expansion from inflating treasury
+    state.epochs.needs_stake_rebuild = false;
+    state.epochs.treasury = Lovelace(10_000_000_000);
     // Post-bootstrap: TreasuryWithdrawals requires actual DRep votes (and is allowed)
-    state.protocol_params.protocol_version_major = 10;
-    Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+    state.epochs.protocol_params.protocol_version_major = 10;
+    Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
     });
@@ -2260,8 +2316,8 @@ fn test_treasury_withdrawal_ratification() {
 
     state.process_epoch_transition(EpochNo(1));
 
-    assert_eq!(state.treasury, Lovelace(5_000_000_000)); // 10B - 5B = 5B
-    assert_eq!(state.governance.proposals.len(), 0);
+    assert_eq!(state.epochs.treasury, Lovelace(5_000_000_000)); // 10B - 5B = 5B
+    assert_eq!(state.gov.governance.proposals.len(), 0);
 }
 
 #[test]
@@ -2280,7 +2336,7 @@ fn test_no_confidence_ratification() {
         cold_credential: cold,
         hot_credential: hot,
     });
-    assert_eq!(state.governance.committee_hot_keys.len(), 1);
+    assert_eq!(state.gov.governance.committee_hot_keys.len(), 1);
 
     // Register DReps and SPOs with stake
     setup_dreps_with_stake(&mut state, 10, 1_000_000_000);
@@ -2337,8 +2393,8 @@ fn test_no_confidence_ratification() {
     state.process_epoch_transition(EpochNo(1));
 
     // Committee should be disbanded
-    assert_eq!(state.governance.committee_hot_keys.len(), 0);
-    assert_eq!(state.governance.proposals.len(), 0);
+    assert_eq!(state.gov.governance.committee_hot_keys.len(), 0);
+    assert_eq!(state.gov.governance.proposals.len(), 0);
 }
 
 #[test]
@@ -2348,9 +2404,9 @@ fn test_hard_fork_ratification() {
     state.epoch_length = 100;
     // Post-bootstrap: HardForkInitiation is allowed and requires actual DRep + SPO votes.
     // (HardForkInitiation is rejected during bootstrap phase, protocol == 9)
-    state.protocol_params.protocol_version_major = 10;
-    state.protocol_params.protocol_version_minor = 0;
-    Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+    state.epochs.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_minor = 0;
+    Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
     });
@@ -2408,10 +2464,10 @@ fn test_hard_fork_ratification() {
         );
     }
 
-    assert_eq!(state.protocol_params.protocol_version_major, 10);
+    assert_eq!(state.epochs.protocol_params.protocol_version_major, 10);
     state.process_epoch_transition(EpochNo(1));
-    assert_eq!(state.protocol_params.protocol_version_major, 11);
-    assert_eq!(state.protocol_params.protocol_version_minor, 0);
+    assert_eq!(state.epochs.protocol_params.protocol_version_major, 11);
+    assert_eq!(state.epochs.protocol_params.protocol_version_minor, 0);
 }
 
 #[test]
@@ -2803,8 +2859,8 @@ fn test_arc_cow_snapshot_shares_data() {
     // Populate with some data
     let cred_hash = Hash32::from_bytes([1u8; 32]);
     let pool_id = Hash28::from_bytes([2u8; 28]);
-    Arc::make_mut(&mut state.delegations).insert(cred_hash, pool_id);
-    Arc::make_mut(&mut state.pool_params).insert(
+    Arc::make_mut(&mut state.certs.delegations).insert(cred_hash, pool_id);
+    Arc::make_mut(&mut state.certs.pool_params).insert(
         pool_id,
         PoolRegistration {
             pool_id,
@@ -2820,36 +2876,42 @@ fn test_arc_cow_snapshot_shares_data() {
             metadata_hash: None,
         },
     );
-    Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
-    Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(pool_id, 42);
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
+    Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool).insert(pool_id, 42);
 
     // Clone the state (should be cheap — Arc bumps refcount)
     let snapshot = state.clone();
 
     // Verify the Arc pointers are the same (data is shared, not deep-copied)
-    assert!(Arc::ptr_eq(&state.delegations, &snapshot.delegations));
-    assert!(Arc::ptr_eq(&state.pool_params, &snapshot.pool_params));
     assert!(Arc::ptr_eq(
-        &state.reward_accounts,
-        &snapshot.reward_accounts
+        &state.certs.delegations,
+        &snapshot.certs.delegations
     ));
     assert!(Arc::ptr_eq(
-        &state.epoch_blocks_by_pool,
-        &snapshot.epoch_blocks_by_pool
+        &state.certs.pool_params,
+        &snapshot.certs.pool_params
     ));
-    assert!(Arc::ptr_eq(&state.governance, &snapshot.governance));
+    assert!(Arc::ptr_eq(
+        &state.certs.reward_accounts,
+        &snapshot.certs.reward_accounts
+    ));
+    assert!(Arc::ptr_eq(
+        &state.consensus.epoch_blocks_by_pool,
+        &snapshot.consensus.epoch_blocks_by_pool
+    ));
+    assert!(Arc::ptr_eq(&state.gov.governance, &snapshot.gov.governance));
 
     // Verify the data is accessible through both
-    assert_eq!(state.delegations.len(), 1);
-    assert_eq!(snapshot.delegations.len(), 1);
-    assert_eq!(state.pool_params.len(), 1);
-    assert_eq!(snapshot.pool_params.len(), 1);
+    assert_eq!(state.certs.delegations.len(), 1);
+    assert_eq!(snapshot.certs.delegations.len(), 1);
+    assert_eq!(state.certs.pool_params.len(), 1);
+    assert_eq!(snapshot.certs.pool_params.len(), 1);
     assert_eq!(
-        state.reward_accounts.get(&cred_hash),
+        state.certs.reward_accounts.get(&cred_hash),
         Some(&Lovelace(5_000_000))
     );
     assert_eq!(
-        snapshot.reward_accounts.get(&cred_hash),
+        snapshot.certs.reward_accounts.get(&cred_hash),
         Some(&Lovelace(5_000_000))
     );
 }
@@ -2862,36 +2924,42 @@ fn test_arc_cow_mutation_does_not_affect_snapshot() {
 
     let cred_hash = Hash32::from_bytes([1u8; 32]);
     let pool_id = Hash28::from_bytes([2u8; 28]);
-    Arc::make_mut(&mut state.delegations).insert(cred_hash, pool_id);
-    Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
+    Arc::make_mut(&mut state.certs.delegations).insert(cred_hash, pool_id);
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
 
     // Take a snapshot
     let snapshot = state.clone();
-    assert!(Arc::ptr_eq(&state.delegations, &snapshot.delegations));
+    assert!(Arc::ptr_eq(
+        &state.certs.delegations,
+        &snapshot.certs.delegations
+    ));
 
     // Mutate the original via Arc::make_mut — this should trigger a clone
     let cred_hash_2 = Hash32::from_bytes([3u8; 32]);
     let pool_id_2 = Hash28::from_bytes([4u8; 28]);
-    Arc::make_mut(&mut state.delegations).insert(cred_hash_2, pool_id_2);
+    Arc::make_mut(&mut state.certs.delegations).insert(cred_hash_2, pool_id_2);
 
     // The Arcs should no longer point to the same data
-    assert!(!Arc::ptr_eq(&state.delegations, &snapshot.delegations));
+    assert!(!Arc::ptr_eq(
+        &state.certs.delegations,
+        &snapshot.certs.delegations
+    ));
 
     // Original has the new entry, snapshot does not
-    assert_eq!(state.delegations.len(), 2);
-    assert_eq!(snapshot.delegations.len(), 1);
-    assert!(state.delegations.contains_key(&cred_hash_2));
-    assert!(!snapshot.delegations.contains_key(&cred_hash_2));
+    assert_eq!(state.certs.delegations.len(), 2);
+    assert_eq!(snapshot.certs.delegations.len(), 1);
+    assert!(state.certs.delegations.contains_key(&cred_hash_2));
+    assert!(!snapshot.certs.delegations.contains_key(&cred_hash_2));
 
     // Mutate reward_accounts on original
-    Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(10_000_000));
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(cred_hash, Lovelace(10_000_000));
     assert_eq!(
-        state.reward_accounts.get(&cred_hash),
+        state.certs.reward_accounts.get(&cred_hash),
         Some(&Lovelace(10_000_000))
     );
     // Snapshot still has the original value
     assert_eq!(
-        snapshot.reward_accounts.get(&cred_hash),
+        snapshot.certs.reward_accounts.get(&cred_hash),
         Some(&Lovelace(5_000_000))
     );
 }
@@ -2904,7 +2972,7 @@ fn test_arc_cow_governance_isolation() {
 
     let drep_cred = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
     let drep_hash = credential_to_hash(&drep_cred);
-    Arc::make_mut(&mut state.governance).dreps.insert(
+    Arc::make_mut(&mut state.gov.governance).dreps.insert(
         drep_hash,
         DRepRegistration {
             credential: drep_cred.clone(),
@@ -2918,17 +2986,20 @@ fn test_arc_cow_governance_isolation() {
 
     // Snapshot shares the same Arc
     let snapshot = state.clone();
-    assert!(Arc::ptr_eq(&state.governance, &snapshot.governance));
-    assert_eq!(state.governance.dreps.len(), 1);
-    assert_eq!(snapshot.governance.dreps.len(), 1);
+    assert!(Arc::ptr_eq(&state.gov.governance, &snapshot.gov.governance));
+    assert_eq!(state.gov.governance.dreps.len(), 1);
+    assert_eq!(snapshot.gov.governance.dreps.len(), 1);
 
     // Mutate governance on original
-    Arc::make_mut(&mut state.governance).drep_registration_count = 99;
+    Arc::make_mut(&mut state.gov.governance).drep_registration_count = 99;
 
     // Arcs should now be different
-    assert!(!Arc::ptr_eq(&state.governance, &snapshot.governance));
-    assert_eq!(state.governance.drep_registration_count, 99);
-    assert_eq!(snapshot.governance.drep_registration_count, 0);
+    assert!(!Arc::ptr_eq(
+        &state.gov.governance,
+        &snapshot.gov.governance
+    ));
+    assert_eq!(state.gov.governance.drep_registration_count, 99);
+    assert_eq!(snapshot.gov.governance.drep_registration_count, 0);
 }
 
 #[test]
@@ -2939,8 +3010,8 @@ fn test_arc_cow_serialization_roundtrip() {
 
     let cred_hash = Hash32::from_bytes([1u8; 32]);
     let pool_id = Hash28::from_bytes([2u8; 28]);
-    Arc::make_mut(&mut state.delegations).insert(cred_hash, pool_id);
-    Arc::make_mut(&mut state.pool_params).insert(
+    Arc::make_mut(&mut state.certs.delegations).insert(cred_hash, pool_id);
+    Arc::make_mut(&mut state.certs.pool_params).insert(
         pool_id,
         PoolRegistration {
             pool_id,
@@ -2956,8 +3027,8 @@ fn test_arc_cow_serialization_roundtrip() {
             metadata_hash: None,
         },
     );
-    Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
-    Arc::make_mut(&mut state.governance).drep_registration_count = 42;
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(cred_hash, Lovelace(5_000_000));
+    Arc::make_mut(&mut state.gov.governance).drep_registration_count = 42;
     state.epoch = EpochNo(100);
 
     // Save and reload
@@ -2968,18 +3039,18 @@ fn test_arc_cow_serialization_roundtrip() {
 
     // Verify all fields survived the roundtrip
     assert_eq!(loaded.epoch, EpochNo(100));
-    assert_eq!(loaded.delegations.len(), 1);
-    assert_eq!(loaded.delegations.get(&cred_hash), Some(&pool_id));
-    assert_eq!(loaded.pool_params.len(), 1);
+    assert_eq!(loaded.certs.delegations.len(), 1);
+    assert_eq!(loaded.certs.delegations.get(&cred_hash), Some(&pool_id));
+    assert_eq!(loaded.certs.pool_params.len(), 1);
     assert_eq!(
-        loaded.pool_params.get(&pool_id).unwrap().pledge,
+        loaded.certs.pool_params.get(&pool_id).unwrap().pledge,
         Lovelace(500_000_000)
     );
     assert_eq!(
-        loaded.reward_accounts.get(&cred_hash),
+        loaded.certs.reward_accounts.get(&cred_hash),
         Some(&Lovelace(5_000_000))
     );
-    assert_eq!(loaded.governance.drep_registration_count, 42);
+    assert_eq!(loaded.gov.governance.drep_registration_count, 42);
 }
 
 #[test]
@@ -2990,8 +3061,8 @@ fn test_arc_cow_epoch_snapshot_shares_arcs() {
 
     let cred_hash = Hash32::from_bytes([1u8; 32]);
     let pool_id = Hash28::from_bytes([2u8; 28]);
-    Arc::make_mut(&mut state.delegations).insert(cred_hash, pool_id);
-    Arc::make_mut(&mut state.pool_params).insert(
+    Arc::make_mut(&mut state.certs.delegations).insert(cred_hash, pool_id);
+    Arc::make_mut(&mut state.certs.pool_params).insert(
         pool_id,
         PoolRegistration {
             pool_id,
@@ -3008,6 +3079,7 @@ fn test_arc_cow_epoch_snapshot_shares_arcs() {
         },
     );
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(cred_hash, Lovelace(1_000_000));
@@ -3016,17 +3088,17 @@ fn test_arc_cow_epoch_snapshot_shares_arcs() {
     state.process_epoch_transition(EpochNo(1));
 
     // The mark snapshot should share the same Arc as the live state's delegations/pool_params
-    let mark = state.snapshots.mark.as_ref().unwrap();
-    assert!(Arc::ptr_eq(&state.delegations, &mark.delegations));
-    assert!(Arc::ptr_eq(&state.pool_params, &mark.pool_params));
+    let mark = state.epochs.snapshots.mark.as_ref().unwrap();
+    assert!(Arc::ptr_eq(&state.certs.delegations, &mark.delegations));
+    assert!(Arc::ptr_eq(&state.certs.pool_params, &mark.pool_params));
 
     // Now mutate live state — should not affect the snapshot
     let new_cred = Hash32::from_bytes([5u8; 32]);
     let new_pool = Hash28::from_bytes([6u8; 28]);
-    Arc::make_mut(&mut state.delegations).insert(new_cred, new_pool);
+    Arc::make_mut(&mut state.certs.delegations).insert(new_cred, new_pool);
 
     // Live state has 2 delegations, snapshot still has 1
-    assert_eq!(state.delegations.len(), 2);
+    assert_eq!(state.certs.delegations.len(), 2);
     assert_eq!(mark.delegations.len(), 1);
 }
 
@@ -3057,7 +3129,7 @@ fn test_ledger_snapshot_save_load() {
         is_legacy: false,
         raw_cbor: None,
     };
-    state.utxo_set.insert(input, output);
+    state.utxo.utxo_set.insert(input, output);
 
     // Save snapshot
     state.save_snapshot(&snapshot_path).unwrap();
@@ -3067,7 +3139,7 @@ fn test_ledger_snapshot_save_load() {
     let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
     assert_eq!(loaded.epoch, EpochNo(42));
     assert_eq!(loaded.tip.block_number, BlockNo(5000));
-    assert_eq!(loaded.utxo_set.len(), 1);
+    assert_eq!(loaded.utxo.utxo_set.len(), 1);
 }
 
 #[test]
@@ -3141,7 +3213,8 @@ fn test_snapshot_legacy_format_without_version_byte() {
     let snapshot_path = dir.path().join("legacy-snapshot.bin");
 
     let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    let data = bincode::serialize(&state).unwrap();
+    let snap = super::snapshot_format::LedgerStateSnapshot::from(&state);
+    let data = bincode::serialize(&snap).unwrap();
     let checksum = dugite_primitives::hash::blake2b_256(&data);
 
     let mut legacy = Vec::new();
@@ -3176,7 +3249,8 @@ fn test_snapshot_rejects_unknown_version() {
     let snapshot_path = dir.path().join("future-snapshot.bin");
 
     let state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    let data = bincode::serialize(&state).unwrap();
+    let snap = super::snapshot_format::LedgerStateSnapshot::from(&state);
+    let data = bincode::serialize(&snap).unwrap();
     let checksum = dugite_primitives::hash::blake2b_256(&data);
 
     // Write a snapshot with version 99 (unsupported)
@@ -3257,7 +3331,7 @@ fn test_pool_registration_stores_metadata() {
     };
 
     state.process_certificate(&Certificate::PoolRegistration(pool_params));
-    let reg = &state.pool_params[&pool_id];
+    let reg = &state.certs.pool_params[&pool_id];
 
     assert_eq!(reg.reward_account, vec![0xe0; 29]);
     assert_eq!(reg.owners.len(), 2);
@@ -3275,11 +3349,11 @@ fn test_guardrail_script_policy_validation() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     // Post-bootstrap: ParameterChange is allowed and guardrail policy is enforced
-    state.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_major = 10;
 
     // Set up a constitution with a guardrail script hash
     let guardrail_hash = Hash28::from_bytes([42u8; 28]);
-    Arc::make_mut(&mut state.governance).constitution = Some(Constitution {
+    Arc::make_mut(&mut state.gov.governance).constitution = Some(Constitution {
         anchor: Anchor {
             url: "https://constitution.example.com".to_string(),
             data_hash: Hash32::ZERO,
@@ -3303,7 +3377,7 @@ fn test_guardrail_script_policy_validation() {
         },
     };
     state.process_proposal(&Hash32::from_bytes([1u8; 32]), 0, &proposal_with_match);
-    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
 
     // Submit a proposal with mismatched policy_hash — REJECTED (dropped)
     let proposal_mismatch = ProposalProcedure {
@@ -3321,7 +3395,7 @@ fn test_guardrail_script_policy_validation() {
     };
     state.process_proposal(&Hash32::from_bytes([2u8; 32]), 0, &proposal_mismatch);
     // Proposal count should remain 1 — mismatched proposal was dropped
-    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
 
     // Submit a proposal with no policy_hash — REJECTED (dropped)
     let proposal_no_hash = ProposalProcedure {
@@ -3339,7 +3413,7 @@ fn test_guardrail_script_policy_validation() {
     };
     state.process_proposal(&Hash32::from_bytes([3u8; 32]), 0, &proposal_no_hash);
     // Proposal count should still be 1 — missing policy_hash proposal was dropped
-    assert_eq!(state.governance.proposals.len(), 1);
+    assert_eq!(state.gov.governance.proposals.len(), 1);
 }
 
 #[test]
@@ -3365,7 +3439,7 @@ fn test_gov_action_lifetime_from_protocol_params() {
         transaction_id: tx_hash,
         action_index: 0,
     };
-    let ps = &state.governance.proposals[&action_id];
+    let ps = &state.gov.governance.proposals[&action_id];
     assert_eq!(ps.expires_epoch, EpochNo(15)); // epoch 5 + lifetime 10
 }
 
@@ -3403,25 +3477,31 @@ fn test_enact_parameter_change_applies_all_fields() {
 
     state.enact_gov_action(&action);
 
-    assert_eq!(state.protocol_params.min_fee_a, 55);
-    assert_eq!(state.protocol_params.max_block_body_size, 131072);
-    assert_eq!(state.protocol_params.max_block_header_size, 2000);
-    assert_eq!(state.protocol_params.ada_per_utxo_byte, Lovelace(5000));
-    assert_eq!(state.protocol_params.max_val_size, 10000);
-    assert_eq!(state.protocol_params.collateral_percentage, 200);
-    assert_eq!(state.protocol_params.max_collateral_inputs, 5);
+    assert_eq!(state.epochs.protocol_params.min_fee_a, 55);
+    assert_eq!(state.epochs.protocol_params.max_block_body_size, 131072);
+    assert_eq!(state.epochs.protocol_params.max_block_header_size, 2000);
     assert_eq!(
-        state.protocol_params.cost_models.plutus_v2,
+        state.epochs.protocol_params.ada_per_utxo_byte,
+        Lovelace(5000)
+    );
+    assert_eq!(state.epochs.protocol_params.max_val_size, 10000);
+    assert_eq!(state.epochs.protocol_params.collateral_percentage, 200);
+    assert_eq!(state.epochs.protocol_params.max_collateral_inputs, 5);
+    assert_eq!(
+        state.epochs.protocol_params.cost_models.plutus_v2,
         Some(vec![1, 2, 3])
     );
     assert_eq!(
-        state.protocol_params.cost_models.plutus_v3,
+        state.epochs.protocol_params.cost_models.plutus_v3,
         Some(vec![4, 5, 6])
     );
     // PlutusV1 should remain unchanged (wasn't in the update)
-    assert_eq!(state.protocol_params.cost_models.plutus_v1, None);
-    assert_eq!(state.protocol_params.max_tx_ex_units.mem, 20_000_000);
-    assert_eq!(state.protocol_params.max_tx_ex_units.steps, 10_000_000_000);
+    assert_eq!(state.epochs.protocol_params.cost_models.plutus_v1, None);
+    assert_eq!(state.epochs.protocol_params.max_tx_ex_units.mem, 20_000_000);
+    assert_eq!(
+        state.epochs.protocol_params.max_tx_ex_units.steps,
+        10_000_000_000
+    );
 }
 
 // --- PP Group Classification Tests ---
@@ -3815,7 +3895,10 @@ fn test_utxo_stake_distribution_tracking() {
         is_legacy: false,
         raw_cbor: None,
     };
-    state.utxo_set.insert(genesis_input.clone(), genesis_output);
+    state
+        .utxo
+        .utxo_set
+        .insert(genesis_input.clone(), genesis_output);
 
     // Create a transaction that spends the genesis UTxO and creates new outputs
     let tx = Transaction {
@@ -3885,6 +3968,7 @@ fn test_utxo_stake_distribution_tracking() {
         )),
     );
     let stake = state
+        .certs
         .stake_distribution
         .stake_map
         .get(&cred_hash)
@@ -3935,7 +4019,7 @@ fn test_pool_retirement_within_emax() {
         epoch: 28, // 10 + 18 = within bounds
     };
     state.process_certificate(&cert);
-    assert!(state.pending_retirements.get(&pool_hash) == Some(&EpochNo(28)));
+    assert!(state.certs.pending_retirements.get(&pool_hash) == Some(&EpochNo(28)));
 }
 
 #[test]
@@ -3956,7 +4040,7 @@ fn test_pool_retirement_exceeds_emax() {
     };
     state.process_certificate(&cert);
     // Retirement IS applied during block application (no e_max re-check)
-    assert!(state.pending_retirements.get(&pool_hash) == Some(&EpochNo(29)));
+    assert!(state.certs.pending_retirements.get(&pool_hash) == Some(&EpochNo(29)));
 }
 
 #[test]
@@ -3973,54 +4057,60 @@ fn test_withdrawal_sets_balance_to_zero() {
 
     // reward_account_to_hash pads 28 bytes to Hash32
     let hash_key = LedgerState::reward_account_to_hash(&reward_account);
-    Arc::make_mut(&mut state.reward_accounts).insert(hash_key, Lovelace(5_000_000));
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(hash_key, Lovelace(5_000_000));
 
     state.process_withdrawal(&reward_account, Lovelace(5_000_000));
-    assert_eq!(state.reward_accounts.get(&hash_key), Some(&Lovelace(0)));
+    assert_eq!(
+        state.certs.reward_accounts.get(&hash_key),
+        Some(&Lovelace(0))
+    );
 }
 
 #[test]
 fn test_mir_stake_credential_distribution() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    state.reserves = Lovelace(10_000_000);
+    state.epochs.reserves = Lovelace(10_000_000);
     let cred = Credential::VerificationKey(Hash28::from_bytes([0xaa; 28]));
     let key = credential_to_hash(&cred);
 
     // Register stake credential first
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
-    assert_eq!(state.reward_accounts.get(&key), Some(&Lovelace(0)));
+    assert_eq!(state.certs.reward_accounts.get(&key), Some(&Lovelace(0)));
 
     // MIR: distribute 1_000_000 from reserves
     state.process_certificate(&Certificate::MoveInstantaneousRewards {
         source: MIRSource::Reserves,
         target: MIRTarget::StakeCredentials(vec![(cred.clone(), 1_000_000)]),
     });
-    assert_eq!(state.reward_accounts.get(&key), Some(&Lovelace(1_000_000)));
+    assert_eq!(
+        state.certs.reward_accounts.get(&key),
+        Some(&Lovelace(1_000_000))
+    );
     // Reserves should be debited
-    assert_eq!(state.reserves, Lovelace(9_000_000));
+    assert_eq!(state.epochs.reserves, Lovelace(9_000_000));
 }
 
 #[test]
 fn test_mir_pot_transfer() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    state.reserves = Lovelace(10_000_000);
-    state.treasury = Lovelace(5_000_000);
+    state.epochs.reserves = Lovelace(10_000_000);
+    state.epochs.treasury = Lovelace(5_000_000);
 
     // MIR: transfer 2M from reserves to treasury
     state.process_certificate(&Certificate::MoveInstantaneousRewards {
         source: MIRSource::Reserves,
         target: MIRTarget::OtherAccountingPot(2_000_000),
     });
-    assert_eq!(state.reserves, Lovelace(8_000_000));
-    assert_eq!(state.treasury, Lovelace(7_000_000));
+    assert_eq!(state.epochs.reserves, Lovelace(8_000_000));
+    assert_eq!(state.epochs.treasury, Lovelace(7_000_000));
 
     // MIR: transfer 3M from treasury to reserves
     state.process_certificate(&Certificate::MoveInstantaneousRewards {
         source: MIRSource::Treasury,
         target: MIRTarget::OtherAccountingPot(3_000_000),
     });
-    assert_eq!(state.reserves, Lovelace(11_000_000));
-    assert_eq!(state.treasury, Lovelace(4_000_000));
+    assert_eq!(state.epochs.reserves, Lovelace(11_000_000));
+    assert_eq!(state.epochs.treasury, Lovelace(4_000_000));
 }
 
 #[test]
@@ -4043,8 +4133,8 @@ fn test_pre_conway_pp_update_quorum_met() {
     state.epoch_length = 100;
 
     // Original values
-    assert_eq!(state.protocol_params.min_fee_a, 44);
-    assert_eq!(state.protocol_params.max_block_body_size, 90112);
+    assert_eq!(state.epochs.protocol_params.min_fee_a, 44);
+    assert_eq!(state.epochs.protocol_params.max_block_body_size, 90112);
 
     // Two distinct genesis delegates propose updates targeting epoch 4 (current).
     // Per the PPUP rule, proposals targeting epoch E are applied at the E→E+1 boundary.
@@ -4056,11 +4146,13 @@ fn test_pre_conway_pp_update_quorum_met() {
         ..Default::default()
     };
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(4))
         .or_default()
         .push((hash1, update.clone()));
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(4))
         .or_default()
@@ -4070,10 +4162,10 @@ fn test_pre_conway_pp_update_quorum_met() {
     state.process_epoch_transition(EpochNo(5));
 
     // Updates should be applied
-    assert_eq!(state.protocol_params.min_fee_a, 55);
-    assert_eq!(state.protocol_params.max_block_body_size, 65536);
+    assert_eq!(state.epochs.protocol_params.min_fee_a, 55);
+    assert_eq!(state.epochs.protocol_params.max_block_body_size, 65536);
     // pending_pp_updates should be empty
-    assert!(state.pending_pp_updates.is_empty());
+    assert!(state.epochs.pending_pp_updates.is_empty());
 }
 
 #[test]
@@ -4083,7 +4175,7 @@ fn test_pre_conway_pp_update_quorum_not_met() {
     state.epoch = EpochNo(4);
     state.epoch_length = 100;
 
-    let original_fee = state.protocol_params.min_fee_a;
+    let original_fee = state.epochs.protocol_params.min_fee_a;
 
     // Only 2 proposers targeting epoch 4 (quorum is 3)
     let hash1 = Hash32::from_bytes([0x01; 32]);
@@ -4093,11 +4185,13 @@ fn test_pre_conway_pp_update_quorum_not_met() {
         ..Default::default()
     };
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(4))
         .or_default()
         .push((hash1, update.clone()));
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(4))
         .or_default()
@@ -4106,9 +4200,9 @@ fn test_pre_conway_pp_update_quorum_not_met() {
     state.process_epoch_transition(EpochNo(5));
 
     // Updates should NOT be applied
-    assert_eq!(state.protocol_params.min_fee_a, original_fee);
+    assert_eq!(state.epochs.protocol_params.min_fee_a, original_fee);
     // Proposals should be cleaned up
-    assert!(state.pending_pp_updates.is_empty());
+    assert!(state.epochs.pending_pp_updates.is_empty());
 }
 
 #[test]
@@ -4126,6 +4220,7 @@ fn test_pre_conway_pp_update_protocol_version() {
         ..Default::default()
     };
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(9))
         .or_default()
@@ -4133,8 +4228,8 @@ fn test_pre_conway_pp_update_protocol_version() {
 
     state.process_epoch_transition(EpochNo(10));
 
-    assert_eq!(state.protocol_params.protocol_version_major, 7);
-    assert_eq!(state.protocol_params.protocol_version_minor, 0);
+    assert_eq!(state.epochs.protocol_params.protocol_version_major, 7);
+    assert_eq!(state.epochs.protocol_params.protocol_version_minor, 0);
 }
 
 #[test]
@@ -4154,15 +4249,24 @@ fn test_apply_protocol_param_update_all_fields() {
 
     state.apply_protocol_param_update(&update).unwrap();
 
-    assert_eq!(state.protocol_params.min_fee_a, 55);
-    assert_eq!(state.protocol_params.min_fee_b, 200000);
-    assert_eq!(state.protocol_params.max_block_body_size, 65536);
-    assert_eq!(state.protocol_params.max_tx_size, 32768);
-    assert_eq!(state.protocol_params.key_deposit, Lovelace(3_000_000));
-    assert_eq!(state.protocol_params.pool_deposit, Lovelace(600_000_000));
-    assert_eq!(state.protocol_params.ada_per_utxo_byte, Lovelace(5000));
+    assert_eq!(state.epochs.protocol_params.min_fee_a, 55);
+    assert_eq!(state.epochs.protocol_params.min_fee_b, 200000);
+    assert_eq!(state.epochs.protocol_params.max_block_body_size, 65536);
+    assert_eq!(state.epochs.protocol_params.max_tx_size, 32768);
+    assert_eq!(
+        state.epochs.protocol_params.key_deposit,
+        Lovelace(3_000_000)
+    );
+    assert_eq!(
+        state.epochs.protocol_params.pool_deposit,
+        Lovelace(600_000_000)
+    );
+    assert_eq!(
+        state.epochs.protocol_params.ada_per_utxo_byte,
+        Lovelace(5000)
+    );
     // Unchanged fields should remain at defaults
-    assert_eq!(state.protocol_params.max_block_header_size, 1100);
+    assert_eq!(state.epochs.protocol_params.max_block_header_size, 1100);
 }
 
 #[test]
@@ -4179,11 +4283,13 @@ fn test_pre_conway_pp_update_past_epochs_cleaned() {
         ..Default::default()
     };
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(3))
         .or_default()
         .push((hash1, update.clone()));
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(7))
         .or_default()
@@ -4192,7 +4298,7 @@ fn test_pre_conway_pp_update_past_epochs_cleaned() {
     state.process_epoch_transition(EpochNo(10));
 
     // All past proposals should be cleaned up
-    assert!(state.pending_pp_updates.is_empty());
+    assert!(state.epochs.pending_pp_updates.is_empty());
 }
 
 #[test]
@@ -4216,6 +4322,7 @@ fn test_pre_conway_pp_update_survives_intermediate_epoch() {
             ..Default::default()
         };
         state
+            .epochs
             .pending_pp_updates
             .entry(EpochNo(21))
             .or_default()
@@ -4226,17 +4333,17 @@ fn test_pre_conway_pp_update_survives_intermediate_epoch() {
     // but must survive the cleanup
     state.process_epoch_transition(EpochNo(21));
     assert!(
-        !state.pending_pp_updates.is_empty(),
+        !state.epochs.pending_pp_updates.is_empty(),
         "proposals targeting epoch 21 should survive the 20→21 cleanup"
     );
     // Protocol version should still be the default (9 from mainnet_defaults)
-    assert_eq!(state.protocol_params.protocol_version_major, 9);
+    assert_eq!(state.epochs.protocol_params.protocol_version_major, 9);
 
     // Transition 21→22: proposals targeting epoch 21 should now be applied
     state.process_epoch_transition(EpochNo(22));
-    assert_eq!(state.protocol_params.protocol_version_major, 8);
-    assert_eq!(state.protocol_params.protocol_version_minor, 0);
-    assert!(state.pending_pp_updates.is_empty());
+    assert_eq!(state.epochs.protocol_params.protocol_version_major, 8);
+    assert_eq!(state.epochs.protocol_params.protocol_version_minor, 0);
+    assert!(state.epochs.pending_pp_updates.is_empty());
 }
 
 #[test]
@@ -4472,6 +4579,7 @@ fn test_invalid_tx_uses_collateral_for_fees_not_declared_fee() {
         raw_cbor: None,
     };
     state
+        .utxo
         .utxo_set
         .insert(collateral_input.clone(), collateral_output);
 
@@ -4528,7 +4636,7 @@ fn test_invalid_tx_uses_collateral_for_fees_not_declared_fee() {
         .unwrap();
 
     // Fee should be the collateral amount (5 ADA), NOT the declared fee (0.2 ADA)
-    assert_eq!(state.epoch_fees, Lovelace(5_000_000));
+    assert_eq!(state.utxo.epoch_fees, Lovelace(5_000_000));
 }
 
 #[test]
@@ -4553,6 +4661,7 @@ fn test_invalid_tx_collateral_with_return() {
         raw_cbor: None,
     };
     state
+        .utxo
         .utxo_set
         .insert(collateral_input.clone(), collateral_output);
 
@@ -4620,7 +4729,7 @@ fn test_invalid_tx_collateral_with_return() {
         .unwrap();
 
     // Fee should be 10M - 7M = 3M (collateral forfeited), NOT 500_000 (declared fee)
-    assert_eq!(state.epoch_fees, Lovelace(3_000_000));
+    assert_eq!(state.utxo.epoch_fees, Lovelace(3_000_000));
 }
 
 #[test]
@@ -4645,6 +4754,7 @@ fn test_invalid_tx_total_collateral_field() {
         raw_cbor: None,
     };
     state
+        .utxo
         .utxo_set
         .insert(collateral_input.clone(), collateral_output);
 
@@ -4700,14 +4810,14 @@ fn test_invalid_tx_total_collateral_field() {
         .unwrap();
 
     // Fee should be the explicit total_collateral value
-    assert_eq!(state.epoch_fees, Lovelace(2_500_000));
+    assert_eq!(state.utxo.epoch_fees, Lovelace(2_500_000));
 }
 
 #[test]
 fn test_mir_stake_credentials_debits_reserves() {
     // Bug 2: MIR to StakeCredentials should debit reserves
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    state.reserves = Lovelace(100_000_000);
+    state.epochs.reserves = Lovelace(100_000_000);
 
     let cred1 = Credential::VerificationKey(Hash28::from_bytes([0xbb; 28]));
     let cred2 = Credential::VerificationKey(Hash28::from_bytes([0xcc; 28]));
@@ -4726,17 +4836,17 @@ fn test_mir_stake_credentials_debits_reserves() {
         ]),
     });
 
-    assert_eq!(state.reward_accounts[&key1], Lovelace(3_000_000));
-    assert_eq!(state.reward_accounts[&key2], Lovelace(2_000_000));
+    assert_eq!(state.certs.reward_accounts[&key1], Lovelace(3_000_000));
+    assert_eq!(state.certs.reward_accounts[&key2], Lovelace(2_000_000));
     // Reserves should be debited by the total distributed (5M)
-    assert_eq!(state.reserves, Lovelace(95_000_000));
+    assert_eq!(state.epochs.reserves, Lovelace(95_000_000));
 }
 
 #[test]
 fn test_mir_stake_credentials_debits_treasury() {
     // Bug 2: MIR to StakeCredentials should debit treasury
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    state.treasury = Lovelace(50_000_000);
+    state.epochs.treasury = Lovelace(50_000_000);
 
     let cred = Credential::VerificationKey(Hash28::from_bytes([0xdd; 28]));
     let key = credential_to_hash(&cred);
@@ -4749,9 +4859,9 @@ fn test_mir_stake_credentials_debits_treasury() {
         target: MIRTarget::StakeCredentials(vec![(cred.clone(), 7_000_000)]),
     });
 
-    assert_eq!(state.reward_accounts[&key], Lovelace(7_000_000));
+    assert_eq!(state.certs.reward_accounts[&key], Lovelace(7_000_000));
     // Treasury should be debited
-    assert_eq!(state.treasury, Lovelace(43_000_000));
+    assert_eq!(state.epochs.treasury, Lovelace(43_000_000));
 }
 
 #[test]
@@ -4760,8 +4870,8 @@ fn test_mir_compound_credential_and_pot_transfer() {
     // happen from the same source pot, the sequential operations must use saturating
     // arithmetic to avoid underflow/overflow if the first operation depletes the pot.
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    state.reserves = Lovelace(10_000_000);
-    state.treasury = Lovelace(5_000_000);
+    state.epochs.reserves = Lovelace(10_000_000);
+    state.epochs.treasury = Lovelace(5_000_000);
 
     let cred = Credential::VerificationKey(Hash28::from_bytes([0xee; 28]));
     let key = credential_to_hash(&cred);
@@ -4772,8 +4882,8 @@ fn test_mir_compound_credential_and_pot_transfer() {
         source: MIRSource::Reserves,
         target: MIRTarget::StakeCredentials(vec![(cred.clone(), 8_000_000)]),
     });
-    assert_eq!(state.reserves, Lovelace(2_000_000));
-    assert_eq!(state.reward_accounts[&key], Lovelace(8_000_000));
+    assert_eq!(state.epochs.reserves, Lovelace(2_000_000));
+    assert_eq!(state.certs.reward_accounts[&key], Lovelace(8_000_000));
 
     // Step 2: MIR pot transfer tries to move 5M from reserves to treasury,
     // but only 2M remain. Should cap at available (2M), not panic/underflow.
@@ -4782,17 +4892,17 @@ fn test_mir_compound_credential_and_pot_transfer() {
         target: MIRTarget::OtherAccountingPot(5_000_000),
     });
     // Reserves fully drained (capped at 2M available)
-    assert_eq!(state.reserves, Lovelace(0));
+    assert_eq!(state.epochs.reserves, Lovelace(0));
     // Treasury receives only the 2M that was actually available
-    assert_eq!(state.treasury, Lovelace(7_000_000));
+    assert_eq!(state.epochs.treasury, Lovelace(7_000_000));
 }
 
 #[test]
 fn test_mir_pot_transfer_exceeds_source_treasury() {
     // Symmetric test: treasury pot transfer exceeding available balance
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    state.reserves = Lovelace(20_000_000);
-    state.treasury = Lovelace(3_000_000);
+    state.epochs.reserves = Lovelace(20_000_000);
+    state.epochs.treasury = Lovelace(3_000_000);
 
     let cred = Credential::VerificationKey(Hash28::from_bytes([0xff; 28]));
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
@@ -4802,31 +4912,31 @@ fn test_mir_pot_transfer_exceeds_source_treasury() {
         source: MIRSource::Treasury,
         target: MIRTarget::StakeCredentials(vec![(cred.clone(), 2_000_000)]),
     });
-    assert_eq!(state.treasury, Lovelace(1_000_000));
+    assert_eq!(state.epochs.treasury, Lovelace(1_000_000));
 
     // Try to transfer 10M from treasury to reserves, but only 1M available
     state.process_certificate(&Certificate::MoveInstantaneousRewards {
         source: MIRSource::Treasury,
         target: MIRTarget::OtherAccountingPot(10_000_000),
     });
-    assert_eq!(state.treasury, Lovelace(0));
-    assert_eq!(state.reserves, Lovelace(21_000_000));
+    assert_eq!(state.epochs.treasury, Lovelace(0));
+    assert_eq!(state.epochs.reserves, Lovelace(21_000_000));
 }
 
 #[test]
 fn test_mir_pot_transfer_zero_source() {
     // Edge case: pot transfer when source is already zero
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    state.reserves = Lovelace(0);
-    state.treasury = Lovelace(5_000_000);
+    state.epochs.reserves = Lovelace(0);
+    state.epochs.treasury = Lovelace(5_000_000);
 
     // Should be a no-op, not panic
     state.process_certificate(&Certificate::MoveInstantaneousRewards {
         source: MIRSource::Reserves,
         target: MIRTarget::OtherAccountingPot(1_000_000),
     });
-    assert_eq!(state.reserves, Lovelace(0));
-    assert_eq!(state.treasury, Lovelace(5_000_000));
+    assert_eq!(state.epochs.reserves, Lovelace(0));
+    assert_eq!(state.epochs.treasury, Lovelace(5_000_000));
 }
 
 #[test]
@@ -4854,14 +4964,14 @@ fn test_pool_reregistration_cancels_pending_retirement() {
 
     // Register pool
     state.process_certificate(&Certificate::PoolRegistration(pool_params_val.clone()));
-    assert!(state.pool_params.contains_key(&pool_id));
+    assert!(state.certs.pool_params.contains_key(&pool_id));
 
     // Schedule retirement at epoch 5
     state.process_certificate(&Certificate::PoolRetirement {
         pool_hash: pool_id,
         epoch: 5,
     });
-    assert!(state.pending_retirements.get(&pool_id) == Some(&EpochNo(5)));
+    assert!(state.certs.pending_retirements.get(&pool_id) == Some(&EpochNo(5)));
 
     // Re-register the pool — should cancel the pending retirement
     let updated_params = PoolParams {
@@ -4871,13 +4981,13 @@ fn test_pool_reregistration_cancels_pending_retirement() {
     state.process_certificate(&Certificate::PoolRegistration(updated_params));
 
     // Pending retirement should be cancelled
-    assert!(!state.pending_retirements.contains_key(&pool_id));
+    assert!(!state.certs.pending_retirements.contains_key(&pool_id));
     // Pool should still exist (original params remain until next epoch boundary)
-    assert!(state.pool_params.contains_key(&pool_id));
+    assert!(state.certs.pool_params.contains_key(&pool_id));
     // Re-registration params are deferred to futurePoolParams (applied at next epoch boundary),
     // matching Haskell's POOL rule which stores re-registrations in futurePoolParams.
     assert_eq!(
-        state.future_pool_params[&pool_id].pledge,
+        state.certs.future_pool_params[&pool_id].pledge,
         Lovelace(1_000_000_000)
     );
 }
@@ -4920,15 +5030,15 @@ fn test_pool_reregistration_only_cancels_own_retirement() {
         pool_hash: pool_b,
         epoch: 5,
     });
-    assert!(state.pending_retirements.get(&pool_a) == Some(&EpochNo(5)));
-    assert!(state.pending_retirements.get(&pool_b) == Some(&EpochNo(5)));
+    assert!(state.certs.pending_retirements.get(&pool_a) == Some(&EpochNo(5)));
+    assert!(state.certs.pending_retirements.get(&pool_b) == Some(&EpochNo(5)));
 
     // Re-register only pool A
     state.process_certificate(&Certificate::PoolRegistration(make_params(pool_a)));
 
     // Pool A's retirement should be cancelled, but pool B's should remain
-    assert!(!state.pending_retirements.contains_key(&pool_a));
-    assert!(state.pending_retirements.get(&pool_b) == Some(&EpochNo(5)));
+    assert!(!state.certs.pending_retirements.contains_key(&pool_a));
+    assert!(state.certs.pending_retirements.get(&pool_b) == Some(&EpochNo(5)));
 }
 
 #[test]
@@ -4944,10 +5054,10 @@ fn test_stake_deregistration_rejected_with_nonzero_balance() {
 
     // Register stake
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
-    assert!(state.reward_accounts.contains_key(&key));
+    assert!(state.certs.reward_accounts.contains_key(&key));
 
     // Add some rewards
-    *Arc::make_mut(&mut state.reward_accounts)
+    *Arc::make_mut(&mut state.certs.reward_accounts)
         .get_mut(&key)
         .unwrap() = Lovelace(500_000);
 
@@ -4955,7 +5065,7 @@ fn test_stake_deregistration_rejected_with_nonzero_balance() {
     state.process_certificate(&Certificate::StakeDeregistration(cred.clone()));
 
     // Stake IS deregistered (no balance re-check during block application)
-    assert!(!state.reward_accounts.contains_key(&key));
+    assert!(!state.certs.reward_accounts.contains_key(&key));
     // stake_map preserves UTxO-based balances — deregistration does not remove it
 }
 
@@ -4970,13 +5080,13 @@ fn test_stake_deregistration_allowed_with_zero_balance() {
 
     // Register stake
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
-    assert!(state.reward_accounts.contains_key(&key));
-    assert_eq!(state.reward_accounts[&key], Lovelace(0));
+    assert!(state.certs.reward_accounts.contains_key(&key));
+    assert_eq!(state.certs.reward_accounts[&key], Lovelace(0));
 
     // Deregister with zero balance — should succeed
     state.process_certificate(&Certificate::StakeDeregistration(cred));
 
-    assert!(!state.reward_accounts.contains_key(&key));
+    assert!(!state.certs.reward_accounts.contains_key(&key));
     // stake_map preserves UTxO-based balances — deregistration does not remove it
 }
 
@@ -4994,10 +5104,10 @@ fn test_conway_stake_deregistration_with_nonzero_balance() {
         credential: cred.clone(),
         deposit: Lovelace(2_000_000),
     });
-    assert!(state.reward_accounts.contains_key(&key));
+    assert!(state.certs.reward_accounts.contains_key(&key));
 
     // Add rewards
-    *Arc::make_mut(&mut state.reward_accounts)
+    *Arc::make_mut(&mut state.certs.reward_accounts)
         .get_mut(&key)
         .unwrap() = Lovelace(1_000_000);
 
@@ -5010,8 +5120,8 @@ fn test_conway_stake_deregistration_with_nonzero_balance() {
     // Reward account should be removed, but stake_map entry remains
     // (the credential may still have UTxOs — stake_map is UTxO accounting,
     // not a registration tracker).
-    assert!(!state.reward_accounts.contains_key(&key));
-    assert!(state.stake_distribution.stake_map.contains_key(&key));
+    assert!(!state.certs.reward_accounts.contains_key(&key));
+    assert!(state.certs.stake_distribution.stake_map.contains_key(&key));
 }
 
 #[test]
@@ -5055,8 +5165,8 @@ fn test_multi_epoch_skip_processes_each_epoch() {
         epoch: 4,
     });
 
-    assert!(state.pool_params.contains_key(&pool_a));
-    assert!(state.pool_params.contains_key(&pool_b));
+    assert!(state.certs.pool_params.contains_key(&pool_a));
+    assert!(state.certs.pool_params.contains_key(&pool_b));
 
     // Skip from epoch 0 directly to epoch 5 via a block at slot 500
     let block = make_test_block(500, 1, Hash32::ZERO, vec![]);
@@ -5068,11 +5178,11 @@ fn test_multi_epoch_skip_processes_each_epoch() {
     // epochs 1, 2, 3, 4, and 5
     assert_eq!(state.epoch, EpochNo(5));
     assert!(
-        !state.pool_params.contains_key(&pool_a),
+        !state.certs.pool_params.contains_key(&pool_a),
         "Pool A should be retired at epoch 2"
     );
     assert!(
-        !state.pool_params.contains_key(&pool_b),
+        !state.certs.pool_params.contains_key(&pool_b),
         "Pool B should be retired at epoch 4"
     );
 }
@@ -5118,14 +5228,23 @@ fn test_multi_epoch_skip_snapshot_rotation() {
 
     assert_eq!(state.epoch, EpochNo(4));
     // After 4 transitions: mark, set, and go should all be populated
-    assert!(state.snapshots.mark.is_some());
-    assert!(state.snapshots.set.is_some());
-    assert!(state.snapshots.go.is_some());
+    assert!(state.epochs.snapshots.mark.is_some());
+    assert!(state.epochs.snapshots.set.is_some());
+    assert!(state.epochs.snapshots.go.is_some());
 
     // The epochs should be consecutive
-    assert_eq!(state.snapshots.go.as_ref().unwrap().epoch, EpochNo(2));
-    assert_eq!(state.snapshots.set.as_ref().unwrap().epoch, EpochNo(3));
-    assert_eq!(state.snapshots.mark.as_ref().unwrap().epoch, EpochNo(4));
+    assert_eq!(
+        state.epochs.snapshots.go.as_ref().unwrap().epoch,
+        EpochNo(2)
+    );
+    assert_eq!(
+        state.epochs.snapshots.set.as_ref().unwrap().epoch,
+        EpochNo(3)
+    );
+    assert_eq!(
+        state.epochs.snapshots.mark.as_ref().unwrap().epoch,
+        EpochNo(4)
+    );
 }
 
 // ======================================================================
@@ -5141,7 +5260,7 @@ fn setup_governance_state(
     params.protocol_version_major = 10;
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
-    Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+    Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
     });
@@ -5150,7 +5269,7 @@ fn setup_governance_state(
     for i in 0..drep_count {
         let cred = Credential::VerificationKey(Hash28::from_bytes([(i + 1) as u8; 28]));
         let key = credential_to_hash(&cred);
-        Arc::make_mut(&mut state.governance).dreps.insert(
+        Arc::make_mut(&mut state.gov.governance).dreps.insert(
             key,
             DRepRegistration {
                 credential: cred.clone(),
@@ -5163,7 +5282,7 @@ fn setup_governance_state(
         );
         let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([(i + 100) as u8; 28]));
         let delegator_key = credential_to_hash(&delegator_cred);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .vote_delegations
             .insert(delegator_key, DRep::KeyHash(key));
         add_stake_utxo(&mut state, &delegator_cred, stake_per_drep);
@@ -5236,7 +5355,7 @@ fn test_drep_denominator_yes_no_only() {
         },
         &drep_power_cache,
         no_confidence_stake,
-        &state.governance.votes_by_action,
+        &state.gov.governance.votes_by_action,
         None,
         None,
     );
@@ -5252,7 +5371,7 @@ fn test_always_no_confidence_counts_yes_for_no_confidence_action() {
     for i in 0..3u32 {
         let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([(i + 200) as u8; 28]));
         let delegator_key = credential_to_hash(&delegator_cred);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .vote_delegations
             .insert(delegator_key, DRep::NoConfidence);
         add_stake_utxo(&mut state, &delegator_cred, 1_000_000_000);
@@ -5287,7 +5406,7 @@ fn test_always_no_confidence_counts_yes_for_no_confidence_action() {
         },
         &drep_power_cache,
         no_confidence_stake,
-        &state.governance.votes_by_action,
+        &state.gov.governance.votes_by_action,
         None,
         None,
     );
@@ -5306,7 +5425,7 @@ fn test_always_no_confidence_counts_no_for_other_actions() {
     for i in 0..3u32 {
         let delegator_cred = Credential::VerificationKey(Hash28::from_bytes([(i + 200) as u8; 28]));
         let delegator_key = credential_to_hash(&delegator_cred);
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .vote_delegations
             .insert(delegator_key, DRep::NoConfidence);
         add_stake_utxo(&mut state, &delegator_cred, 1_000_000_000);
@@ -5352,7 +5471,7 @@ fn test_always_no_confidence_counts_no_for_other_actions() {
         },
         &drep_power_cache,
         no_confidence_stake,
-        &state.governance.votes_by_action,
+        &state.gov.governance.votes_by_action,
         None,
         None,
     );
@@ -5367,7 +5486,7 @@ fn test_always_no_confidence_counts_no_for_other_actions() {
 fn test_inactive_drep_excluded_from_voting_power() {
     let (mut state, dreps) = setup_governance_state(5, 1_000_000_000);
     for (_, key) in dreps.iter().take(2) {
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .dreps
             .get_mut(key)
             .unwrap()
@@ -5392,23 +5511,26 @@ fn test_inactive_drep_remains_registered() {
         deposit: Lovelace(500_000_000),
         anchor: None,
     });
-    assert!(state.governance.dreps[&key].active);
+    assert!(state.gov.governance.dreps[&key].active);
 
     state.process_epoch_transition(EpochNo(5));
-    assert!(state.governance.dreps.contains_key(&key));
-    assert!(!state.governance.dreps[&key].active);
-    assert_eq!(state.governance.dreps[&key].deposit, Lovelace(500_000_000));
+    assert!(state.gov.governance.dreps.contains_key(&key));
+    assert!(!state.gov.governance.dreps[&key].active);
+    assert_eq!(
+        state.gov.governance.dreps[&key].deposit,
+        Lovelace(500_000_000)
+    );
 }
 
 #[test]
 fn test_inactive_drep_stake_not_in_total() {
     let (mut state, dreps) = setup_governance_state(5, 1_000_000_000);
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .dreps
         .get_mut(&dreps[0].1)
         .unwrap()
         .active = false;
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .dreps
         .get_mut(&dreps[1].1)
         .unwrap()
@@ -5432,10 +5554,10 @@ fn test_governance_threshold_valid_half() {
         ..Default::default()
     };
     assert!(state.apply_protocol_param_update(&update).is_ok());
-    assert_eq!(state.protocol_params.dvt_hard_fork.numerator, 1);
-    assert_eq!(state.protocol_params.dvt_hard_fork.denominator, 2);
-    assert_eq!(state.protocol_params.pvt_hard_fork.numerator, 1);
-    assert_eq!(state.protocol_params.pvt_hard_fork.denominator, 2);
+    assert_eq!(state.epochs.protocol_params.dvt_hard_fork.numerator, 1);
+    assert_eq!(state.epochs.protocol_params.dvt_hard_fork.denominator, 2);
+    assert_eq!(state.epochs.protocol_params.pvt_hard_fork.numerator, 1);
+    assert_eq!(state.epochs.protocol_params.pvt_hard_fork.denominator, 2);
 }
 
 #[test]
@@ -5449,8 +5571,11 @@ fn test_governance_threshold_exactly_one() {
         ..Default::default()
     };
     assert!(state.apply_protocol_param_update(&update).is_ok());
-    assert_eq!(state.protocol_params.dvt_no_confidence.numerator, 1);
-    assert_eq!(state.protocol_params.dvt_no_confidence.denominator, 1);
+    assert_eq!(state.epochs.protocol_params.dvt_no_confidence.numerator, 1);
+    assert_eq!(
+        state.epochs.protocol_params.dvt_no_confidence.denominator,
+        1
+    );
 }
 
 #[test]
@@ -5464,14 +5589,24 @@ fn test_governance_threshold_exactly_zero() {
         ..Default::default()
     };
     assert!(state.apply_protocol_param_update(&update).is_ok());
-    assert_eq!(state.protocol_params.pvt_committee_normal.numerator, 0);
-    assert_eq!(state.protocol_params.pvt_committee_normal.denominator, 1);
+    assert_eq!(
+        state.epochs.protocol_params.pvt_committee_normal.numerator,
+        0
+    );
+    assert_eq!(
+        state
+            .epochs
+            .protocol_params
+            .pvt_committee_normal
+            .denominator,
+        1
+    );
 }
 
 #[test]
 fn test_governance_threshold_exceeds_one_rejected() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    let original = state.protocol_params.dvt_hard_fork.clone();
+    let original = state.epochs.protocol_params.dvt_hard_fork.clone();
     let update = ProtocolParamUpdate {
         dvt_hard_fork: Some(Rational {
             numerator: 3,
@@ -5493,13 +5628,17 @@ fn test_governance_threshold_exceeds_one_rejected() {
         err_msg
     );
     // Parameter should NOT have been updated
-    assert_eq!(state.protocol_params.dvt_hard_fork, original);
+    assert_eq!(state.epochs.protocol_params.dvt_hard_fork, original);
 }
 
 #[test]
 fn test_governance_threshold_zero_denominator_rejected() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-    let original = state.protocol_params.pvt_motion_no_confidence.clone();
+    let original = state
+        .epochs
+        .protocol_params
+        .pvt_motion_no_confidence
+        .clone();
     let update = ProtocolParamUpdate {
         pvt_motion_no_confidence: Some(Rational {
             numerator: 1,
@@ -5521,7 +5660,10 @@ fn test_governance_threshold_zero_denominator_rejected() {
         err_msg
     );
     // Parameter should NOT have been updated
-    assert_eq!(state.protocol_params.pvt_motion_no_confidence, original);
+    assert_eq!(
+        state.epochs.protocol_params.pvt_motion_no_confidence,
+        original
+    );
 }
 
 #[test]
@@ -5753,12 +5895,12 @@ fn test_slot_stabilisation_window_no_overflow() {
 
     // Evolving nonce updated: genesis_hash <> eta = blake2b(genesis_hash || eta)
     // (genesis_hash is non-ZERO so the hash-combination path is taken, not identity)
-    assert_ne!(state.evolving_nonce, genesis_hash);
-    assert_ne!(state.evolving_nonce, Hash32::ZERO);
+    assert_ne!(state.consensus.evolving_nonce, genesis_hash);
+    assert_ne!(state.consensus.evolving_nonce, Hash32::ZERO);
     // Candidate nonce should be FROZEN at genesis_hash (extreme slot is in stabilisation window).
     // set_genesis_hash initialises candidate to genesis_hash, and since the first block lands
     // inside the stabilisation window, candidate stays frozen at genesis_hash.
-    assert_eq!(state.candidate_nonce, genesis_hash);
+    assert_eq!(state.consensus.candidate_nonce, genesis_hash);
 }
 
 /// Test that first_slot_of_epoch and epoch_of_slot don't overflow with
@@ -5807,12 +5949,15 @@ fn test_stabilisation_window_boundary_normal_values() {
         .apply_block(&block, BlockValidationMode::ApplyOnly)
         .unwrap();
     // After slot 59 (outside stabilisation window): candidate tracks evolving
-    assert_eq!(state.candidate_nonce, state.evolving_nonce);
-    assert_ne!(state.evolving_nonce, genesis_hash); // nonce advanced
+    assert_eq!(
+        state.consensus.candidate_nonce,
+        state.consensus.evolving_nonce
+    );
+    assert_ne!(state.consensus.evolving_nonce, genesis_hash); // nonce advanced
 
     // Slot 60 is the FIRST slot in the stabilisation window
     // (60 >= 100 - 40 = 60, so candidate freezes)
-    let candidate_before = state.candidate_nonce;
+    let candidate_before = state.consensus.candidate_nonce;
     let mut block2 = make_test_block(60, 2, *block.hash(), vec![]);
     block2.header.nonce_vrf_output = vec![0x63u8; 32]; // non-empty so evolving nonce updates
     block2.header.vrf_result.output = vec![0x63u8; 32];
@@ -5821,9 +5966,9 @@ fn test_stabilisation_window_boundary_normal_values() {
         .apply_block(&block2, BlockValidationMode::ApplyOnly)
         .unwrap();
     // After slot 60 (inside stabilisation window): candidate frozen
-    assert_eq!(state.candidate_nonce, candidate_before);
+    assert_eq!(state.consensus.candidate_nonce, candidate_before);
     // Evolving nonce still advances
-    assert_ne!(state.evolving_nonce, candidate_before);
+    assert_ne!(state.consensus.evolving_nonce, candidate_before);
 }
 
 /// Verify that reward expansion calculation does not overflow i128 even with
@@ -5857,9 +6002,9 @@ fn test_reward_expansion_no_i128_overflow() {
     // ~1.8e19 * 4.5e16 * 2.16e4 = ~1.7e40, far exceeding i128::MAX (~1.7e38)
 
     let mut state = LedgerState::new(params);
-    state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
-    state.epoch_block_count = 21600;
-    state.epoch_fees = Lovelace(0);
+    state.epochs.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+    state.consensus.epoch_block_count = 21600;
+    state.utxo.epoch_fees = Lovelace(0);
     state.epoch_length = 432000;
 
     // Set up minimal structures for calculate_and_distribute_rewards
@@ -5885,7 +6030,7 @@ fn test_reward_expansion_no_i128_overflow() {
         .mul(&Rat::new(MAX_LOVELACE_SUPPLY as i128, 1))
         .floor_u64();
     assert_eq!(
-        state.reserves.0,
+        state.epochs.reserves.0,
         MAX_LOVELACE_SUPPLY - expected_treasury_cut,
         "Reserves should decrease by treasury_cut only (no pools, no circulation)"
     );
@@ -5904,9 +6049,9 @@ fn test_reward_expansion_large_rho_numerator() {
     };
 
     let mut state = LedgerState::new(params);
-    state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
-    state.epoch_block_count = 21600;
-    state.epoch_fees = Lovelace(0);
+    state.epochs.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+    state.consensus.epoch_block_count = 21600;
+    state.utxo.epoch_fees = Lovelace(0);
     state.epoch_length = 432000;
 
     let go_snapshot = StakeSnapshot {
@@ -5934,7 +6079,7 @@ fn test_reward_expansion_large_rho_numerator() {
         .mul(&Rat::new(expansion as i128, 1))
         .floor_u64();
     assert_eq!(
-        state.reserves.0,
+        state.epochs.reserves.0,
         MAX_LOVELACE_SUPPLY - expected_treasury_cut,
         "Reserves should decrease by treasury_cut only (no pools, no circulation)"
     );
@@ -5956,9 +6101,9 @@ fn test_treasury_cut_no_overflow() {
     };
 
     let mut state = LedgerState::new(params);
-    state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
-    state.epoch_block_count = 21600;
-    state.epoch_fees = Lovelace(1_000_000_000_000); // 1M ADA in fees
+    state.epochs.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+    state.consensus.epoch_block_count = 21600;
+    state.utxo.epoch_fees = Lovelace(1_000_000_000_000); // 1M ADA in fees
     state.epoch_length = 432000;
 
     let go_snapshot = StakeSnapshot {
@@ -5981,7 +6126,7 @@ fn test_treasury_cut_no_overflow() {
     let total_rewards = expected_expansion + 1_000_000_000_000;
     // Treasury should have received the entire reward pot
     assert_eq!(
-        state.treasury.0, total_rewards,
+        state.epochs.treasury.0, total_rewards,
         "Treasury should receive all rewards when tau=1"
     );
 }
@@ -6142,7 +6287,7 @@ fn test_era_gating_conway_cert_rejected_pre_conway() {
         anchor: None,
     });
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         1,
         "RegDRep should be applied during block application regardless of protocol version"
     );
@@ -6163,7 +6308,7 @@ fn test_era_gating_conway_cert_accepted_in_conway() {
         anchor: None,
     });
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         1,
         "RegDRep should be accepted in Conway era"
     );
@@ -6183,7 +6328,7 @@ fn test_era_gating_vote_delegation_rejected_pre_conway() {
         drep: DRep::Abstain,
     });
     assert_eq!(
-        state.governance.vote_delegations.len(),
+        state.gov.governance.vote_delegations.len(),
         1,
         "VoteDelegation applied during block application regardless of protocol version"
     );
@@ -6204,7 +6349,7 @@ fn test_era_gating_committee_hot_auth_rejected_pre_conway() {
         hot_credential: hot,
     });
     assert_eq!(
-        state.governance.committee_hot_keys.len(),
+        state.gov.governance.committee_hot_keys.len(),
         1,
         "CommitteeHotAuth applied during block application regardless of protocol version"
     );
@@ -6222,7 +6367,7 @@ fn test_era_gating_pre_conway_certs_always_accepted() {
 
     let key = credential_to_hash(&cred);
     assert!(
-        state.reward_accounts.contains_key(&key),
+        state.certs.reward_accounts.contains_key(&key),
         "StakeRegistration should work in any era"
     );
 }
@@ -6234,13 +6379,13 @@ fn test_era_gating_governance_proposals_skipped_pre_conway() {
     params.protocol_version_major = 8;
     let state = LedgerState::new(params);
 
-    let proposal_count_before = state.governance.proposals.len();
+    let proposal_count_before = state.gov.governance.proposals.len();
 
     // Directly try to process in pre-Conway (the guard is in apply_block,
     // but process_proposal itself does not gate — we test the apply_block path
     // by checking the guard condition)
     assert!(
-        state.protocol_params.protocol_version_major < 9,
+        state.epochs.protocol_params.protocol_version_major < 9,
         "Protocol version should be pre-Conway"
     );
     assert_eq!(
@@ -6265,14 +6410,14 @@ fn test_era_gating_conway_stake_registration_rejected_pre_conway() {
         deposit: Lovelace(2_000_000),
     });
     assert!(
-        state.reward_accounts.contains_key(&key),
+        state.certs.reward_accounts.contains_key(&key),
         "ConwayStakeRegistration applied during block application regardless of protocol version"
     );
 
     // But regular StakeRegistration should work
     state.process_certificate(&Certificate::StakeRegistration(cred));
     assert!(
-        state.reward_accounts.contains_key(&key),
+        state.certs.reward_accounts.contains_key(&key),
         "StakeRegistration should work in pre-Conway era"
     );
 }
@@ -6304,18 +6449,18 @@ fn make_reward_test_state(
         denominator: 10,
     };
     let mut state = LedgerState::new(params);
-    state.reserves = Lovelace(reserves);
+    state.epochs.reserves = Lovelace(reserves);
     state.epoch_length = 432000; // standard epoch length
-    state.epoch_block_count = 21600; // normal block production
+    state.consensus.epoch_block_count = 21600; // normal block production
     state
 }
 
 #[test]
 fn test_reward_zero_reserves_no_expansion() {
     let mut state = make_reward_test_state(0, 3, 1000, 2, 10);
-    state.epoch_fees = Lovelace(1_000_000);
-    let reserves_before = state.reserves.0;
-    let treasury_before = state.treasury.0;
+    state.utxo.epoch_fees = Lovelace(1_000_000);
+    let reserves_before = state.epochs.reserves.0;
+    let treasury_before = state.epochs.treasury.0;
 
     // With zero reserves, expansion = floor(rho * 0) = 0
     // Only fees are distributed
@@ -6332,12 +6477,12 @@ fn test_reward_zero_reserves_no_expansion() {
     state.calculate_and_distribute_rewards(snapshot);
 
     assert_eq!(
-        state.reserves.0, reserves_before,
+        state.epochs.reserves.0, reserves_before,
         "Reserves should not change when already at 0"
     );
     // treasury gets tau * fees + undistributed
     assert!(
-        state.treasury.0 >= treasury_before,
+        state.epochs.treasury.0 >= treasury_before,
         "Treasury should increase from fees"
     );
 }
@@ -6345,8 +6490,8 @@ fn test_reward_zero_reserves_no_expansion() {
 #[test]
 fn test_reward_rho_zero_no_expansion() {
     let mut state = make_reward_test_state(10_000_000_000_000_000, 0, 1, 2, 10);
-    state.epoch_fees = Lovelace(0);
-    let reserves_before = state.reserves.0;
+    state.utxo.epoch_fees = Lovelace(0);
+    let reserves_before = state.epochs.reserves.0;
 
     let snapshot = StakeSnapshot {
         epoch: EpochNo(1),
@@ -6362,7 +6507,7 @@ fn test_reward_rho_zero_no_expansion() {
 
     // rho=0 means expansion=0, and fees=0, so total_rewards=0 -> early return
     assert_eq!(
-        state.reserves.0, reserves_before,
+        state.epochs.reserves.0, reserves_before,
         "Reserves should not decrease when rho=0 and no fees"
     );
 }
@@ -6370,8 +6515,8 @@ fn test_reward_rho_zero_no_expansion() {
 #[test]
 fn test_reward_tau_zero_no_treasury_cut() {
     let mut state = make_reward_test_state(10_000_000_000_000_000, 3, 1000, 0, 1);
-    state.epoch_fees = Lovelace(0);
-    let treasury_before = state.treasury.0;
+    state.utxo.epoch_fees = Lovelace(0);
+    let treasury_before = state.epochs.treasury.0;
 
     let snapshot = StakeSnapshot {
         epoch: EpochNo(1),
@@ -6389,7 +6534,7 @@ fn test_reward_tau_zero_no_treasury_cut() {
     // With no pools, undistributed rewards stay in reserves (not sent to treasury).
     // So treasury remains unchanged when tau=0 and there are no pools.
     assert_eq!(
-        state.treasury.0, treasury_before,
+        state.epochs.treasury.0, treasury_before,
         "Treasury should not change when tau=0 and no pools (undistributed stays in reserves)"
     );
 }
@@ -6397,9 +6542,9 @@ fn test_reward_tau_zero_no_treasury_cut() {
 #[test]
 fn test_reward_tau_one_all_to_treasury() {
     let mut state = make_reward_test_state(10_000_000_000_000_000, 3, 1000, 1, 1);
-    state.epoch_fees = Lovelace(100_000_000);
-    let reserves_before = state.reserves.0;
-    let treasury_before = state.treasury.0;
+    state.utxo.epoch_fees = Lovelace(100_000_000);
+    let reserves_before = state.epochs.reserves.0;
+    let treasury_before = state.epochs.treasury.0;
 
     let snapshot = StakeSnapshot {
         epoch: EpochNo(1),
@@ -6423,7 +6568,7 @@ fn test_reward_tau_one_all_to_treasury() {
         .floor_u64();
     let total_rewards = expected_expansion + 100_000_000;
     assert_eq!(
-        state.treasury.0,
+        state.epochs.treasury.0,
         treasury_before + total_rewards,
         "Treasury should get all rewards when tau=1"
     );
@@ -6433,9 +6578,9 @@ fn test_reward_tau_one_all_to_treasury() {
 fn test_reward_reserves_decrease_treasury_increase() {
     let initial_reserves = 13_000_000_000_000_000u64; // 13B ADA in reserves
     let mut state = make_reward_test_state(initial_reserves, 3, 1000, 2, 10);
-    state.epoch_fees = Lovelace(50_000_000);
-    let reserves_before = state.reserves.0;
-    let treasury_before = state.treasury.0;
+    state.utxo.epoch_fees = Lovelace(50_000_000);
+    let reserves_before = state.epochs.reserves.0;
+    let treasury_before = state.epochs.treasury.0;
 
     let snapshot = StakeSnapshot {
         epoch: EpochNo(1),
@@ -6467,7 +6612,7 @@ fn test_reward_reserves_decrease_treasury_increase() {
     // (treasury_cut - fees) net leaves reserves. Treasury receives the full
     // treasury_cut (fees are part of the pot that funds it).
     let expected_delta_reserves = expected_treasury_cut - 50_000_000;
-    let reserves_decrease = reserves_before - state.reserves.0;
+    let reserves_decrease = reserves_before - state.epochs.reserves.0;
     assert!(
         reserves_decrease > 0,
         "Reserves should decrease with non-zero rho and tau"
@@ -6479,7 +6624,7 @@ fn test_reward_reserves_decrease_treasury_increase() {
 
     // Treasury should increase by treasury_cut
     assert_eq!(
-        state.treasury.0,
+        state.epochs.treasury.0,
         treasury_before + expected_treasury_cut,
         "Treasury should increase by treasury_cut each epoch"
     );
@@ -6490,7 +6635,7 @@ fn test_reward_max_reserves_no_overflow() {
     // Test with maximum reserves (close to max supply)
     let max_reserves = MAX_LOVELACE_SUPPLY; // 45B ADA
     let mut state = make_reward_test_state(max_reserves, 3, 1000, 2, 10);
-    state.epoch_fees = Lovelace(0);
+    state.utxo.epoch_fees = Lovelace(0);
 
     let snapshot = StakeSnapshot {
         epoch: EpochNo(1),
@@ -6508,7 +6653,7 @@ fn test_reward_max_reserves_no_overflow() {
 
     // Reserves should have decreased
     assert!(
-        state.reserves.0 < max_reserves,
+        state.epochs.reserves.0 < max_reserves,
         "Reserves should decrease from max"
     );
 }
@@ -6518,8 +6663,8 @@ fn test_reward_treasury_tax_correct_amount() {
     // Verify that tau correctly deducts from expansion before distributing
     let initial_reserves = 10_000_000_000_000_000u64;
     let mut state = make_reward_test_state(initial_reserves, 3, 1000, 2, 10);
-    state.epoch_fees = Lovelace(100_000_000); // 100 ADA fees
-    let treasury_before = state.treasury.0;
+    state.utxo.epoch_fees = Lovelace(100_000_000); // 100 ADA fees
+    let treasury_before = state.epochs.treasury.0;
 
     let snapshot = StakeSnapshot {
         epoch: EpochNo(1),
@@ -6533,14 +6678,14 @@ fn test_reward_treasury_tax_correct_amount() {
     };
     state.calculate_and_distribute_rewards(snapshot);
 
-    let expansion = initial_reserves - state.reserves.0;
+    let expansion = initial_reserves - state.epochs.reserves.0;
     let total_rewards = expansion + 100_000_000;
     let expected_treasury_cut = Rat::new(2, 10)
         .mul(&Rat::new(total_rewards as i128, 1))
         .floor_u64();
 
     // Treasury should get at least the tau cut (plus undistributed since no pools)
-    let treasury_increase = state.treasury.0 - treasury_before;
+    let treasury_increase = state.epochs.treasury.0 - treasury_before;
     assert!(
         treasury_increase >= expected_treasury_cut,
         "Treasury should receive at least the tau cut: got {}, expected >= {}",
@@ -6577,10 +6722,12 @@ fn test_drep_voting_power_equals_delegated_stake() {
     let key1 = credential_to_hash(&stake_cred1);
     let key2 = credential_to_hash(&stake_cred2);
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(key1, Lovelace(1_000_000_000));
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(key2, Lovelace(2_000_000_000));
@@ -6627,7 +6774,7 @@ fn test_drep_inactive_excluded_from_voting_power() {
 
     // Make the DRep inactive by setting last_active_epoch far in the past
     let drep_key = credential_to_hash(&drep_cred);
-    if let Some(drep) = Arc::make_mut(&mut state.governance)
+    if let Some(drep) = Arc::make_mut(&mut state.gov.governance)
         .dreps
         .get_mut(&drep_key)
     {
@@ -6640,6 +6787,7 @@ fn test_drep_inactive_excluded_from_voting_power() {
     state.process_certificate(&Certificate::StakeRegistration(stake_cred.clone()));
     let stake_key = credential_to_hash(&stake_cred);
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(stake_key, Lovelace(5_000_000_000));
@@ -6673,6 +6821,7 @@ fn test_drep_always_abstain_excluded_from_yes_no_tally() {
     state.process_certificate(&Certificate::StakeRegistration(stake_cred.clone()));
     let stake_key = credential_to_hash(&stake_cred);
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(stake_key, Lovelace(3_000_000_000));
@@ -6700,6 +6849,7 @@ fn test_drep_always_no_confidence_flows_to_no_confidence_actions() {
     state.process_certificate(&Certificate::StakeRegistration(stake_cred.clone()));
     let stake_key = credential_to_hash(&stake_cred);
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(stake_key, Lovelace(2_000_000_000));
@@ -6751,6 +6901,7 @@ fn test_drep_voting_power_with_known_distribution() {
             state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
             let key = credential_to_hash(&cred);
             state
+                .certs
                 .stake_distribution
                 .stake_map
                 .insert(key, Lovelace(amount));
@@ -6845,6 +6996,7 @@ fn test_abstain_excluded_from_denominator() {
         state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
         let key = credential_to_hash(&cred);
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(key, Lovelace(100));
@@ -6908,7 +7060,7 @@ fn test_abstain_excluded_from_denominator() {
         &GovAction::InfoAction,
         &cache,
         no_conf,
-        &state.governance.votes_by_action,
+        &state.gov.governance.votes_by_action,
         None,
         None,
     );
@@ -6939,6 +7091,7 @@ fn test_all_dreps_abstain() {
     state.process_certificate(&Certificate::StakeRegistration(stake_cred.clone()));
     let key = credential_to_hash(&stake_cred);
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(key, Lovelace(100));
@@ -6984,7 +7137,7 @@ fn test_all_dreps_abstain() {
         &GovAction::InfoAction,
         &cache,
         no_conf,
-        &state.governance.votes_by_action,
+        &state.gov.governance.votes_by_action,
         None,
         None,
     );
@@ -7031,6 +7184,7 @@ fn test_mix_yes_no_abstain_votes() {
         state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
         let key = credential_to_hash(&cred);
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(key, Lovelace(100));
@@ -7094,7 +7248,7 @@ fn test_mix_yes_no_abstain_votes() {
         &GovAction::InfoAction,
         &cache,
         no_conf,
-        &state.governance.votes_by_action,
+        &state.gov.governance.votes_by_action,
         None,
         None,
     );
@@ -7135,7 +7289,7 @@ fn test_cc_abstain_excluded_from_denominator() {
     let mut state = LedgerState::new(params);
 
     // Set up a committee with 3 members, threshold 1/2
-    Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+    Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
         numerator: 1,
         denominator: 2,
     });
@@ -7152,7 +7306,7 @@ fn test_cc_abstain_excluded_from_denominator() {
     let hot2 = hot2_28.to_hash32_padded();
     let hot3 = hot3_28.to_hash32_padded();
 
-    let gov = Arc::make_mut(&mut state.governance);
+    let gov = Arc::make_mut(&mut state.gov.governance);
     gov.committee_expiration.insert(cold1, EpochNo(100));
     gov.committee_expiration.insert(cold2, EpochNo(100));
     gov.committee_expiration.insert(cold3, EpochNo(100));
@@ -7190,7 +7344,7 @@ fn test_cc_abstain_excluded_from_denominator() {
         ),
     ];
 
-    let action_votes = Arc::make_mut(&mut state.governance)
+    let action_votes = Arc::make_mut(&mut state.gov.governance)
         .votes_by_action
         .entry(action_id.clone())
         .or_default();
@@ -7202,11 +7356,11 @@ fn test_cc_abstain_excluded_from_denominator() {
     // Effective: yes=1, total_excluding_abstain=2 (yes+no), ratio=1/2 = 50% >= 50% threshold
     let result = check_cc_approval(
         &action_id,
-        &state.governance.votes_by_action,
-        &state.governance.committee_hot_keys,
-        &state.governance.committee_expiration,
-        &state.governance.committee_resigned,
-        &state.governance.committee_threshold,
+        &state.gov.governance.votes_by_action,
+        &state.gov.governance.committee_hot_keys,
+        &state.gov.governance.committee_expiration,
+        &state.gov.governance.committee_resigned,
+        &state.gov.governance.committee_threshold,
         EpochNo(10),
         1, // min committee size
         false,
@@ -7228,6 +7382,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
     state.process_certificate(&Certificate::StakeRegistration(stake_cred.clone()));
     let key = credential_to_hash(&stake_cred);
     state
+        .certs
         .stake_distribution
         .stake_map
         .insert(key, Lovelace(500));
@@ -7251,7 +7406,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
         },
         &cache,
         no_conf_stake,
-        &state.governance.votes_by_action,
+        &state.gov.governance.votes_by_action,
         None,
         None,
     );
@@ -7267,7 +7422,7 @@ fn test_no_confidence_stake_counts_as_yes_for_no_confidence_action() {
         &GovAction::InfoAction,
         &cache,
         no_conf_stake,
-        &state.governance.votes_by_action,
+        &state.gov.governance.votes_by_action,
         None,
         None,
     );
@@ -7290,31 +7445,49 @@ fn test_snapshot_rotation_mark_set_go() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
     state.epoch_length = 100;
     state.epoch = EpochNo(0);
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     // Epoch 0 -> 1: creates mark snapshot, set/go are None
     state.process_epoch_transition(EpochNo(1));
-    assert!(state.snapshots.mark.is_some());
-    assert_eq!(state.snapshots.mark.as_ref().unwrap().epoch, EpochNo(1));
-    assert!(state.snapshots.set.is_none());
-    assert!(state.snapshots.go.is_none());
+    assert!(state.epochs.snapshots.mark.is_some());
+    assert_eq!(
+        state.epochs.snapshots.mark.as_ref().unwrap().epoch,
+        EpochNo(1)
+    );
+    assert!(state.epochs.snapshots.set.is_none());
+    assert!(state.epochs.snapshots.go.is_none());
 
     // Epoch 1 -> 2: mark -> set, new mark created
     state.process_epoch_transition(EpochNo(2));
-    assert!(state.snapshots.mark.is_some());
-    assert_eq!(state.snapshots.mark.as_ref().unwrap().epoch, EpochNo(2));
-    assert!(state.snapshots.set.is_some());
-    assert_eq!(state.snapshots.set.as_ref().unwrap().epoch, EpochNo(1));
-    assert!(state.snapshots.go.is_none());
+    assert!(state.epochs.snapshots.mark.is_some());
+    assert_eq!(
+        state.epochs.snapshots.mark.as_ref().unwrap().epoch,
+        EpochNo(2)
+    );
+    assert!(state.epochs.snapshots.set.is_some());
+    assert_eq!(
+        state.epochs.snapshots.set.as_ref().unwrap().epoch,
+        EpochNo(1)
+    );
+    assert!(state.epochs.snapshots.go.is_none());
 
     // Epoch 2 -> 3: set -> go, mark -> set, new mark created
     state.process_epoch_transition(EpochNo(3));
-    assert!(state.snapshots.mark.is_some());
-    assert_eq!(state.snapshots.mark.as_ref().unwrap().epoch, EpochNo(3));
-    assert!(state.snapshots.set.is_some());
-    assert_eq!(state.snapshots.set.as_ref().unwrap().epoch, EpochNo(2));
-    assert!(state.snapshots.go.is_some());
-    assert_eq!(state.snapshots.go.as_ref().unwrap().epoch, EpochNo(1));
+    assert!(state.epochs.snapshots.mark.is_some());
+    assert_eq!(
+        state.epochs.snapshots.mark.as_ref().unwrap().epoch,
+        EpochNo(3)
+    );
+    assert!(state.epochs.snapshots.set.is_some());
+    assert_eq!(
+        state.epochs.snapshots.set.as_ref().unwrap().epoch,
+        EpochNo(2)
+    );
+    assert!(state.epochs.snapshots.go.is_some());
+    assert_eq!(
+        state.epochs.snapshots.go.as_ref().unwrap().epoch,
+        EpochNo(1)
+    );
 }
 
 #[test]
@@ -7322,8 +7495,8 @@ fn test_pool_retirement_at_scheduled_epoch() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
     state.epoch_length = 100;
     state.epoch = EpochNo(4);
-    state.needs_stake_rebuild = false;
-    state.reserves = Lovelace(0); // Prevent RUPD expansion
+    state.epochs.needs_stake_rebuild = false;
+    state.epochs.reserves = Lovelace(0); // Prevent RUPD expansion
 
     let pool_id = Hash28::from_bytes([0xAA; 28]);
     let reward_addr = {
@@ -7344,31 +7517,32 @@ fn test_pool_retirement_at_scheduled_epoch() {
         metadata_url: None,
         metadata_hash: None,
     };
-    Arc::make_mut(&mut state.pool_params).insert(pool_id, pool_reg);
+    Arc::make_mut(&mut state.certs.pool_params).insert(pool_id, pool_reg);
 
     // Register the operator's reward account so pool deposit refund goes there
     // (unregistered accounts have their refund sent to treasury per Haskell POOLREAP).
     let hash_key = LedgerState::reward_account_to_hash(&reward_addr);
-    Arc::make_mut(&mut state.reward_accounts).insert(hash_key, Lovelace(0));
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(hash_key, Lovelace(0));
 
     // Schedule retirement at epoch 5
-    state.pending_retirements.insert(pool_id, EpochNo(5));
+    state.certs.pending_retirements.insert(pool_id, EpochNo(5));
 
     // Transition to epoch 5: pool should be retired and removed
     state.process_epoch_transition(EpochNo(5));
     assert!(
-        !state.pool_params.contains_key(&pool_id),
+        !state.certs.pool_params.contains_key(&pool_id),
         "Pool should be removed after retirement epoch"
     );
 
     // Check deposit was refunded
     let hash_key = LedgerState::reward_account_to_hash(&reward_addr);
     let refund = state
+        .certs
         .reward_accounts
         .get(&hash_key)
         .copied()
         .unwrap_or(Lovelace(0));
-    assert_eq!(refund, state.protocol_params.pool_deposit);
+    assert_eq!(refund, state.epochs.protocol_params.pool_deposit);
 }
 
 #[test]
@@ -7376,7 +7550,7 @@ fn test_pool_reregistration_cancels_retirement() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
     state.epoch_length = 100;
     state.epoch = EpochNo(3);
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     let pool_id = Hash28::from_bytes([0xCC; 28]);
     let pool_reg = PoolRegistration {
@@ -7392,18 +7566,18 @@ fn test_pool_reregistration_cancels_retirement() {
         metadata_url: None,
         metadata_hash: None,
     };
-    Arc::make_mut(&mut state.pool_params).insert(pool_id, pool_reg.clone());
+    Arc::make_mut(&mut state.certs.pool_params).insert(pool_id, pool_reg.clone());
 
     // Schedule retirement at epoch 5
-    state.pending_retirements.insert(pool_id, EpochNo(5));
+    state.certs.pending_retirements.insert(pool_id, EpochNo(5));
 
     // Re-register (cancel retirement)
-    state.pending_retirements.remove(&pool_id);
+    state.certs.pending_retirements.remove(&pool_id);
 
     // Transition to epoch 5: pool should still exist
     state.process_epoch_transition(EpochNo(5));
     assert!(
-        state.pool_params.contains_key(&pool_id),
+        state.certs.pool_params.contains_key(&pool_id),
         "Pool should remain after re-registration cancels retirement"
     );
 }
@@ -7413,9 +7587,9 @@ fn test_zero_total_stake_no_panic() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
     state.epoch_length = 100;
     state.epoch = EpochNo(0);
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
     // No delegations, no stake - should not panic or divide by zero
-    state.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
+    state.epochs.reserves = Lovelace(MAX_LOVELACE_SUPPLY);
     state.process_epoch_transition(EpochNo(1));
     // If we get here, no panic occurred
     assert_eq!(state.epoch, EpochNo(1));
@@ -7427,7 +7601,7 @@ fn test_protocol_param_update_at_epoch_boundary() {
     state.epoch_length = 100;
     state.epoch = EpochNo(4);
     state.update_quorum = 1; // Set quorum to 1 so a single proposal suffices
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     // Submit a protocol parameter update proposal targeting epoch 4
     let genesis_hash = Hash32::from_bytes([0x01; 32]);
@@ -7436,18 +7610,19 @@ fn test_protocol_param_update_at_epoch_boundary() {
         ..Default::default()
     };
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(4))
         .or_default()
         .push((genesis_hash, ppu));
 
-    assert_eq!(state.protocol_params.min_fee_a, 44);
+    assert_eq!(state.epochs.protocol_params.min_fee_a, 44);
 
     // Transition: old epoch is 4, proposals for epoch 4 are applied
     state.process_epoch_transition(EpochNo(5));
 
     assert_eq!(
-        state.protocol_params.min_fee_a, 55,
+        state.epochs.protocol_params.min_fee_a, 55,
         "Protocol param update should be applied at epoch boundary"
     );
 }
@@ -7457,17 +7632,18 @@ fn test_epoch_transition_resets_accumulators() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
     state.epoch_length = 100;
     state.epoch = EpochNo(0);
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
-    state.epoch_fees = Lovelace(1_000_000);
-    state.epoch_block_count = 42;
-    Arc::make_mut(&mut state.epoch_blocks_by_pool).insert(Hash28::from_bytes([1; 28]), 10);
+    state.utxo.epoch_fees = Lovelace(1_000_000);
+    state.consensus.epoch_block_count = 42;
+    Arc::make_mut(&mut state.consensus.epoch_blocks_by_pool)
+        .insert(Hash28::from_bytes([1; 28]), 10);
 
     state.process_epoch_transition(EpochNo(1));
 
-    assert_eq!(state.epoch_fees, Lovelace(0));
-    assert_eq!(state.epoch_block_count, 0);
-    assert!(state.epoch_blocks_by_pool.is_empty());
+    assert_eq!(state.utxo.epoch_fees, Lovelace(0));
+    assert_eq!(state.consensus.epoch_block_count, 0);
+    assert!(state.consensus.epoch_blocks_by_pool.is_empty());
 }
 
 // ─── Governance parameter update lifecycle tests ─────────────────
@@ -7486,7 +7662,7 @@ fn governance_test_state() -> LedgerState {
     state.epoch_length = 100;
 
     // Set up committee with threshold 2/3
-    Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+    Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
         numerator: 2,
         denominator: 3,
     });
@@ -7495,7 +7671,7 @@ fn governance_test_state() -> LedgerState {
     let cold = Credential::VerificationKey(Hash28::from_bytes([10u8; 28]));
     let hot = Credential::VerificationKey(Hash28::from_bytes([20u8; 28]));
     let cold_key = credential_to_hash(&cold);
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .committee_expiration
         .insert(cold_key, EpochNo(1000));
     state.process_certificate(&Certificate::CommitteeHotAuth {
@@ -7507,7 +7683,7 @@ fn governance_test_state() -> LedgerState {
     for i in 0..10 {
         let cred = Credential::VerificationKey(Hash28::from_bytes([i as u8; 28]));
         let key = credential_to_hash(&cred);
-        Arc::make_mut(&mut state.governance).dreps.insert(
+        Arc::make_mut(&mut state.gov.governance).dreps.insert(
             key,
             DRepRegistration {
                 credential: cred.clone(),
@@ -7519,11 +7695,12 @@ fn governance_test_state() -> LedgerState {
             },
         );
         // Vote-delegate to the DRep
-        Arc::make_mut(&mut state.governance)
+        Arc::make_mut(&mut state.gov.governance)
             .vote_delegations
             .insert(key, DRep::KeyHash(key));
         // Give each credential some stake
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(key, Lovelace(1_000_000_000_000));
@@ -7540,7 +7717,7 @@ fn governance_test_state() -> LedgerState {
     // and the freshly built mark (via delegations) carry 2T lovelace per pool.
     for i in 0..5 {
         let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
-        Arc::make_mut(&mut state.pool_params).insert(
+        Arc::make_mut(&mut state.certs.pool_params).insert(
             pool_id,
             PoolRegistration {
                 pool_id,
@@ -7559,12 +7736,13 @@ fn governance_test_state() -> LedgerState {
         // Create a synthetic delegator for each pool so the epoch-transition
         // mark builder picks up this stake.
         let spo_cred = Hash32::from_bytes([200 + i as u8; 32]);
-        Arc::make_mut(&mut state.delegations).insert(spo_cred, pool_id);
+        Arc::make_mut(&mut state.certs.delegations).insert(spo_cred, pool_id);
         state
+            .certs
             .stake_distribution
             .stake_map
             .insert(spo_cred, Lovelace(2_000_000_000_000));
-        Arc::make_mut(&mut state.reward_accounts).insert(spo_cred, Lovelace(0));
+        Arc::make_mut(&mut state.certs.reward_accounts).insert(spo_cred, Lovelace(0));
     }
 
     // Pre-seed the mark snapshot so SPO voting power is available even before
@@ -7576,11 +7754,11 @@ fn governance_test_state() -> LedgerState {
         let pool_id = Hash28::from_bytes([100 + i as u8; 28]);
         pool_stake.insert(pool_id, Lovelace(2_000_000_000_000));
     }
-    state.snapshots.mark = Some(StakeSnapshot {
+    state.epochs.snapshots.mark = Some(StakeSnapshot {
         epoch: EpochNo(0),
-        delegations: Arc::clone(&state.delegations),
+        delegations: Arc::clone(&state.certs.delegations),
         pool_stake,
-        pool_params: Arc::clone(&state.pool_params),
+        pool_params: Arc::clone(&state.certs.pool_params),
         stake_distribution: Arc::new(HashMap::new()),
         epoch_fees: Lovelace(0),
         epoch_block_count: 0,
@@ -7588,7 +7766,7 @@ fn governance_test_state() -> LedgerState {
     });
 
     // Prevent epoch transitions from triggering a full UTxO scan.
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     state
 }
@@ -7637,7 +7815,7 @@ fn test_parameter_change_ratification_bootstrap() {
     };
     state.process_proposal(&rejected_hash, 0, &rejected_proposal);
     assert!(
-        state.governance.proposals.is_empty(),
+        state.gov.governance.proposals.is_empty(),
         "UpdateCommittee must be rejected during bootstrap (protocol == 9)"
     );
 
@@ -7672,7 +7850,7 @@ fn test_parameter_change_ratification_bootstrap() {
 
     state.process_proposal(&tx_hash, 0, &proposal);
     assert_eq!(
-        state.governance.proposals.len(),
+        state.gov.governance.proposals.len(),
         1,
         "ParameterChange must be accepted during bootstrap"
     );
@@ -7686,7 +7864,7 @@ fn test_update_committee_no_cc_required() {
     // HardForkInitiation, and InfoAction.  This test exercises the ratification logic,
     // not bootstrap restrictions.
     let mut state = governance_test_state();
-    state.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_major = 10;
 
     // Submit UpdateCommittee to add new CC members
     let tx_hash = Hash32::from_bytes([43u8; 32]);
@@ -7760,19 +7938,20 @@ fn test_update_committee_no_cc_required() {
         credential_to_hash(&Credential::VerificationKey(Hash28::from_bytes([30u8; 28])));
     assert!(
         state
+            .gov
             .governance
             .committee_expiration
             .contains_key(&new_cc_key),
         "New CC member should be added"
     );
     assert_eq!(
-        state.governance.committee_expiration[&new_cc_key],
+        state.gov.governance.committee_expiration[&new_cc_key],
         EpochNo(100),
         "CC member expiration should match"
     );
     // enacted_committee should be set
     assert!(
-        state.governance.enacted_committee.is_some(),
+        state.gov.governance.enacted_committee.is_some(),
         "enacted_committee should be set after ratification"
     );
 }
@@ -7782,10 +7961,10 @@ fn test_parameter_change_fails_without_cc() {
     // ParameterChange requires CC approval. If no CC can vote, it fails.
     let mut state = governance_test_state();
     // Post-bootstrap: ParameterChange is allowed but requires CC + DRep votes
-    state.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_major = 10;
 
     // Remove all CC members (no hot keys)
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .committee_hot_keys
         .clear();
 
@@ -7817,12 +7996,12 @@ fn test_parameter_change_fails_without_cc() {
 
     // Verify drep_activity was NOT updated
     assert_eq!(
-        state.protocol_params.drep_activity, 20,
+        state.epochs.protocol_params.drep_activity, 20,
         "drep_activity should NOT be updated without CC approval"
     );
     // Proposal should still be active
     assert_eq!(
-        state.governance.proposals.len(),
+        state.gov.governance.proposals.len(),
         1,
         "Unratified proposal should remain active"
     );
@@ -7834,7 +8013,7 @@ fn test_chained_parameter_changes() {
     // Use protocol version 10 (post-bootstrap) since ParameterChange is
     // disallowed during bootstrap phase (protocol == 9)
     let mut state = governance_test_state();
-    state.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_major = 10;
 
     // First ParameterChange: update drep_activity to 25
     let tx1 = Hash32::from_bytes([50u8; 32]);
@@ -7893,7 +8072,7 @@ fn test_chained_parameter_changes() {
 
     // Ratify first proposal
     state.process_epoch_transition(EpochNo(1));
-    assert_eq!(state.protocol_params.drep_activity, 25);
+    assert_eq!(state.epochs.protocol_params.drep_activity, 25);
 
     // Now submit second ParameterChange, referencing the first as prev_action_id
     let tx2 = Hash32::from_bytes([51u8; 32]);
@@ -7953,14 +8132,14 @@ fn test_chained_parameter_changes() {
     // proposals submitted in epoch E are ratified at boundary E+1→E+2.
     state.process_epoch_transition(EpochNo(2));
     assert_eq!(
-        state.protocol_params.drep_activity, 25,
+        state.epochs.protocol_params.drep_activity, 25,
         "drep_activity should still be 25 — proposal2 not yet ratified (snapshot timing)"
     );
 
     // Ratify second proposal at the next boundary (snapshot from boundary 1→2 now contains proposal2)
     state.process_epoch_transition(EpochNo(3));
     assert_eq!(
-        state.protocol_params.drep_activity, 31,
+        state.epochs.protocol_params.drep_activity, 31,
         "drep_activity should be updated to 31 by chained governance action"
     );
 }
@@ -7970,7 +8149,7 @@ fn test_cost_model_update_via_governance() {
     // ParameterChange can update PlutusV1/V2/V3 cost models
     let mut state = governance_test_state();
     // Post-bootstrap: ParameterChange is allowed; DRep votes required (cost models are Technical group)
-    state.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_major = 10;
 
     let tx_hash = Hash32::from_bytes([55u8; 32]);
     let v2_costs = vec![1i64; 175]; // PlutusV2 has 175 cost model params
@@ -8033,13 +8212,13 @@ fn test_cost_model_update_via_governance() {
     state.process_epoch_transition(EpochNo(1));
 
     assert_eq!(
-        state.protocol_params.cost_models.plutus_v2,
+        state.epochs.protocol_params.cost_models.plutus_v2,
         Some(v2_costs),
         "PlutusV2 cost model should be updated by governance"
     );
     // PlutusV1 should remain unchanged
     assert_eq!(
-        state.protocol_params.cost_models.plutus_v1, None,
+        state.epochs.protocol_params.cost_models.plutus_v1, None,
         "PlutusV1 cost model should not be changed"
     );
 }
@@ -8050,7 +8229,7 @@ fn test_genesis_utxo_reserves_adjustment() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
 
-    let initial_reserves = state.reserves.0;
+    let initial_reserves = state.epochs.reserves.0;
     assert_eq!(initial_reserves, MAX_LOVELACE_SUPPLY);
 
     // Seed some UTxOs
@@ -8064,12 +8243,12 @@ fn test_genesis_utxo_reserves_adjustment() {
     state.seed_genesis_utxos(&entries);
 
     assert_eq!(
-        state.reserves.0,
+        state.epochs.reserves.0,
         initial_reserves - total_seeded,
         "Reserves should be reduced by seeded UTxO amount"
     );
     assert_eq!(
-        state.utxo_set.len(),
+        state.utxo.utxo_set.len(),
         3,
         "UTxO set should contain seeded entries"
     );
@@ -8097,11 +8276,13 @@ fn test_pre_conway_ppup_version_upgrade() {
 
     // Both propose targeting epoch 0 (current epoch)
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(0))
         .or_default()
         .push((genesis1, ppu.clone()));
     state
+        .epochs
         .pending_pp_updates
         .entry(EpochNo(0))
         .or_default()
@@ -8111,7 +8292,7 @@ fn test_pre_conway_ppup_version_upgrade() {
     state.process_epoch_transition(EpochNo(1));
 
     assert_eq!(
-        state.protocol_params.protocol_version_major, 7,
+        state.epochs.protocol_params.protocol_version_major, 7,
         "Protocol version should be upgraded to 7"
     );
 }
@@ -8121,8 +8302,8 @@ fn test_hard_fork_initiation_ratification() {
     // HardForkInitiation requires DRep + SPO + CC
     // Post-bootstrap: HardForkInitiation is allowed (blocked at protocol == 9)
     let mut state = governance_test_state();
-    state.protocol_params.protocol_version_major = 10;
-    state.protocol_params.protocol_version_minor = 0;
+    state.epochs.protocol_params.protocol_version_major = 10;
+    state.epochs.protocol_params.protocol_version_minor = 0;
 
     let tx_hash = Hash32::from_bytes([60u8; 32]);
     let proposal = ProposalProcedure {
@@ -8186,11 +8367,11 @@ fn test_hard_fork_initiation_ratification() {
     state.process_epoch_transition(EpochNo(1));
 
     assert_eq!(
-        state.protocol_params.protocol_version_major, 11,
+        state.epochs.protocol_params.protocol_version_major, 11,
         "Protocol version should be 11 after HardForkInitiation from v10"
     );
     assert_eq!(
-        state.protocol_params.protocol_version_minor, 0,
+        state.epochs.protocol_params.protocol_version_minor, 0,
         "Protocol minor version should be 0"
     );
 }
@@ -8246,7 +8427,7 @@ fn test_prev_action_id_chain_mismatch_blocks_ratification() {
 
     // drep_activity should NOT be changed
     assert_eq!(
-        state.protocol_params.drep_activity, 20,
+        state.epochs.protocol_params.drep_activity, 20,
         "drep_activity should not change with wrong prev_action_id"
     );
 }
@@ -8256,8 +8437,8 @@ fn test_committee_min_size_update_via_governance() {
     // committeeMinSize should be updatable via governance ParameterChange
     // Post-bootstrap: ParameterChange is allowed; Gov-group params need 67% DRep votes
     let mut state = governance_test_state();
-    state.protocol_params.protocol_version_major = 10;
-    assert_eq!(state.protocol_params.committee_min_size, 0);
+    state.epochs.protocol_params.protocol_version_major = 10;
+    assert_eq!(state.epochs.protocol_params.committee_min_size, 0);
 
     let tx_hash = Hash32::from_bytes([80u8; 32]);
     let ppu = ProtocolParamUpdate {
@@ -8314,7 +8495,7 @@ fn test_committee_min_size_update_via_governance() {
     state.process_epoch_transition(EpochNo(1));
 
     assert_eq!(
-        state.protocol_params.committee_min_size, 3,
+        state.epochs.protocol_params.committee_min_size, 3,
         "committeeMinSize should be updated to 3"
     );
 }
@@ -8577,8 +8758,8 @@ fn make_conway_state_with_treasury(treasury: u64) -> LedgerState {
     state.epoch_length = 100;
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
-    state.needs_stake_rebuild = false;
-    state.treasury = Lovelace(treasury);
+    state.epochs.needs_stake_rebuild = false;
+    state.epochs.treasury = Lovelace(treasury);
     state
 }
 
@@ -8600,7 +8781,7 @@ fn test_treasury_value_mismatch_corrects_treasury() {
     // self-corrects by adopting the on-chain declared value.
     let _result = state.apply_block(&block, BlockValidationMode::ValidateAll);
     assert_eq!(
-        state.treasury.0, 9_999,
+        state.epochs.treasury.0, 9_999,
         "Treasury must be corrected to match the on-chain declared value"
     );
 }
@@ -8662,7 +8843,7 @@ fn test_treasury_value_absent_skips_check() {
 /// credential hash in `committee_expiration`.
 fn make_conway_state_with_cc_member(cold_key: dugite_primitives::hash::Hash32) -> LedgerState {
     let mut state = make_conway_state_with_treasury(0);
-    Arc::make_mut(&mut state.governance)
+    Arc::make_mut(&mut state.gov.governance)
         .committee_expiration
         .insert(cold_key, EpochNo(1000));
     state
@@ -8743,7 +8924,7 @@ fn test_committee_hot_auth_elected_cold_credential_not_rejected_by_cc_check() {
 fn test_evolving_nonce_always_hash_invariant() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.evolving_nonce = Hash32::ZERO;
+    state.consensus.evolving_nonce = Hash32::ZERO;
 
     // Feed a known 32-byte input
     let input = [0xABu8; 32];
@@ -8758,7 +8939,7 @@ fn test_evolving_nonce_always_hash_invariant() {
     let expected = dugite_primitives::hash::blake2b_256(&expected_data);
 
     assert_eq!(
-        state.evolving_nonce, expected,
+        state.consensus.evolving_nonce, expected,
         "32-byte input must be hashed before combining with evolving_nonce"
     );
 }
@@ -8768,7 +8949,7 @@ fn test_evolving_nonce_always_hash_invariant() {
 fn test_evolving_nonce_64_byte_input() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.evolving_nonce = Hash32::from_bytes([0x11; 32]);
+    state.consensus.evolving_nonce = Hash32::from_bytes([0x11; 32]);
 
     let input = [0xCDu8; 64];
     state.update_evolving_nonce(&input);
@@ -8779,7 +8960,7 @@ fn test_evolving_nonce_64_byte_input() {
     expected_data.extend_from_slice(eta_hash.as_bytes());
     let expected = dugite_primitives::hash::blake2b_256(&expected_data);
 
-    assert_eq!(state.evolving_nonce, expected);
+    assert_eq!(state.consensus.evolving_nonce, expected);
 }
 
 /// update_evolving_nonce with a 0-byte input.
@@ -8787,7 +8968,7 @@ fn test_evolving_nonce_64_byte_input() {
 fn test_evolving_nonce_zero_byte_input() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.evolving_nonce = Hash32::from_bytes([0x22; 32]);
+    state.consensus.evolving_nonce = Hash32::from_bytes([0x22; 32]);
 
     let input: [u8; 0] = [];
     state.update_evolving_nonce(&input);
@@ -8798,7 +8979,7 @@ fn test_evolving_nonce_zero_byte_input() {
     expected_data.extend_from_slice(eta_hash.as_bytes());
     let expected = dugite_primitives::hash::blake2b_256(&expected_data);
 
-    assert_eq!(state.evolving_nonce, expected);
+    assert_eq!(state.consensus.evolving_nonce, expected);
 }
 
 /// update_evolving_nonce with a 1-byte input.
@@ -8806,7 +8987,7 @@ fn test_evolving_nonce_zero_byte_input() {
 fn test_evolving_nonce_single_byte_input() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.evolving_nonce = Hash32::from_bytes([0x33; 32]);
+    state.consensus.evolving_nonce = Hash32::from_bytes([0x33; 32]);
 
     let input = [0x42u8];
     state.update_evolving_nonce(&input);
@@ -8817,7 +8998,7 @@ fn test_evolving_nonce_single_byte_input() {
     expected_data.extend_from_slice(eta_hash.as_bytes());
     let expected = dugite_primitives::hash::blake2b_256(&expected_data);
 
-    assert_eq!(state.evolving_nonce, expected);
+    assert_eq!(state.consensus.evolving_nonce, expected);
 }
 
 /// update_evolving_nonce with a 128-byte input.
@@ -8825,7 +9006,7 @@ fn test_evolving_nonce_single_byte_input() {
 fn test_evolving_nonce_128_byte_input() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.evolving_nonce = Hash32::from_bytes([0x44; 32]);
+    state.consensus.evolving_nonce = Hash32::from_bytes([0x44; 32]);
 
     let input = [0xEFu8; 128];
     state.update_evolving_nonce(&input);
@@ -8836,7 +9017,7 @@ fn test_evolving_nonce_128_byte_input() {
     expected_data.extend_from_slice(eta_hash.as_bytes());
     let expected = dugite_primitives::hash::blake2b_256(&expected_data);
 
-    assert_eq!(state.evolving_nonce, expected);
+    assert_eq!(state.consensus.evolving_nonce, expected);
 }
 
 /// update_evolving_nonce with all-zero input (32 bytes of 0x00).
@@ -8844,7 +9025,7 @@ fn test_evolving_nonce_128_byte_input() {
 fn test_evolving_nonce_all_zeros_input() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.evolving_nonce = Hash32::from_bytes([0x55; 32]);
+    state.consensus.evolving_nonce = Hash32::from_bytes([0x55; 32]);
 
     let input = [0u8; 32];
     state.update_evolving_nonce(&input);
@@ -8857,7 +9038,7 @@ fn test_evolving_nonce_all_zeros_input() {
     let expected = dugite_primitives::hash::blake2b_256(&expected_data);
 
     assert_eq!(
-        state.evolving_nonce, expected,
+        state.consensus.evolving_nonce, expected,
         "All-zero input must be hashed normally (no NeutralNonce shortcut)"
     );
 }
@@ -8877,9 +9058,9 @@ fn test_epoch_nonce_for_slot_same_epoch() {
     state.epoch_length = 100;
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
-    state.epoch_nonce = Hash32::from_bytes([0xAA; 32]);
-    state.candidate_nonce = Hash32::from_bytes([0xBB; 32]);
-    state.last_epoch_block_nonce = Hash32::from_bytes([0xCC; 32]);
+    state.consensus.epoch_nonce = Hash32::from_bytes([0xAA; 32]);
+    state.consensus.candidate_nonce = Hash32::from_bytes([0xBB; 32]);
+    state.consensus.last_epoch_block_nonce = Hash32::from_bytes([0xCC; 32]);
 
     // Epoch 10 spans slots 1000..1100 (epoch_length=100, no Byron offset).
     let slot_in_epoch_10 = 1050u64;
@@ -8904,12 +9085,12 @@ fn test_epoch_nonce_for_slot_next_epoch() {
     state.epoch_length = 100;
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
-    state.epoch_nonce = Hash32::from_bytes([0xAA; 32]);
+    state.consensus.epoch_nonce = Hash32::from_bytes([0xAA; 32]);
 
     let candidate = Hash32::from_bytes([0xBB; 32]);
     let prev_hash = Hash32::from_bytes([0xCC; 32]);
-    state.candidate_nonce = candidate;
-    state.last_epoch_block_nonce = prev_hash;
+    state.consensus.candidate_nonce = candidate;
+    state.consensus.last_epoch_block_nonce = prev_hash;
 
     // Slot in epoch 11 (first slot after the boundary).
     let slot_in_epoch_11 = 1100u64;
@@ -8942,8 +9123,8 @@ fn test_epoch_nonce_for_slot_next_epoch_neutral_prev() {
     state.byron_epoch_length = 0;
 
     let candidate = Hash32::from_bytes([0xDD; 32]);
-    state.candidate_nonce = candidate;
-    state.last_epoch_block_nonce = Hash32::ZERO; // NeutralNonce
+    state.consensus.candidate_nonce = candidate;
+    state.consensus.last_epoch_block_nonce = Hash32::ZERO; // NeutralNonce
 
     // Slot in epoch 1.
     let slot_in_epoch_1 = 100u64;
@@ -8965,7 +9146,7 @@ fn test_epoch_nonce_for_slot_far_future_epoch() {
     state.epoch_length = 100;
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
-    state.epoch_nonce = Hash32::from_bytes([0xEE; 32]);
+    state.consensus.epoch_nonce = Hash32::from_bytes([0xEE; 32]);
 
     // Slot 2 epochs ahead — beyond our prediction horizon.
     let slot_far_ahead = 1200u64;
@@ -8991,13 +9172,13 @@ fn test_epoch_nonce_for_slot_matches_transition_result() {
     state.epoch_length = 100;
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     // Set up non-trivial nonce inputs.
-    state.candidate_nonce = Hash32::from_bytes([0x01; 32]);
-    state.last_epoch_block_nonce = Hash32::from_bytes([0x02; 32]);
-    state.epoch_nonce = Hash32::from_bytes([0xFF; 32]); // current (epoch 5)
-    state.lab_nonce = Hash32::from_bytes([0x03; 32]);
+    state.consensus.candidate_nonce = Hash32::from_bytes([0x01; 32]);
+    state.consensus.last_epoch_block_nonce = Hash32::from_bytes([0x02; 32]);
+    state.consensus.epoch_nonce = Hash32::from_bytes([0xFF; 32]); // current (epoch 5)
+    state.consensus.lab_nonce = Hash32::from_bytes([0x03; 32]);
 
     // Pre-compute what the nonce *should* be for epoch 6 before transition.
     let slot_in_epoch_6 = 600u64;
@@ -9008,7 +9189,7 @@ fn test_epoch_nonce_for_slot_matches_transition_result() {
     state.process_epoch_transition(EpochNo(6));
 
     assert_eq!(
-        state.epoch_nonce, predicted,
+        state.consensus.epoch_nonce, predicted,
         "epoch_nonce_for_slot must predict the same value that \
          process_epoch_transition produces"
     );
@@ -9022,19 +9203,19 @@ fn test_epoch_nonce_neutral_prev_hash_nonce() {
     let mut state = LedgerState::new(params.clone());
     state.epoch = EpochNo(5);
     state.epoch_length = 100;
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     // Set candidate to a non-zero value, prevHashNonce to zero (NeutralNonce)
     let candidate = Hash32::from_bytes([0xAA; 32]);
-    state.candidate_nonce = candidate;
-    state.last_epoch_block_nonce = Hash32::ZERO; // NeutralNonce
-    state.lab_nonce = Hash32::from_bytes([0xBB; 32]);
+    state.consensus.candidate_nonce = candidate;
+    state.consensus.last_epoch_block_nonce = Hash32::ZERO; // NeutralNonce
+    state.consensus.lab_nonce = Hash32::from_bytes([0xBB; 32]);
 
     state.process_epoch_transition(EpochNo(6));
 
     // Per Haskell TICKN: NeutralNonce is identity, so epoch_nonce = candidate
     assert_eq!(
-        state.epoch_nonce, candidate,
+        state.consensus.epoch_nonce, candidate,
         "epoch_nonce = candidate when prevHashNonce is NeutralNonce (ZERO)"
     );
 }
@@ -9047,17 +9228,17 @@ fn test_epoch_nonce_neutral_candidate_nonce() {
     let mut state = LedgerState::new(params.clone());
     state.epoch = EpochNo(5);
     state.epoch_length = 100;
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     let prev_hash = Hash32::from_bytes([0xCC; 32]);
-    state.candidate_nonce = Hash32::ZERO; // NeutralNonce
-    state.last_epoch_block_nonce = prev_hash;
-    state.lab_nonce = Hash32::from_bytes([0xDD; 32]);
+    state.consensus.candidate_nonce = Hash32::ZERO; // NeutralNonce
+    state.consensus.last_epoch_block_nonce = prev_hash;
+    state.consensus.lab_nonce = Hash32::from_bytes([0xDD; 32]);
 
     state.process_epoch_transition(EpochNo(6));
 
     assert_eq!(
-        state.epoch_nonce, prev_hash,
+        state.consensus.epoch_nonce, prev_hash,
         "epoch_nonce = prevHashNonce when candidate is NeutralNonce (ZERO)"
     );
 }
@@ -9070,13 +9251,13 @@ fn test_epoch_nonce_both_non_zero() {
     let mut state = LedgerState::new(params.clone());
     state.epoch = EpochNo(5);
     state.epoch_length = 100;
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     let candidate = Hash32::from_bytes([0x11; 32]);
     let prev_hash = Hash32::from_bytes([0x22; 32]);
-    state.candidate_nonce = candidate;
-    state.last_epoch_block_nonce = prev_hash;
-    state.lab_nonce = Hash32::from_bytes([0x33; 32]);
+    state.consensus.candidate_nonce = candidate;
+    state.consensus.last_epoch_block_nonce = prev_hash;
+    state.consensus.lab_nonce = Hash32::from_bytes([0x33; 32]);
 
     state.process_epoch_transition(EpochNo(6));
 
@@ -9086,7 +9267,7 @@ fn test_epoch_nonce_both_non_zero() {
     let expected = dugite_primitives::hash::blake2b_256(&nonce_input);
 
     assert_eq!(
-        state.epoch_nonce, expected,
+        state.consensus.epoch_nonce, expected,
         "epoch_nonce = blake2b_256(candidate || prevHashNonce) when both non-zero"
     );
 }
@@ -9098,16 +9279,16 @@ fn test_epoch_nonce_both_zero() {
     let mut state = LedgerState::new(params.clone());
     state.epoch = EpochNo(5);
     state.epoch_length = 100;
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
-    state.candidate_nonce = Hash32::ZERO;
-    state.last_epoch_block_nonce = Hash32::ZERO;
-    state.lab_nonce = Hash32::from_bytes([0x44; 32]);
+    state.consensus.candidate_nonce = Hash32::ZERO;
+    state.consensus.last_epoch_block_nonce = Hash32::ZERO;
+    state.consensus.lab_nonce = Hash32::from_bytes([0x44; 32]);
 
     state.process_epoch_transition(EpochNo(6));
 
     assert_eq!(
-        state.epoch_nonce,
+        state.consensus.epoch_nonce,
         Hash32::ZERO,
         "epoch_nonce = ZERO when both candidate and prevHashNonce are ZERO (NeutralNonce identity)"
     );
@@ -9176,15 +9357,15 @@ fn test_epoch_transition_uses_old_prev_hash_nonce() {
     let mut state = LedgerState::new(params.clone());
     state.epoch = EpochNo(10);
     state.epoch_length = 100;
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     let old_prev_hash = Hash32::from_bytes([0xAA; 32]);
     let candidate = Hash32::from_bytes([0xBB; 32]);
     let lab = Hash32::from_bytes([0xCC; 32]);
 
-    state.candidate_nonce = candidate;
-    state.last_epoch_block_nonce = old_prev_hash;
-    state.lab_nonce = lab;
+    state.consensus.candidate_nonce = candidate;
+    state.consensus.last_epoch_block_nonce = old_prev_hash;
+    state.consensus.lab_nonce = lab;
 
     state.process_epoch_transition(EpochNo(11));
 
@@ -9195,13 +9376,13 @@ fn test_epoch_transition_uses_old_prev_hash_nonce() {
     let expected = dugite_primitives::hash::blake2b_256(&nonce_input);
 
     assert_eq!(
-        state.epoch_nonce, expected,
+        state.consensus.epoch_nonce, expected,
         "epoch_nonce must use OLD prevHashNonce, not the new lab_nonce"
     );
 
     // AFTER the transition, last_epoch_block_nonce should be updated to lab_nonce
     assert_eq!(
-        state.last_epoch_block_nonce, lab,
+        state.consensus.last_epoch_block_nonce, lab,
         "prevHashNonce must be updated to lab_nonce AFTER nonce computation"
     );
 }
@@ -9239,7 +9420,7 @@ fn test_block_ref_script_size_exceeds_1mib_rejected() {
         is_legacy: false,
         raw_cbor: None,
     };
-    state.utxo_set.insert(ref_input.clone(), ref_output);
+    state.utxo.utxo_set.insert(ref_input.clone(), ref_output);
 
     // Create a spending input in the UTxO set
     let spend_input = TransactionInput {
@@ -9256,7 +9437,10 @@ fn test_block_ref_script_size_exceeds_1mib_rejected() {
         is_legacy: false,
         raw_cbor: None,
     };
-    state.utxo_set.insert(spend_input.clone(), spend_output);
+    state
+        .utxo
+        .utxo_set
+        .insert(spend_input.clone(), spend_output);
 
     // Build a transaction that references the large script
     let mut tx = Transaction::empty_with_hash(Hash32::from_bytes([0x01u8; 32]));
@@ -9310,13 +9494,13 @@ fn test_block_ref_script_size_under_1mib_accepted() {
         is_legacy: false,
         raw_cbor: None,
     };
-    state.utxo_set.insert(ref_input.clone(), ref_output);
+    state.utxo.utxo_set.insert(ref_input.clone(), ref_output);
 
     let spend_input = TransactionInput {
         transaction_id: Hash32::from_bytes([0xAAu8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         spend_input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -9368,14 +9552,14 @@ fn test_treasury_value_match_passes() {
     params.protocol_version_major = 9;
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
-    state.treasury = Lovelace(500_000_000_000);
+    state.epochs.treasury = Lovelace(500_000_000_000);
 
     // Add UTxO for the transaction to consume
     let input = TransactionInput {
         transaction_id: Hash32::from_bytes([0xAAu8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -9423,13 +9607,13 @@ fn test_treasury_value_mismatch_corrects_and_applies() {
     params.protocol_version_major = 9;
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
-    state.treasury = Lovelace(500_000_000_000);
+    state.epochs.treasury = Lovelace(500_000_000_000);
 
     let input = TransactionInput {
         transaction_id: Hash32::from_bytes([0xAAu8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -9463,7 +9647,7 @@ fn test_treasury_value_mismatch_corrects_and_applies() {
     // Treasury mismatch is now a warning — block is applied and treasury corrected.
     let _result = state.apply_block(&block, BlockValidationMode::ValidateAll);
     assert_eq!(
-        state.treasury.0, 999_999_999_999,
+        state.epochs.treasury.0, 999_999_999_999,
         "Treasury must be corrected to the on-chain declared value"
     );
 }
@@ -9476,13 +9660,13 @@ fn test_treasury_value_not_checked_pre_conway() {
     params.protocol_version_major = 8; // Babbage
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
-    state.treasury = Lovelace(500_000_000_000);
+    state.epochs.treasury = Lovelace(500_000_000_000);
 
     let input = TransactionInput {
         transaction_id: Hash32::from_bytes([0xAAu8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -9534,14 +9718,14 @@ fn test_treasury_value_not_checked_pre_conway() {
 fn test_spo_voting_power_prefers_mark_over_set() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     let pool_id = Hash28::from_bytes([0x42u8; 28]);
 
     // Set mark with 100 ADA stake
     let mut mark_pool_stake = std::collections::HashMap::new();
     mark_pool_stake.insert(pool_id, Lovelace(100_000_000));
-    state.snapshots.mark = Some(StakeSnapshot {
+    state.epochs.snapshots.mark = Some(StakeSnapshot {
         epoch: EpochNo(10),
         delegations: Arc::new(HashMap::new()),
         pool_stake: mark_pool_stake,
@@ -9555,7 +9739,7 @@ fn test_spo_voting_power_prefers_mark_over_set() {
     // Set set snapshot with 200 ADA stake (should NOT be used)
     let mut set_pool_stake = std::collections::HashMap::new();
     set_pool_stake.insert(pool_id, Lovelace(200_000_000));
-    state.snapshots.set = Some(StakeSnapshot {
+    state.epochs.snapshots.set = Some(StakeSnapshot {
         epoch: EpochNo(9),
         delegations: Arc::new(HashMap::new()),
         pool_stake: set_pool_stake,
@@ -9579,12 +9763,12 @@ fn test_spo_voting_power_prefers_mark_over_set() {
 fn test_spo_voting_power_no_mark_entry_falls_back_not_to_set() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
 
     let pool_id = Hash28::from_bytes([0x42u8; 28]);
 
     // Mark snapshot exists but does NOT contain this pool
-    state.snapshots.mark = Some(StakeSnapshot {
+    state.epochs.snapshots.mark = Some(StakeSnapshot {
         epoch: EpochNo(10),
         delegations: Arc::new(HashMap::new()),
         pool_stake: std::collections::HashMap::new(), // no pool_id entry
@@ -9598,7 +9782,7 @@ fn test_spo_voting_power_no_mark_entry_falls_back_not_to_set() {
     // Set snapshot has 200 ADA for this pool (should NOT be used)
     let mut set_pool_stake = std::collections::HashMap::new();
     set_pool_stake.insert(pool_id, Lovelace(200_000_000));
-    state.snapshots.set = Some(StakeSnapshot {
+    state.epochs.snapshots.set = Some(StakeSnapshot {
         epoch: EpochNo(9),
         delegations: Arc::new(HashMap::new()),
         pool_stake: set_pool_stake,
@@ -9631,41 +9815,41 @@ fn test_snapshot_roundtrip_nonce_fields() {
     let mut state = LedgerState::new(params);
 
     // Set distinctive values for all nonce-related fields
-    state.evolving_nonce = Hash32::from_bytes([0x11; 32]);
-    state.candidate_nonce = Hash32::from_bytes([0x22; 32]);
-    state.epoch_nonce = Hash32::from_bytes([0x33; 32]);
-    state.lab_nonce = Hash32::from_bytes([0x44; 32]);
-    state.last_epoch_block_nonce = Hash32::from_bytes([0x55; 32]);
+    state.consensus.evolving_nonce = Hash32::from_bytes([0x11; 32]);
+    state.consensus.candidate_nonce = Hash32::from_bytes([0x22; 32]);
+    state.consensus.epoch_nonce = Hash32::from_bytes([0x33; 32]);
+    state.consensus.lab_nonce = Hash32::from_bytes([0x44; 32]);
+    state.consensus.last_epoch_block_nonce = Hash32::from_bytes([0x55; 32]);
     state.genesis_hash = Hash32::from_bytes([0x66; 32]);
     state.epoch = EpochNo(42);
-    state.treasury = Lovelace(1_234_567_890);
-    state.reserves = Lovelace(9_876_543_210);
+    state.epochs.treasury = Lovelace(1_234_567_890);
+    state.epochs.reserves = Lovelace(9_876_543_210);
 
     state.save_snapshot(&snap_path).unwrap();
     let loaded = LedgerState::load_snapshot(&snap_path).unwrap();
 
     assert_eq!(
-        loaded.evolving_nonce,
+        loaded.consensus.evolving_nonce,
         Hash32::from_bytes([0x11; 32]),
         "evolving_nonce must survive roundtrip"
     );
     assert_eq!(
-        loaded.candidate_nonce,
+        loaded.consensus.candidate_nonce,
         Hash32::from_bytes([0x22; 32]),
         "candidate_nonce must survive roundtrip"
     );
     assert_eq!(
-        loaded.epoch_nonce,
+        loaded.consensus.epoch_nonce,
         Hash32::from_bytes([0x33; 32]),
         "epoch_nonce must survive roundtrip"
     );
     assert_eq!(
-        loaded.lab_nonce,
+        loaded.consensus.lab_nonce,
         Hash32::from_bytes([0x44; 32]),
         "lab_nonce must survive roundtrip"
     );
     assert_eq!(
-        loaded.last_epoch_block_nonce,
+        loaded.consensus.last_epoch_block_nonce,
         Hash32::from_bytes([0x55; 32]),
         "last_epoch_block_nonce must survive roundtrip"
     );
@@ -9676,12 +9860,12 @@ fn test_snapshot_roundtrip_nonce_fields() {
     );
     assert_eq!(loaded.epoch, EpochNo(42), "epoch must survive roundtrip");
     assert_eq!(
-        loaded.treasury,
+        loaded.epochs.treasury,
         Lovelace(1_234_567_890),
         "treasury must survive roundtrip"
     );
     assert_eq!(
-        loaded.reserves,
+        loaded.epochs.reserves,
         Lovelace(9_876_543_210),
         "reserves must survive roundtrip"
     );
@@ -9709,10 +9893,10 @@ fn test_snapshot_epoch_implies_nonce_established() {
 
     // Simulate a state at epoch 500 with a correctly-accumulated nonce.
     state.epoch = EpochNo(500);
-    state.epoch_nonce = Hash32::from_bytes([0xAB; 32]);
-    state.evolving_nonce = Hash32::from_bytes([0xCD; 32]);
-    state.candidate_nonce = Hash32::from_bytes([0xEF; 32]);
-    state.last_epoch_block_nonce = Hash32::from_bytes([0x12; 32]);
+    state.consensus.epoch_nonce = Hash32::from_bytes([0xAB; 32]);
+    state.consensus.evolving_nonce = Hash32::from_bytes([0xCD; 32]);
+    state.consensus.candidate_nonce = Hash32::from_bytes([0xEF; 32]);
+    state.consensus.last_epoch_block_nonce = Hash32::from_bytes([0x12; 32]);
 
     state.save_snapshot(&snap_path).unwrap();
     let loaded = LedgerState::load_snapshot(&snap_path).unwrap();
@@ -9727,7 +9911,7 @@ fn test_snapshot_epoch_implies_nonce_established() {
     // The nonce itself must survive — this is the value the consensus engine will
     // use for VRF verification after restore.
     assert_eq!(
-        loaded.epoch_nonce,
+        loaded.consensus.epoch_nonce,
         Hash32::from_bytes([0xAB; 32]),
         "epoch_nonce must survive snapshot round-trip"
     );
@@ -9795,13 +9979,13 @@ mod proptests {
                 state.update_evolving_nonce(eta);
                 // Must always be exactly 32 bytes
                 prop_assert_eq!(
-                    state.evolving_nonce.as_bytes().len(),
+                    state.consensus.evolving_nonce.as_bytes().len(),
                     32,
                     "Evolving nonce must always be 32 bytes"
                 );
                 // Must not be all zeros (astronomically unlikely for blake2b)
                 prop_assert!(
-                    state.evolving_nonce != Hash32::ZERO,
+                    state.consensus.evolving_nonce != Hash32::ZERO,
                     "Evolving nonce should not be zero after update"
                 );
             }
@@ -9827,8 +10011,8 @@ mod proptests {
             }
 
             prop_assert_eq!(
-                state_a.evolving_nonce,
-                state_b.evolving_nonce,
+                state_a.consensus.evolving_nonce,
+                state_b.consensus.evolving_nonce,
                 "Same input sequence must produce identical nonces"
             );
         }
@@ -9853,8 +10037,8 @@ mod proptests {
             state_b.update_evolving_nonce(&eta_b);
 
             prop_assert_ne!(
-                state_a.evolving_nonce,
-                state_b.evolving_nonce,
+                state_a.consensus.evolving_nonce,
+                state_b.consensus.evolving_nonce,
                 "Different VRF inputs must produce different nonces (blake2b collision)"
             );
         }
@@ -10191,7 +10375,7 @@ fn test_mark_snapshot_pool_stake_nonzero_after_replay_mode() {
     let mut state = LedgerState::new(params);
     // Simulate the replay path: needs_stake_rebuild=false (epoch boundaries skip
     // the full UTxO scan and use the incremental stake_distribution instead).
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
     // Use short epochs (1000 slots each, matching test block slots below).
     state.epoch_length = 1000;
     state.shelley_transition_epoch = 0;
@@ -10221,6 +10405,7 @@ fn test_mark_snapshot_pool_stake_nonzero_after_replay_mode() {
 
     // The mark snapshot should now exist and have non-zero pool_stake for our pool.
     let mark = state
+        .epochs
         .snapshots
         .mark
         .as_ref()
@@ -10276,10 +10461,11 @@ fn test_recompute_snapshot_pool_stakes_corrects_zero_pool_stake() {
         .unwrap();
 
     // Corrupt the mark snapshot pool_stake to simulate drift.
-    if let Some(ref mut snap) = state.snapshots.mark {
+    if let Some(ref mut snap) = state.epochs.snapshots.mark {
         snap.pool_stake.clear();
     }
     let zero_stake = state
+        .epochs
         .snapshots
         .mark
         .as_ref()
@@ -10298,6 +10484,7 @@ fn test_recompute_snapshot_pool_stakes_corrects_zero_pool_stake() {
 
     // Pool stake should be corrected in the mark snapshot.
     let corrected_stake = state
+        .epochs
         .snapshots
         .mark
         .as_ref()
@@ -10322,7 +10509,7 @@ fn test_set_snapshot_pool_stake_nonzero_after_two_epoch_transitions() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
     // Replay mode: no full rebuild at epoch boundaries during replay
-    state.needs_stake_rebuild = false;
+    state.epochs.needs_stake_rebuild = false;
     state.epoch_length = 1000;
     state.shelley_transition_epoch = 0;
     state.byron_epoch_length = 0;
@@ -10361,7 +10548,7 @@ fn test_set_snapshot_pool_stake_nonzero_after_two_epoch_transitions() {
 
     // Simulate what replay finalization does:
     // rebuild_stake_distribution() + recompute_snapshot_pool_stakes()
-    state.needs_stake_rebuild = true;
+    state.epochs.needs_stake_rebuild = true;
     state.rebuild_stake_distribution();
     state.recompute_snapshot_pool_stakes();
 
@@ -10380,6 +10567,7 @@ fn test_set_snapshot_pool_stake_nonzero_after_two_epoch_transitions() {
     // built at the first live epoch boundary (epoch 4). Since needs_stake_rebuild=true
     // after replay finalization, that mark was built with a freshly rebuilt stake_map.
     let set_pool_stake = state
+        .epochs
         .snapshots
         .set
         .as_ref()
@@ -10424,7 +10612,7 @@ fn test_recompute_snapshot_pool_stakes_includes_reward_accounts() {
         .unwrap();
 
     // Manually add a reward balance for the delegator (simulating earned rewards)
-    *std::sync::Arc::make_mut(&mut state.reward_accounts)
+    *std::sync::Arc::make_mut(&mut state.certs.reward_accounts)
         .entry(cred_key)
         .or_insert(Lovelace(0)) = Lovelace(reward_amount);
 
@@ -10441,6 +10629,7 @@ fn test_recompute_snapshot_pool_stakes_includes_reward_accounts() {
     // pool_stake should include BOTH utxo stake and reward balance
     let expected_total = utxo_amount + reward_amount;
     let pool_stake = state
+        .epochs
         .snapshots
         .mark
         .as_ref()
@@ -10519,7 +10708,12 @@ fn test_recompute_snapshot_pool_stakes_preserves_snapshot_delegations() {
 
     // Delegator X must appear in the mark snapshot delegation map.
     {
-        let mark = state.snapshots.mark.as_ref().expect("mark must exist");
+        let mark = state
+            .epochs
+            .snapshots
+            .mark
+            .as_ref()
+            .expect("mark must exist");
         let cred_x_key = credential_to_hash(&cred_x);
         assert!(
             mark.delegations.contains_key(&cred_x_key),
@@ -10541,7 +10735,7 @@ fn test_recompute_snapshot_pool_stakes_preserves_snapshot_delegations() {
 
     // The current (live) delegation map now has both X and Y.
     assert_eq!(
-        state.delegations.len(),
+        state.certs.delegations.len(),
         2,
         "live delegations must have both X and Y before recompute"
     );
@@ -10553,6 +10747,7 @@ fn test_recompute_snapshot_pool_stakes_preserves_snapshot_delegations() {
 
     // The mark snapshot delegation map must still have only X.
     let mark = state
+        .epochs
         .snapshots
         .mark
         .as_ref()
@@ -10625,7 +10820,7 @@ fn test_within_block_spend_chaining() {
         transaction_id: Hash32::from_bytes([0x10u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         genesis_input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -10684,8 +10879,8 @@ fn test_within_block_spend_chaining() {
         .unwrap();
 
     // Only tx2's output should be in the UTxO set
-    assert_eq!(state.utxo_set.len(), 1);
-    assert!(state.utxo_set.contains(&TransactionInput {
+    assert_eq!(state.utxo.utxo_set.len(), 1);
+    assert!(state.utxo.utxo_set.contains(&TransactionInput {
         transaction_id: tx2_hash,
         index: 0,
     }));
@@ -10711,7 +10906,7 @@ fn test_within_block_reference_input_visible() {
         transaction_id: Hash32::from_bytes([0x10u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         genesis_input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -10762,7 +10957,7 @@ fn test_within_block_reference_input_visible() {
     });
 
     // tx1's output 1 — this is the output carrying the script_ref.
-    // It does NOT exist in self.utxo_set before the block is applied;
+    // It does NOT exist in self.utxo.utxo_set before the block is applied;
     // it is produced by tx1 and must be visible to tx2 during
     // Phase-1 validation (Rules 9 and 3c).
     let tx1_script_ref_input = TransactionInput {
@@ -10775,7 +10970,7 @@ fn test_within_block_reference_input_visible() {
         transaction_id: Hash32::from_bytes([0x20u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         spend_input_for_tx2.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -10821,7 +11016,7 @@ fn test_within_block_reference_input_visible() {
     // tx1's script-ref output should still be in the UTxO set (reference
     // inputs are NOT consumed — they are read-only).
     assert!(
-        state.utxo_set.contains(&tx1_script_ref_input),
+        state.utxo.utxo_set.contains(&tx1_script_ref_input),
         "tx1's script-ref output must remain in UTxO set after tx2 used it as reference input"
     );
 }
@@ -10864,7 +11059,7 @@ fn test_within_block_ref_script_minting_policy_visible() {
         transaction_id: Hash32::from_bytes([0x10u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         genesis_input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -10917,7 +11112,7 @@ fn test_within_block_ref_script_minting_policy_visible() {
         transaction_id: Hash32::from_bytes([0x20u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         spend_input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -10979,7 +11174,7 @@ fn test_within_block_ref_script_minting_policy_visible() {
 
     // Confirm the script-ref output is still in the UTxO (reference inputs are read-only)
     assert!(
-        state_apply.utxo_set.contains(&tx1_script_out),
+        state_apply.utxo.utxo_set.contains(&tx1_script_out),
         "script-ref output must remain in UTxO after being used as reference input"
     );
 
@@ -11102,7 +11297,7 @@ fn test_invalid_tx_collateral_consumed_regular_inputs_skipped() {
 
     let utxo_value = Value::lovelace(10_000_000);
     for inp in [&regular_input, &collateral_input] {
-        state.utxo_set.insert(
+        state.utxo.utxo_set.insert(
             inp.clone(),
             TransactionOutput {
                 address: Address::Byron(ByronAddress {
@@ -11116,7 +11311,7 @@ fn test_invalid_tx_collateral_consumed_regular_inputs_skipped() {
             },
         );
     }
-    assert_eq!(state.utxo_set.len(), 2, "setup: two UTxOs");
+    assert_eq!(state.utxo.utxo_set.len(), 2, "setup: two UTxOs");
 
     let tx_hash = Hash32::from_bytes([0xCCu8; 32]);
     let tx = make_invalid_tx_with_collateral(
@@ -11134,13 +11329,13 @@ fn test_invalid_tx_collateral_consumed_regular_inputs_skipped() {
 
     // Collateral must be consumed
     assert!(
-        !state.utxo_set.contains(&collateral_input),
+        !state.utxo.utxo_set.contains(&collateral_input),
         "collateral input must be consumed after is_valid=false"
     );
 
     // Regular input must remain (tx body skipped)
     assert!(
-        state.utxo_set.contains(&regular_input),
+        state.utxo.utxo_set.contains(&regular_input),
         "regular input must NOT be consumed when is_valid=false"
     );
 
@@ -11150,7 +11345,7 @@ fn test_invalid_tx_collateral_consumed_regular_inputs_skipped() {
         index: 0,
     };
     assert!(
-        !state.utxo_set.contains(&new_output_input),
+        !state.utxo.utxo_set.contains(&new_output_input),
         "tx body outputs must NOT be created when is_valid=false"
     );
 }
@@ -11184,7 +11379,7 @@ fn test_invalid_tx_collateral_return_created() {
         (&collateral_input, collateral_value.clone()),
         (&regular_input, Value::lovelace(10_000_000)),
     ] {
-        state.utxo_set.insert(
+        state.utxo.utxo_set.insert(
             inp.clone(),
             TransactionOutput {
                 address: Address::Byron(ByronAddress {
@@ -11220,7 +11415,7 @@ fn test_invalid_tx_collateral_return_created() {
         Some(Lovelace(2_000_000)),
     );
 
-    let fees_before = state.epoch_fees;
+    let fees_before = state.utxo.epoch_fees;
 
     let block = make_test_block(100, 1, Hash32::ZERO, vec![tx]);
     state
@@ -11229,13 +11424,13 @@ fn test_invalid_tx_collateral_return_created() {
 
     // Collateral input consumed
     assert!(
-        !state.utxo_set.contains(&collateral_input),
+        !state.utxo.utxo_set.contains(&collateral_input),
         "collateral input must be consumed"
     );
 
     // Regular input NOT consumed
     assert!(
-        state.utxo_set.contains(&regular_input),
+        state.utxo.utxo_set.contains(&regular_input),
         "regular input must remain when is_valid=false"
     );
 
@@ -11246,12 +11441,12 @@ fn test_invalid_tx_collateral_return_created() {
         index: 0, // outputs.len() = 0 → collateral return at index 0
     };
     assert!(
-        state.utxo_set.contains(&return_input),
+        state.utxo.utxo_set.contains(&return_input),
         "collateral return output must be created in UTxO set"
     );
 
     // Fees: total_collateral was declared as 2 ADA, so 2 ADA should be credited
-    let fee_increase = state.epoch_fees.0 - fees_before.0;
+    let fee_increase = state.utxo.epoch_fees.0 - fees_before.0;
     assert_eq!(
         fee_increase, 2_000_000,
         "epoch fees must increase by the declared total_collateral (2 ADA)"
@@ -11278,7 +11473,7 @@ fn test_invalid_tx_does_not_consume_unrelated_utxos() {
             transaction_id: Hash32::from_bytes([i; 32]),
             index: 0,
         };
-        state.utxo_set.insert(
+        state.utxo.utxo_set.insert(
             inp.clone(),
             TransactionOutput {
                 address: Address::Byron(ByronAddress {
@@ -11304,7 +11499,7 @@ fn test_invalid_tx_does_not_consume_unrelated_utxos() {
         index: 0,
     };
     for (inp, seed) in [(&collateral_input, 0xF0u8), (&regular_input, 0xF1u8)] {
-        state.utxo_set.insert(
+        state.utxo.utxo_set.insert(
             inp.clone(),
             TransactionOutput {
                 address: Address::Byron(ByronAddress {
@@ -11319,7 +11514,7 @@ fn test_invalid_tx_does_not_consume_unrelated_utxos() {
         );
     }
 
-    let utxo_count_before = state.utxo_set.len(); // 5 + 2 = 7
+    let utxo_count_before = state.utxo.utxo_set.len(); // 5 + 2 = 7
 
     let tx = make_invalid_tx_with_collateral(
         Hash32::from_bytes([0xABu8; 32]),
@@ -11335,7 +11530,7 @@ fn test_invalid_tx_does_not_consume_unrelated_utxos() {
 
     // Exactly one UTxO removed: the collateral input
     assert_eq!(
-        state.utxo_set.len(),
+        state.utxo.utxo_set.len(),
         utxo_count_before - 1,
         "only the collateral input should be removed"
     );
@@ -11343,7 +11538,7 @@ fn test_invalid_tx_does_not_consume_unrelated_utxos() {
     // All unrelated UTxOs still present
     for inp in &unrelated_inputs {
         assert!(
-            state.utxo_set.contains(inp),
+            state.utxo.utxo_set.contains(inp),
             "unrelated UTxO {:?} must not be consumed",
             inp
         );
@@ -11351,13 +11546,13 @@ fn test_invalid_tx_does_not_consume_unrelated_utxos() {
 
     // Regular input not consumed
     assert!(
-        state.utxo_set.contains(&regular_input),
+        state.utxo.utxo_set.contains(&regular_input),
         "regular input must not be consumed when is_valid=false"
     );
 
     // Collateral consumed
     assert!(
-        !state.utxo_set.contains(&collateral_input),
+        !state.utxo.utxo_set.contains(&collateral_input),
         "collateral input must be consumed"
     );
 }
@@ -11529,7 +11724,7 @@ fn test_vote_delegation_keyhash_does_not_create_drep_entry() {
 
     // Sanity: DRep not in registry yet
     assert!(
-        !state.governance.dreps.contains_key(&drep_keyhash),
+        !state.gov.governance.dreps.contains_key(&drep_keyhash),
         "DRep must not exist before registration"
     );
 
@@ -11541,14 +11736,14 @@ fn test_vote_delegation_keyhash_does_not_create_drep_entry() {
 
     // DRep must still NOT be in the dreps registry
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         0,
         "VoteDelegation with DRep::KeyHash must NOT create a drep registry entry"
     );
     // vote_delegations should have been updated
     let stake_key = credential_to_hash(&stake_cred);
     assert_eq!(
-        state.governance.vote_delegations.get(&stake_key),
+        state.gov.governance.vote_delegations.get(&stake_key),
         Some(&DRep::KeyHash(drep_keyhash)),
         "VoteDelegation must update vote_delegations"
     );
@@ -11568,7 +11763,7 @@ fn test_vote_reg_deleg_does_not_create_drep_entry() {
     let drep_keyhash = credential_to_hash(&drep_cred);
 
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         0,
         "registry must be empty before test"
     );
@@ -11580,13 +11775,13 @@ fn test_vote_reg_deleg_does_not_create_drep_entry() {
     });
 
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         0,
         "VoteRegDeleg with DRep::KeyHash must NOT create a drep registry entry"
     );
     let stake_key = credential_to_hash(&stake_cred);
     assert_eq!(
-        state.governance.vote_delegations.get(&stake_key),
+        state.gov.governance.vote_delegations.get(&stake_key),
         Some(&DRep::KeyHash(drep_keyhash)),
         "VoteRegDeleg must update vote_delegations"
     );
@@ -11605,7 +11800,7 @@ fn test_reg_stake_vote_deleg_does_not_create_drep_entry() {
     let drep_keyhash = credential_to_hash(&drep_cred);
 
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         0,
         "registry must be empty before test"
     );
@@ -11618,18 +11813,18 @@ fn test_reg_stake_vote_deleg_does_not_create_drep_entry() {
     });
 
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         0,
         "RegStakeVoteDeleg with DRep::KeyHash must NOT create a drep registry entry"
     );
     let stake_key = credential_to_hash(&stake_cred);
     assert_eq!(
-        state.governance.vote_delegations.get(&stake_key),
+        state.gov.governance.vote_delegations.get(&stake_key),
         Some(&DRep::KeyHash(drep_keyhash)),
         "RegStakeVoteDeleg must update vote_delegations"
     );
     assert_eq!(
-        state.delegations.get(&stake_key),
+        state.certs.delegations.get(&stake_key),
         Some(&pool_id),
         "RegStakeVoteDeleg must set pool delegation"
     );
@@ -11654,7 +11849,7 @@ fn test_stake_vote_delegation_does_not_create_drep_entry() {
     });
 
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         0,
         "StakeVoteDelegation with DRep::KeyHash must NOT create a drep registry entry"
     );
@@ -11677,28 +11872,32 @@ fn test_active_drep_count_excludes_inactive() {
             anchor: None,
         });
     }
-    assert_eq!(state.governance.dreps.len(), 3, "all 3 DReps registered");
     assert_eq!(
-        state.governance.active_drep_count(),
+        state.gov.governance.dreps.len(),
+        3,
+        "all 3 DReps registered"
+    );
+    assert_eq!(
+        state.gov.governance.active_drep_count(),
         3,
         "all 3 DReps active at registration"
     );
 
     // Manually mark one as inactive (simulating drep_activity expiry)
     {
-        let gov = Arc::make_mut(&mut state.governance);
+        let gov = Arc::make_mut(&mut state.gov.governance);
         let first_key = gov.dreps.keys().copied().next().unwrap();
         gov.dreps.get_mut(&first_key).unwrap().active = false;
     }
 
     // active_drep_count should now be 2, but dreps.len() is still 3
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         3,
         "total registered DReps (including inactive) is still 3"
     );
     assert_eq!(
-        state.governance.active_drep_count(),
+        state.gov.governance.active_drep_count(),
         2,
         "active_drep_count excludes inactive DRep"
     );
@@ -11729,7 +11928,7 @@ fn test_epoch_transition_marks_inactive_drep() {
             v.extend_from_slice(&[0xAAu8; 28]);
             v
         };
-        let gov = Arc::make_mut(&mut state.governance);
+        let gov = Arc::make_mut(&mut state.gov.governance);
         gov.proposals.insert(
             GovActionId {
                 transaction_id: Hash32::from_bytes([0xDDu8; 32]),
@@ -11773,7 +11972,7 @@ fn test_epoch_transition_marks_inactive_drep() {
         anchor: None,
     });
 
-    assert_eq!(state.governance.active_drep_count(), 2);
+    assert_eq!(state.gov.governance.active_drep_count(), 2);
 
     // Advance 4 epochs: last_active_epoch=0, epoch 4, inactive gap = 4 > drep_activity=3
     for e in 1u64..=4 {
@@ -11782,18 +11981,18 @@ fn test_epoch_transition_marks_inactive_drep() {
 
     // DRep A should now be inactive; total count stays 2 but active is 0
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         2,
         "both DReps still registered (not removed by inactivity)"
     );
     assert_eq!(
-        state.governance.active_drep_count(),
+        state.gov.governance.active_drep_count(),
         0,
         "both DReps inactive after 4 epochs (drep_activity=3)"
     );
     // They're still IN the map — just marked inactive
     assert!(
-        state.governance.dreps.contains_key(&key_a),
+        state.gov.governance.dreps.contains_key(&key_a),
         "DRep A still in registry despite being inactive"
     );
 }
@@ -11813,8 +12012,8 @@ fn test_unreg_drep_removes_from_registry_and_active_count() {
         deposit: dugite_primitives::value::Lovelace(500_000_000),
         anchor: None,
     });
-    assert_eq!(state.governance.active_drep_count(), 1);
-    assert_eq!(state.governance.dreps.len(), 1);
+    assert_eq!(state.gov.governance.active_drep_count(), 1);
+    assert_eq!(state.gov.governance.dreps.len(), 1);
 
     state.process_certificate(&Certificate::UnregDRep {
         credential: cred.clone(),
@@ -11822,12 +12021,12 @@ fn test_unreg_drep_removes_from_registry_and_active_count() {
     });
 
     assert_eq!(
-        state.governance.dreps.len(),
+        state.gov.governance.dreps.len(),
         0,
         "UnregDRep removes entry from registry"
     );
     assert_eq!(
-        state.governance.active_drep_count(),
+        state.gov.governance.active_drep_count(),
         0,
         "active_drep_count is 0 after deregistration"
     );
@@ -11911,7 +12110,7 @@ fn test_reward_cross_validation_epoch_1239() {
 
     // Reserves at start of epoch 1239 per Koios epoch_info
     const RESERVES_1239: u64 = 8_266_581_303_023_223;
-    state.reserves = Lovelace(RESERVES_1239);
+    state.epochs.reserves = Lovelace(RESERVES_1239);
 
     // Preview epoch_length = 86400 slots
     const EPOCH_LENGTH: u64 = 86_400;
@@ -11919,7 +12118,7 @@ fn test_reward_cross_validation_epoch_1239() {
 
     // Conway (proto >= 7): d = 0 (ppDG returns minBound = 0).
     // Without this, prev_d defaults to 1.0 which bypasses the eta calculation.
-    state.prev_d = 0.0;
+    state.epochs.prev_d = 0.0;
 
     // ---- Build the go snapshot for epoch 1239 ----
     //
@@ -12224,13 +12423,15 @@ fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
         index: 0,
     };
     state
+        .utxo
         .utxo_set
         .insert(utxo_x.clone(), make_lovelace_output(5_000_000));
     state
+        .utxo
         .utxo_set
         .insert(utxo_y.clone(), make_lovelace_output(3_000_000));
 
-    assert_eq!(state.utxo_set.len(), 2, "UTxOs X and Y must be seeded");
+    assert_eq!(state.utxo.utxo_set.len(), 2, "UTxOs X and Y must be seeded");
 
     // ── Step 1: apply block A at slot 100 ────────────────────────────────
     // Block A spends X,Y and produces P (tx_hash=0xCC, index 0) and
@@ -12250,11 +12451,11 @@ fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
 
     // X,Y are spent; P,Q are present.
     assert!(
-        !state.utxo_set.contains(&utxo_x),
+        !state.utxo.utxo_set.contains(&utxo_x),
         "X must be spent after block A"
     );
     assert!(
-        !state.utxo_set.contains(&utxo_y),
+        !state.utxo.utxo_set.contains(&utxo_y),
         "Y must be spent after block A"
     );
     let utxo_p = TransactionInput {
@@ -12266,14 +12467,18 @@ fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
         index: 1,
     };
     assert!(
-        state.utxo_set.contains(&utxo_p),
+        state.utxo.utxo_set.contains(&utxo_p),
         "P must exist after block A"
     );
     assert!(
-        state.utxo_set.contains(&utxo_q),
+        state.utxo.utxo_set.contains(&utxo_q),
         "Q must exist after block A"
     );
-    assert_eq!(state.diff_seq.len(), 1, "DiffSeq must hold block A's diff");
+    assert_eq!(
+        state.utxo.diff_seq.len(),
+        1,
+        "DiffSeq must hold block A's diff"
+    );
 
     // ── Step 2: roll back 1 block (micro-fork, back to slot 99 / origin) ─
     // Simulate the ChainSync RollBackward to the parent point.
@@ -12283,30 +12488,30 @@ fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
     let rolled = state.rollback_blocks(1);
     assert_eq!(rolled, 1, "Exactly 1 diff must be rolled back");
     assert_eq!(
-        state.diff_seq.len(),
+        state.utxo.diff_seq.len(),
         0,
         "DiffSeq must be empty after rolling back the only diff"
     );
 
     // X,Y must be restored; P,Q must be removed.
     assert!(
-        state.utxo_set.contains(&utxo_x),
+        state.utxo.utxo_set.contains(&utxo_x),
         "X must be restored after rollback (issue #176)"
     );
     assert!(
-        state.utxo_set.contains(&utxo_y),
+        state.utxo.utxo_set.contains(&utxo_y),
         "Y must be restored after rollback (issue #176)"
     );
     assert!(
-        !state.utxo_set.contains(&utxo_p),
+        !state.utxo.utxo_set.contains(&utxo_p),
         "P must be removed after rollback"
     );
     assert!(
-        !state.utxo_set.contains(&utxo_q),
+        !state.utxo.utxo_set.contains(&utxo_q),
         "Q must be removed after rollback"
     );
     assert_eq!(
-        state.utxo_set.len(),
+        state.utxo.utxo_set.len(),
         2,
         "UTxO count must be 2 (X,Y) after rollback"
     );
@@ -12332,11 +12537,11 @@ fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
 
     // X,Y must be spent; R,S must be present.
     assert!(
-        !state.utxo_set.contains(&utxo_x),
+        !state.utxo.utxo_set.contains(&utxo_x),
         "X must be spent after block B"
     );
     assert!(
-        !state.utxo_set.contains(&utxo_y),
+        !state.utxo.utxo_set.contains(&utxo_y),
         "Y must be spent after block B"
     );
     let utxo_r = TransactionInput {
@@ -12348,15 +12553,15 @@ fn test_issue_176_utxo_restored_after_1_block_diff_rollback() {
         index: 1,
     };
     assert!(
-        state.utxo_set.contains(&utxo_r),
+        state.utxo.utxo_set.contains(&utxo_r),
         "R must exist after block B"
     );
     assert!(
-        state.utxo_set.contains(&utxo_s),
+        state.utxo.utxo_set.contains(&utxo_s),
         "S must exist after block B"
     );
     assert_eq!(
-        state.utxo_set.len(),
+        state.utxo.utxo_set.len(),
         2,
         "UTxO count must be 2 (R,S) after block B"
     );
@@ -12379,9 +12584,10 @@ fn test_multi_block_diff_rollback_restores_full_chain() {
         index: 0,
     };
     state
+        .utxo
         .utxo_set
         .insert(utxo_g.clone(), make_lovelace_output(10_000_000));
-    assert_eq!(state.utxo_set.len(), 1);
+    assert_eq!(state.utxo.utxo_set.len(), 1);
 
     // Block A at slot 10: spends G → produces A0 and A1.
     let tx_a = make_simple_tx(
@@ -12405,10 +12611,10 @@ fn test_multi_block_diff_rollback_restores_full_chain() {
         transaction_id: Hash32::from_bytes([0xA0u8; 32]),
         index: 1,
     };
-    assert!(!state.utxo_set.contains(&utxo_g));
-    assert!(state.utxo_set.contains(&utxo_a0));
-    assert!(state.utxo_set.contains(&utxo_a1));
-    assert_eq!(state.diff_seq.len(), 1);
+    assert!(!state.utxo.utxo_set.contains(&utxo_g));
+    assert!(state.utxo.utxo_set.contains(&utxo_a0));
+    assert!(state.utxo.utxo_set.contains(&utxo_a1));
+    assert_eq!(state.utxo.diff_seq.len(), 1);
 
     // Block B at slot 20 (block number 2, prev = block A's hash):
     // spends A0 → produces B0.
@@ -12427,35 +12633,35 @@ fn test_multi_block_diff_rollback_restores_full_chain() {
         transaction_id: Hash32::from_bytes([0xB0u8; 32]),
         index: 0,
     };
-    assert!(!state.utxo_set.contains(&utxo_a0));
-    assert!(state.utxo_set.contains(&utxo_a1));
-    assert!(state.utxo_set.contains(&utxo_b0));
-    assert_eq!(state.diff_seq.len(), 2);
+    assert!(!state.utxo.utxo_set.contains(&utxo_a0));
+    assert!(state.utxo.utxo_set.contains(&utxo_a1));
+    assert!(state.utxo.utxo_set.contains(&utxo_b0));
+    assert_eq!(state.utxo.diff_seq.len(), 2);
 
     // Rollback both blocks.
     let rolled = state.rollback_blocks(2);
     assert_eq!(rolled, 2, "Both diffs must be rolled back");
-    assert_eq!(state.diff_seq.len(), 0);
+    assert_eq!(state.utxo.diff_seq.len(), 0);
 
     // Genesis UTxO G must be fully restored.
     assert!(
-        state.utxo_set.contains(&utxo_g),
+        state.utxo.utxo_set.contains(&utxo_g),
         "G must be restored after 2-block rollback"
     );
     assert!(
-        !state.utxo_set.contains(&utxo_a0),
+        !state.utxo.utxo_set.contains(&utxo_a0),
         "A0 must be removed after rollback"
     );
     assert!(
-        !state.utxo_set.contains(&utxo_a1),
+        !state.utxo.utxo_set.contains(&utxo_a1),
         "A1 must be removed after rollback"
     );
     assert!(
-        !state.utxo_set.contains(&utxo_b0),
+        !state.utxo.utxo_set.contains(&utxo_b0),
         "B0 must be removed after rollback"
     );
     assert_eq!(
-        state.utxo_set.len(),
+        state.utxo.utxo_set.len(),
         1,
         "Only G must remain after 2-block rollback"
     );
@@ -12482,9 +12688,11 @@ fn test_partial_rollback_then_reapply() {
         index: 0,
     };
     state
+        .utxo
         .utxo_set
         .insert(utxo_x.clone(), make_lovelace_output(5_000_000));
     state
+        .utxo
         .utxo_set
         .insert(utxo_y.clone(), make_lovelace_output(3_000_000));
 
@@ -12503,9 +12711,9 @@ fn test_partial_rollback_then_reapply() {
         transaction_id: Hash32::from_bytes([0x10u8; 32]),
         index: 0,
     };
-    assert!(!state.utxo_set.contains(&utxo_x));
-    assert!(state.utxo_set.contains(&utxo_m));
-    assert_eq!(state.diff_seq.len(), 1);
+    assert!(!state.utxo.utxo_set.contains(&utxo_x));
+    assert!(state.utxo.utxo_set.contains(&utxo_m));
+    assert_eq!(state.utxo.diff_seq.len(), 1);
 
     // Block 2 (slot 20): spends Y → produces N.
     let block1_hash = Hash32::from_bytes([1u8; 32]);
@@ -12523,26 +12731,26 @@ fn test_partial_rollback_then_reapply() {
         transaction_id: Hash32::from_bytes([0x20u8; 32]),
         index: 0,
     };
-    assert!(!state.utxo_set.contains(&utxo_y));
-    assert!(state.utxo_set.contains(&utxo_n));
-    assert_eq!(state.diff_seq.len(), 2);
+    assert!(!state.utxo.utxo_set.contains(&utxo_y));
+    assert!(state.utxo.utxo_set.contains(&utxo_n));
+    assert_eq!(state.utxo.diff_seq.len(), 2);
 
     // Rollback only the last block (block 2).
     let rolled = state.rollback_blocks(1);
     assert_eq!(rolled, 1);
-    assert_eq!(state.diff_seq.len(), 1);
+    assert_eq!(state.utxo.diff_seq.len(), 1);
 
     // Y must be restored; M must still exist (from block 1 which was NOT rolled back).
     assert!(
-        state.utxo_set.contains(&utxo_y),
+        state.utxo.utxo_set.contains(&utxo_y),
         "Y must be restored after partial rollback"
     );
     assert!(
-        state.utxo_set.contains(&utxo_m),
+        state.utxo.utxo_set.contains(&utxo_m),
         "M must still exist (block 1 was NOT rolled back)"
     );
     assert!(
-        !state.utxo_set.contains(&utxo_n),
+        !state.utxo.utxo_set.contains(&utxo_n),
         "N must be removed (block 2 was rolled back)"
     );
 
@@ -12569,9 +12777,9 @@ fn test_partial_rollback_then_reapply() {
         transaction_id: Hash32::from_bytes([0x21u8; 32]),
         index: 0,
     };
-    assert!(state.utxo_set.contains(&utxo_n_prime));
-    assert!(!state.utxo_set.contains(&utxo_y));
-    assert!(state.utxo_set.contains(&utxo_m));
+    assert!(state.utxo.utxo_set.contains(&utxo_n_prime));
+    assert!(!state.utxo.utxo_set.contains(&utxo_y));
+    assert!(state.utxo.utxo_set.contains(&utxo_m));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -12587,7 +12795,7 @@ fn test_partial_rollback_then_reapply() {
 //
 // Fix: demote both hard returns to `warn!()` + self-correct + fall through.
 // These tests confirm that:
-//   1. A block with a `treasury_value` that disagrees with `state.treasury`
+//   1. A block with a `treasury_value` that disagrees with `state.epochs.treasury`
 //      is still applied correctly — outputs are inserted, treasury is corrected.
 //   2. A block whose tx carries a `CommitteeHotAuth` for an un-elected CC cold
 //      credential is still applied correctly — outputs are inserted.
@@ -12711,11 +12919,11 @@ fn make_tx_with_committee_hot_auth(
 /// Regression: TreasuryValueMismatch must NOT abort apply_block for confirmed
 /// on-chain blocks.
 ///
-/// Scenario: our `state.treasury` is 0, but a Conway block contains a tx with
+/// Scenario: our `state.epochs.treasury` is 0, but a Conway block contains a tx with
 /// `treasury_value = 5_000_000_000`.  Prior to the fix, `apply_block` returned
 /// `Err(TreasuryValueMismatch)` and the block's outputs were never inserted.
 /// After the fix, the block applies successfully, the outputs are in the UTxO
-/// set, and `state.treasury` is updated to the declared value.
+/// set, and `state.epochs.treasury` is updated to the declared value.
 ///
 /// The treasury check only fires in `ValidateAll` mode (at-tip validation),
 /// not in `ApplyOnly` mode (bulk replay).  This test uses `ValidateAll` to
@@ -12733,11 +12941,12 @@ fn test_treasury_mismatch_does_not_abort_apply_block() {
         index: 0,
     };
     state
+        .utxo
         .utxo_set
         .insert(genesis_input.clone(), make_lovelace_output(10_000_000));
 
-    // state.treasury starts at 0 (default).
-    assert_eq!(state.treasury.0, 0);
+    // state.epochs.treasury starts at 0 (default).
+    assert_eq!(state.epochs.treasury.0, 0);
 
     // Declare a treasury value that disagrees with ledger state.
     let declared_treasury = Lovelace(5_000_000_000);
@@ -12762,14 +12971,14 @@ fn test_treasury_mismatch_does_not_abort_apply_block() {
         index: 0,
     };
     assert!(
-        state.utxo_set.contains(&produced),
+        state.utxo.utxo_set.contains(&produced),
         "Block output must be inserted despite treasury mismatch"
     );
 
     // Treasury MUST be corrected to the declared value.
     assert_eq!(
-        state.treasury.0, declared_treasury.0,
-        "state.treasury must self-correct to the declared on-chain value"
+        state.epochs.treasury.0, declared_treasury.0,
+        "state.epochs.treasury must self-correct to the declared on-chain value"
     );
 }
 
@@ -12793,6 +13002,7 @@ fn test_treasury_mismatch_no_cascade_in_downstream_block() {
         index: 0,
     };
     state
+        .utxo
         .utxo_set
         .insert(seed_input.clone(), make_lovelace_output(10_000_000));
 
@@ -12814,7 +13024,7 @@ fn test_treasury_mismatch_no_cascade_in_downstream_block() {
         index: 0,
     };
     assert!(
-        state.utxo_set.contains(&output_a),
+        state.utxo.utxo_set.contains(&output_a),
         "output_a must be in UTxO set after Block A"
     );
 
@@ -12834,7 +13044,7 @@ fn test_treasury_mismatch_no_cascade_in_downstream_block() {
 
     // output_a must be consumed.
     assert!(
-        !state.utxo_set.contains(&output_a),
+        !state.utxo.utxo_set.contains(&output_a),
         "output_a must be consumed by Block B"
     );
 }
@@ -12864,6 +13074,7 @@ fn test_unelected_committee_member_does_not_abort_apply_block() {
         index: 0,
     };
     state
+        .utxo
         .utxo_set
         .insert(seed_input.clone(), make_lovelace_output(10_000_000));
 
@@ -12889,7 +13100,7 @@ fn test_unelected_committee_member_does_not_abort_apply_block() {
         index: 0,
     };
     assert!(
-        state.utxo_set.contains(&produced),
+        state.utxo.utxo_set.contains(&produced),
         "Block output must be inserted despite unelected committee member cert"
     );
 }
@@ -12916,6 +13127,7 @@ fn test_unelected_committee_member_no_cascade_in_downstream_block() {
         index: 0,
     };
     state
+        .utxo
         .utxo_set
         .insert(seed_input.clone(), make_lovelace_output(10_000_000));
 
@@ -12938,7 +13150,7 @@ fn test_unelected_committee_member_no_cascade_in_downstream_block() {
         index: 0,
     };
     assert!(
-        state.utxo_set.contains(&output_a),
+        state.utxo.utxo_set.contains(&output_a),
         "output_a must be in UTxO set after Block A"
     );
 
@@ -12957,7 +13169,7 @@ fn test_unelected_committee_member_no_cascade_in_downstream_block() {
     );
 
     assert!(
-        !state.utxo_set.contains(&output_a),
+        !state.utxo.utxo_set.contains(&output_a),
         "output_a must be consumed by Block B"
     );
 }
@@ -13143,7 +13355,7 @@ fn test_issue_184_tx_ref_script_size_exceeds_200kib_validate_all() {
         transaction_id: Hash32::from_bytes([0xC1u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         spending_input.clone(),
         make_output_with_script_ref(OVERSIZED),
     );
@@ -13184,7 +13396,7 @@ fn test_issue_184_tx_ref_script_size_at_limit_is_accepted() {
         transaction_id: Hash32::from_bytes([0xC2u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         spending_input.clone(),
         make_output_with_script_ref(AT_LIMIT),
     );
@@ -13334,13 +13546,15 @@ fn test_issue_186_invalid_tx_utxo_exact_state() {
     };
 
     state
+        .utxo
         .utxo_set
         .insert(regular_input.clone(), make_lovelace_output(8_000_000));
     state
+        .utxo
         .utxo_set
         .insert(collateral_input.clone(), make_lovelace_output(10_000_000));
 
-    assert_eq!(state.utxo_set.len(), 2, "Precondition: 2 UTxOs seeded");
+    assert_eq!(state.utxo.utxo_set.len(), 2, "Precondition: 2 UTxOs seeded");
 
     let tx_hash_byte = 0xC0u8;
     let tx = make_invalid_tx_with_col_return(
@@ -13369,7 +13583,7 @@ fn test_issue_186_invalid_tx_utxo_exact_state() {
     // After applying the invalid tx there must be exactly 2 entries:
     // the original regular_input (kept) and the collateral_return (created).
     assert_eq!(
-        state.utxo_set.len(),
+        state.utxo.utxo_set.len(),
         2,
         "UTxO set must have exactly 2 entries after is_valid=false apply: \
          regular_input (kept) + collateral_return (created)"
@@ -13377,24 +13591,25 @@ fn test_issue_186_invalid_tx_utxo_exact_state() {
 
     // 1. Collateral input was consumed.
     assert!(
-        !state.utxo_set.contains(&collateral_input),
+        !state.utxo.utxo_set.contains(&collateral_input),
         "Collateral input must be absent after is_valid=false apply"
     );
 
     // 2. Regular input was NOT consumed.
     assert!(
-        state.utxo_set.contains(&regular_input),
+        state.utxo.utxo_set.contains(&regular_input),
         "Regular input must remain in the UTxO set after is_valid=false apply"
     );
 
     // 3. Regular output was NOT created.
     assert!(
-        !state.utxo_set.contains(&regular_out_ref),
+        !state.utxo.utxo_set.contains(&regular_out_ref),
         "Regular output (tx_hash, 0) must NOT be created for is_valid=false tx"
     );
 
     // 4. Collateral return output WAS created with the correct value.
     let col_return_utxo = state
+        .utxo
         .utxo_set
         .lookup(&col_return_ref)
         .expect("Collateral return must be present at (tx_hash, outputs.len())");
@@ -13421,7 +13636,7 @@ fn test_issue_184_tx_ref_script_size_apply_only_is_permissive() {
         transaction_id: Hash32::from_bytes([0xC3u8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         spending_input.clone(),
         make_output_with_script_ref(WAY_OVER),
     );
@@ -13507,9 +13722,9 @@ fn test_treasury_accumulates_at_correct_rate_no_double_counting() {
     state.epoch_length = 21600; // preview testnet default
 
     // Initial conditions: ~8.28T reserves (realistic preview testnet epoch 1239 value)
-    state.reserves = Lovelace(8_293_935_806_807_148);
-    state.treasury = Lovelace(0);
-    state.needs_stake_rebuild = false;
+    state.epochs.reserves = Lovelace(8_293_935_806_807_148);
+    state.epochs.treasury = Lovelace(0);
+    state.epochs.needs_stake_rebuild = false;
 
     // Per-epoch fees: ~1.6B lovelace (realistic preview testnet value)
     // We set epoch_fees manually before each epoch transition to simulate
@@ -13531,18 +13746,18 @@ fn test_treasury_accumulates_at_correct_rate_no_double_counting() {
     //   ...
     //
     // First treasury increase happens at epoch 0→1 (initial RUPD).
-    let mut treasury_history = vec![state.treasury.0]; // epoch 0
+    let mut treasury_history = vec![state.epochs.treasury.0]; // epoch 0
 
     for epoch_idx in 1..=9u32 {
         // Simulate fee accumulation for the epoch that just ended
-        state.epoch_fees = Lovelace(per_epoch_fees);
-        state.epoch_block_count = actual_blocks_per_epoch;
+        state.utxo.epoch_fees = Lovelace(per_epoch_fees);
+        state.consensus.epoch_block_count = actual_blocks_per_epoch;
 
         state.process_epoch_transition(EpochNo(epoch_idx as u64));
-        treasury_history.push(state.treasury.0);
+        treasury_history.push(state.epochs.treasury.0);
         eprintln!(
             "  treasury[after transition to epoch {}] = {}",
-            epoch_idx, state.treasury.0
+            epoch_idx, state.epochs.treasury.0
         );
     }
 
@@ -13622,32 +13837,32 @@ fn test_treasury_value_snap_plus_rupd_no_double_count() {
 
     let mut state = LedgerState::new(params);
     state.epoch_length = 21600;
-    state.reserves = Lovelace(8_293_935_806_807_148);
-    state.treasury = Lovelace(1_000_000_000_000); // Start with non-zero treasury
-    state.needs_stake_rebuild = false;
+    state.epochs.reserves = Lovelace(8_293_935_806_807_148);
+    state.epochs.treasury = Lovelace(1_000_000_000_000); // Start with non-zero treasury
+    state.epochs.needs_stake_rebuild = false;
 
     let per_epoch_fees = 1_628_974_620u64;
     let actual_blocks_per_epoch = 2578u64;
 
     // Advance through 6 epoch boundaries.  With the corrected immediate-RUPD
     // path, each boundary applies its RUPD in-place and leaves pending = None.
-    let mut treasury_history = vec![state.treasury.0];
+    let mut treasury_history = vec![state.epochs.treasury.0];
     for epoch_idx in 1..=6u32 {
-        state.epoch_fees = Lovelace(per_epoch_fees);
-        state.epoch_block_count = actual_blocks_per_epoch;
+        state.utxo.epoch_fees = Lovelace(per_epoch_fees);
+        state.consensus.epoch_block_count = actual_blocks_per_epoch;
         state.process_epoch_transition(EpochNo(epoch_idx as u64));
 
         // Key invariant: no deferred pending RUPD exists after any boundary.
         assert!(
-            state.pending_reward_update.is_none(),
+            state.epochs.pending_reward_update.is_none(),
             "pending_reward_update should be None after epoch {} (immediate RUPD)",
             epoch_idx
         );
 
-        treasury_history.push(state.treasury.0);
+        treasury_history.push(state.epochs.treasury.0);
         eprintln!(
             "After epoch {}: treasury={}, pending=None",
-            epoch_idx, state.treasury.0
+            epoch_idx, state.epochs.treasury.0
         );
     }
 
@@ -13666,14 +13881,14 @@ fn test_treasury_value_snap_plus_rupd_no_double_count() {
     // Simulate a treasury_value snap at epoch 5 = current treasury at that point.
     // This is what ValidateAll mode does when a Conway tx declares treasury_value.
     let snap_value = treasury_history[5];
-    state.treasury = Lovelace(snap_value); // no-op
+    state.epochs.treasury = Lovelace(snap_value); // no-op
 
     // Advance one more epoch — should add one RUPD worth, not two.
-    let treasury_before = state.treasury.0;
-    state.epoch_fees = Lovelace(per_epoch_fees);
-    state.epoch_block_count = actual_blocks_per_epoch;
+    let treasury_before = state.epochs.treasury.0;
+    state.utxo.epoch_fees = Lovelace(per_epoch_fees);
+    state.consensus.epoch_block_count = actual_blocks_per_epoch;
     state.process_epoch_transition(EpochNo(7));
-    let treasury_after = state.treasury.0;
+    let treasury_after = state.epochs.treasury.0;
 
     // The treasury should have grown by approximately one RUPD delta.
     // Estimate delta from the preceding epoch step.
@@ -13705,14 +13920,14 @@ fn test_treasury_value_snap_plus_rupd_no_double_count() {
 fn test_treasury_donation_accumulates_correctly() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.treasury = Lovelace(1_000_000_000);
-    state.needs_stake_rebuild = false;
+    state.epochs.treasury = Lovelace(1_000_000_000);
+    state.epochs.needs_stake_rebuild = false;
 
     let donor_input = TransactionInput {
         transaction_id: Hash32::from_bytes([0xAAu8; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         donor_input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -13789,11 +14004,11 @@ fn test_treasury_donation_accumulates_correctly() {
 
     // Mid-epoch: donation is buffered, treasury is unchanged.
     assert_eq!(
-        state.pending_donations.0, donation_amount,
+        state.utxo.pending_donations.0, donation_amount,
         "Donation should sit in pending_donations mid-epoch"
     );
     assert_eq!(
-        state.treasury.0, 1_000_000_000,
+        state.epochs.treasury.0, 1_000_000_000,
         "Treasury should not yet reflect the donation mid-epoch"
     );
 }
@@ -13812,12 +14027,12 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
 
     let mut state = LedgerState::new(params);
     state.epoch_length = 100;
-    state.reserves = Lovelace(0); // Prevent RUPD expansion from inflating treasury
-    state.treasury = Lovelace(10_000_000_000); // 10B lovelace
-    state.needs_stake_rebuild = false;
+    state.epochs.reserves = Lovelace(0); // Prevent RUPD expansion from inflating treasury
+    state.epochs.treasury = Lovelace(10_000_000_000); // 10B lovelace
+    state.epochs.needs_stake_rebuild = false;
 
     // Set CC threshold to 0 so CC auto-approves
-    Arc::make_mut(&mut state.governance).committee_threshold = Some(Rational {
+    Arc::make_mut(&mut state.gov.governance).committee_threshold = Some(Rational {
         numerator: 0,
         denominator: 1,
     });
@@ -13826,7 +14041,7 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
     setup_dreps_with_stake(&mut state, 10, 1_000_000_000);
 
     // Set dvt_treasury_withdrawal threshold to something achievable (50%)
-    state.protocol_params.dvt_treasury_withdrawal = Rational {
+    state.epochs.protocol_params.dvt_treasury_withdrawal = Rational {
         numerator: 1,
         denominator: 2,
     };
@@ -13835,7 +14050,7 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
     let withdrawal_target_cred = Credential::VerificationKey(Hash28::from_bytes([0x55u8; 28]));
     let withdrawal_target_key = credential_to_hash(&withdrawal_target_cred);
     // Ensure the target has a reward account (even at 0)
-    Arc::make_mut(&mut state.reward_accounts).insert(withdrawal_target_key, Lovelace(0));
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(withdrawal_target_key, Lovelace(0));
 
     let withdrawal_amount = 1_000_000_000u64; // 1B lovelace
                                               // Encode the withdrawal target as a reward account bytes (network byte + credential hash)
@@ -13846,7 +14061,7 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
     // to the reward account (not treasury, per Haskell `returnProposalDeposits`).
     let proposal_return_addr = vec![0u8; 29];
     let proposal_return_key = LedgerState::reward_account_to_hash(&proposal_return_addr);
-    Arc::make_mut(&mut state.reward_accounts).insert(proposal_return_key, Lovelace(0));
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(proposal_return_key, Lovelace(0));
 
     // Submit a TreasuryWithdrawals governance proposal
     let tx_hash = Hash32::from_bytes([0xCCu8; 32]);
@@ -13869,7 +14084,7 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
 
     state.process_proposal(&tx_hash, 0, &proposal);
     assert_eq!(
-        state.governance.proposals.len(),
+        state.gov.governance.proposals.len(),
         1,
         "Proposal must be submitted"
     );
@@ -13894,12 +14109,12 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
         );
     }
 
-    let treasury_before = state.treasury.0;
+    let treasury_before = state.epochs.treasury.0;
 
     // Epoch transition should ratify and enact the withdrawal
     state.process_epoch_transition(EpochNo(1));
 
-    let treasury_after = state.treasury.0;
+    let treasury_after = state.epochs.treasury.0;
     // Treasury should decrease by exactly the withdrawal amount
     // (The proposal deposit goes to return_addr's reward account, which is separate)
     assert!(
@@ -13917,6 +14132,7 @@ fn test_treasury_withdrawal_via_governance_reduces_treasury() {
 
     // Withdrawal target's reward account should increase by the withdrawn amount
     let target_balance = state
+        .certs
         .reward_accounts
         .get(&withdrawal_target_key)
         .map(|l| l.0)
@@ -13959,9 +14175,9 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
 
     let mut state = LedgerState::new(params);
     state.epoch_length = 21600;
-    state.reserves = Lovelace(8_000_000_000_000_000);
-    state.treasury = Lovelace(0);
-    state.needs_stake_rebuild = false;
+    state.epochs.reserves = Lovelace(8_000_000_000_000_000);
+    state.epochs.treasury = Lovelace(0);
+    state.epochs.needs_stake_rebuild = false;
 
     // Epoch 0: accumulate 100M fees and some blocks.
     // Epoch 1+: 0 fees (to clearly isolate epoch-0 fees in the treasury).
@@ -13972,17 +14188,17 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     // prev_d=1.0 → d >= 0.8 → eta=1 → full expansion.
     // epoch0_fees are captured in ss_fee at SNAP rotation AFTER the RUPD, so they
     // do NOT contribute to this RUPD (ss_fee was 0 from genesis).
-    state.epoch_fees = Lovelace(epoch0_fees);
-    state.epoch_block_count = actual_blocks;
+    state.utxo.epoch_fees = Lovelace(epoch0_fees);
+    state.consensus.epoch_block_count = actual_blocks;
     let mut blocks_by_pool = HashMap::new();
     blocks_by_pool.insert(Hash28::from_bytes([0x01; 28]), actual_blocks);
-    state.epoch_blocks_by_pool = Arc::new(blocks_by_pool);
+    state.consensus.epoch_blocks_by_pool = Arc::new(blocks_by_pool);
     state.process_epoch_transition(EpochNo(1));
     let initial_reserves = 8_000_000_000_000_000u64;
     let initial_expansion = (3u128 * initial_reserves as u128 / 1000) as u64;
     let initial_tc = (2u128 * initial_expansion as u128 / 10) as u64;
     assert_eq!(
-        state.treasury.0, initial_tc,
+        state.epochs.treasury.0, initial_tc,
         "Treasury after 0→1 should be tau*rho*reserves (initial RUPD, no fees)"
     );
     let reserves_after_01 = initial_reserves - initial_tc;
@@ -13990,11 +14206,11 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     // Boundary 1→2: no new fees.
     // RUPD fires using bprev=epoch0's blocks (2578), ss_fee=epoch0_fees (captured at 0→1 SNAP).
     // This is the FIRST and ONLY time epoch0_fees contribute to treasury.
-    state.epoch_fees = Lovelace(0);
-    state.epoch_block_count = 0;
+    state.utxo.epoch_fees = Lovelace(0);
+    state.consensus.epoch_block_count = 0;
     state.process_epoch_transition(EpochNo(2));
     assert!(
-        state.pending_reward_update.is_none(),
+        state.epochs.pending_reward_update.is_none(),
         "pending should be None after 1→2 (RUPD applied immediately)"
     );
 
@@ -14008,7 +14224,7 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     // No pools → undistributed rewards stay in reserves. Only treasury_cut goes to treasury.
     let expected_delta = (2u128 * total as u128 / 10) as u64; // floor(tau * total)
 
-    let treasury_after_epoch2 = state.treasury.0;
+    let treasury_after_epoch2 = state.epochs.treasury.0;
     let expected_treasury_after_epoch2 = initial_tc + expected_delta;
     let diff =
         (treasury_after_epoch2 as i128 - expected_treasury_after_epoch2 as i128).unsigned_abs();
@@ -14026,11 +14242,11 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
     // After rotation: go=mark1, set=mark2 (fees=0, blocks=0).
     // RUPD fires using set=mark2: effective_blocks=0 → expansion=0 → delta=0.
     // epoch0_fees must NOT appear again here.
-    state.epoch_fees = Lovelace(0);
-    state.epoch_block_count = 0;
+    state.utxo.epoch_fees = Lovelace(0);
+    state.consensus.epoch_block_count = 0;
     state.process_epoch_transition(EpochNo(3));
 
-    let treasury_after_epoch3 = state.treasury.0;
+    let treasury_after_epoch3 = state.epochs.treasury.0;
     assert_eq!(
         treasury_after_epoch3, treasury_after_epoch2,
         "Epoch 0 fees must NOT appear in treasury a second time at epoch 2→3 \
@@ -14039,25 +14255,25 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
          Fee double-counting detected."
     );
     assert!(
-        state.pending_reward_update.is_none(),
+        state.epochs.pending_reward_update.is_none(),
         "pending should be None after 2→3"
     );
 
     // Boundary 3→4: set=mark3 (fees=0, blocks=0) → also delta=0.
-    state.epoch_fees = Lovelace(0);
-    state.epoch_block_count = 0;
+    state.utxo.epoch_fees = Lovelace(0);
+    state.consensus.epoch_block_count = 0;
     state.process_epoch_transition(EpochNo(4));
-    let treasury_after_epoch4 = state.treasury.0;
+    let treasury_after_epoch4 = state.epochs.treasury.0;
     assert_eq!(
         treasury_after_epoch4, treasury_after_epoch2,
         "Treasury should still not grow at 3→4 (all post-epoch0 snaps have fees=0/blocks=0)"
     );
 
     // Boundary 4→5: set=mark4 (fees=0, blocks=0) → also delta=0.
-    state.epoch_fees = Lovelace(0);
-    state.epoch_block_count = 0;
+    state.utxo.epoch_fees = Lovelace(0);
+    state.consensus.epoch_block_count = 0;
     state.process_epoch_transition(EpochNo(5));
-    let treasury_after_epoch5 = state.treasury.0;
+    let treasury_after_epoch5 = state.epochs.treasury.0;
     assert_eq!(
         treasury_after_epoch5, treasury_after_epoch2,
         "Treasury should still not grow at 4→5 (all post-epoch0 snaps have fees=0/blocks=0)"
@@ -14074,8 +14290,8 @@ fn test_epoch_fees_not_double_counted_through_snapshot_chain() {
 // RUPD snapshot-position regression: treasury 2.16× divergence fix
 // =========================================================================
 //
-// Root cause: the RUPD was using `self.snapshots.go` (epoch-2-ago data) instead
-// of `self.snapshots.set` (epoch-just-ended data).  At the first two epoch
+// Root cause: the RUPD was using `self.epochs.snapshots.go` (epoch-2-ago data) instead
+// of `self.epochs.snapshots.set` (epoch-just-ended data).  At the first two epoch
 // boundaries (0→1 and 1→2) `go` is None, so the RUPD was skipped entirely.
 // This caused 2 full epochs of expansion to be lost, and subsequent epochs
 // compounded on the already-incorrect reserves/treasury — producing ~2.16×
@@ -14122,20 +14338,20 @@ fn test_rupd_fires_at_first_epoch_canonical_treasury() {
     let mut state = LedgerState::new(params);
     state.epoch_length = 86_400;
     // Preview: 45T max supply, 30T in Byron genesis UTxOs → initial reserves = 15T
-    state.reserves = Lovelace(15_000_000_000_000_000);
-    state.treasury = Lovelace(0);
-    state.needs_stake_rebuild = false;
+    state.epochs.reserves = Lovelace(15_000_000_000_000_000);
+    state.epochs.treasury = Lovelace(0);
+    state.epochs.needs_stake_rebuild = false;
 
     // Epoch 0: exactly 4320 blocks (= floor(0.05 * 86400)), eta = 1.0.
     // No fees (to isolate the pure expansion calculation).
     // Note: epoch_blocks_by_pool must be populated because the RUPD uses
     // sum(epoch_blocks_by_pool) for actual_blocks (not epoch_block_count).
     let epoch0_blocks = 4320u64;
-    state.epoch_block_count = epoch0_blocks;
-    state.epoch_fees = Lovelace(0);
+    state.consensus.epoch_block_count = epoch0_blocks;
+    state.utxo.epoch_fees = Lovelace(0);
     let mut blocks_by_pool = HashMap::new();
     blocks_by_pool.insert(Hash28::from_bytes([0x01; 28]), epoch0_blocks);
-    state.epoch_blocks_by_pool = Arc::new(blocks_by_pool);
+    state.consensus.epoch_blocks_by_pool = Arc::new(blocks_by_pool);
 
     // Boundary 0→1:
     // RUPD fires with GO=empty, bprev=empty, ss_fee=0.  Matching Haskell:
@@ -14155,18 +14371,18 @@ fn test_rupd_fires_at_first_epoch_canonical_treasury() {
     assert_eq!(tc0, 9_000_000_000_000);
 
     assert_eq!(
-        state.treasury.0, tc0,
+        state.epochs.treasury.0, tc0,
         "Treasury after 0→1 must equal tau*expansion (initial RUPD with \
          empty GO: pure monetary expansion). Got {}",
-        state.treasury.0
+        state.epochs.treasury.0
     );
 
     let r0 = 15_000_000_000_000_000u64 - tc0;
     assert_eq!(
-        state.reserves.0, r0,
+        state.epochs.reserves.0, r0,
         "Reserves after 0→1 must be initial - treasury_cut: \
          expected={r0}, got={}",
-        state.reserves.0
+        state.epochs.reserves.0
     );
 
     // Boundary 1→2:
@@ -14175,23 +14391,23 @@ fn test_rupd_fires_at_first_epoch_canonical_treasury() {
     // eta = actual/expected = 4320/4320 = 1.0.
     // expansion1 = floor(0.003 * r0) = floor(0.003 * 14,991,000,000,000,000)
     // No pools → treasury_cut1 = floor(0.2 * expansion1)
-    state.epoch_block_count = 0;
-    state.epoch_fees = Lovelace(0);
+    state.consensus.epoch_block_count = 0;
+    state.utxo.epoch_fees = Lovelace(0);
     state.process_epoch_transition(EpochNo(2));
 
     let expansion1 = (3u128 * r0 as u128 / 1000) as u64;
     let tc1 = (2u128 * expansion1 as u128 / 10) as u64;
     assert_eq!(
-        state.treasury.0,
+        state.epochs.treasury.0,
         tc0 + tc1,
         "Treasury after 1→2 must be tc0({tc0}) + tc1({tc1}), got {}",
-        state.treasury.0
+        state.epochs.treasury.0
     );
     assert_eq!(
-        state.reserves.0,
+        state.epochs.reserves.0,
         r0 - tc1,
         "Reserves after 1→2 must be r0({r0}) - tc1({tc1}), got {}",
-        state.reserves.0
+        state.epochs.reserves.0
     );
 }
 
@@ -14226,9 +14442,9 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
     let mut state = LedgerState::new(params);
     state.epoch_length = 86_400;
     let initial_reserves = 15_000_000_000_000_000u64;
-    state.reserves = Lovelace(initial_reserves);
-    state.treasury = Lovelace(0);
-    state.needs_stake_rebuild = false;
+    state.epochs.reserves = Lovelace(initial_reserves);
+    state.epochs.treasury = Lovelace(0);
+    state.epochs.needs_stake_rebuild = false;
 
     let full_blocks = 4320u64;
     // Helper: epoch_blocks_by_pool must be populated because the RUPD uses
@@ -14245,12 +14461,12 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
     // prev_d=1.0 → d >= 0.8 → eta=1 → full expansion.
     // expansion0 = floor(0.003 * 15T) = 45,000,000,000,000
     // tc0 = floor(0.2 * expansion0) = 9,000,000,000,000
-    state.epoch_block_count = full_blocks;
-    state.epoch_fees = Lovelace(0);
-    state.epoch_blocks_by_pool = make_blocks(full_blocks);
+    state.consensus.epoch_block_count = full_blocks;
+    state.utxo.epoch_fees = Lovelace(0);
+    state.consensus.epoch_blocks_by_pool = make_blocks(full_blocks);
     state.process_epoch_transition(EpochNo(1));
-    let t0 = state.treasury.0;
-    let r0 = state.reserves.0;
+    let t0 = state.epochs.treasury.0;
+    let r0 = state.epochs.reserves.0;
     let expansion0 = (3u128 * initial_reserves as u128 / 1000) as u64;
     let tc0 = (2u128 * expansion0 as u128 / 10) as u64;
     assert_eq!(
@@ -14267,12 +14483,12 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
     // eta = 4320/4320 = 1.0.
     // expansion1 = floor(0.003 * r0)
     // tc1 = floor(0.2 * expansion1)
-    state.epoch_block_count = full_blocks;
-    state.epoch_fees = Lovelace(0);
-    state.epoch_blocks_by_pool = make_blocks(full_blocks);
+    state.consensus.epoch_block_count = full_blocks;
+    state.utxo.epoch_fees = Lovelace(0);
+    state.consensus.epoch_blocks_by_pool = make_blocks(full_blocks);
     state.process_epoch_transition(EpochNo(2));
-    let t1 = state.treasury.0;
-    let r1 = state.reserves.0;
+    let t1 = state.epochs.treasury.0;
+    let r1 = state.epochs.reserves.0;
     let expansion1 = (3u128 * r0 as u128 / 1000) as u64;
     let tc1 = (2u128 * expansion1 as u128 / 10) as u64;
     assert_eq!(
@@ -14289,12 +14505,12 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
     // Epoch 2→3: RUPD fires.
     // expansion2 = floor(0.003 * r1)
     // tc2 = floor(0.2 * expansion2)
-    state.epoch_block_count = full_blocks;
-    state.epoch_fees = Lovelace(0);
-    state.epoch_blocks_by_pool = make_blocks(full_blocks);
+    state.consensus.epoch_block_count = full_blocks;
+    state.utxo.epoch_fees = Lovelace(0);
+    state.consensus.epoch_blocks_by_pool = make_blocks(full_blocks);
     state.process_epoch_transition(EpochNo(3));
-    let t2 = state.treasury.0;
-    let r2 = state.reserves.0;
+    let t2 = state.epochs.treasury.0;
+    let r2 = state.epochs.reserves.0;
 
     let expansion2 = (3u128 * r1 as u128 / 1000) as u64;
     let tc2 = (2u128 * expansion2 as u128 / 10) as u64;
@@ -14310,12 +14526,12 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
     );
 
     // Epoch 3→4: RUPD fires.
-    state.epoch_block_count = full_blocks;
-    state.epoch_fees = Lovelace(0);
-    state.epoch_blocks_by_pool = make_blocks(full_blocks);
+    state.consensus.epoch_block_count = full_blocks;
+    state.utxo.epoch_fees = Lovelace(0);
+    state.consensus.epoch_blocks_by_pool = make_blocks(full_blocks);
     state.process_epoch_transition(EpochNo(4));
-    let t3 = state.treasury.0;
-    let r3 = state.reserves.0;
+    let t3 = state.epochs.treasury.0;
+    let r3 = state.epochs.reserves.0;
 
     let expansion3 = (3u128 * r2 as u128 / 1000) as u64;
     let tc3 = (2u128 * expansion3 as u128 / 10) as u64;
@@ -14351,7 +14567,7 @@ fn test_rupd_compounding_treasury_over_three_epochs() {
 
 /// Build a minimal Conway transaction that carries a `donation` field.
 ///
-/// The transaction spends a UTxO seeded in `state.utxo_set` (inserted by this
+/// The transaction spends a UTxO seeded in `state.utxo.utxo_set` (inserted by this
 /// helper) and donates `donation_lovelace` to the treasury.  Because the
 /// donation reduces the available balance, the output is sized accordingly.
 fn make_donation_tx(state: &mut LedgerState, unique_id: u8, donation_lovelace: u64) -> Transaction {
@@ -14363,7 +14579,7 @@ fn make_donation_tx(state: &mut LedgerState, unique_id: u8, donation_lovelace: u
         transaction_id: Hash32::from_bytes([unique_id; 32]),
         index: 0,
     };
-    state.utxo_set.insert(
+    state.utxo.utxo_set.insert(
         input.clone(),
         TransactionOutput {
             address: Address::Byron(ByronAddress {
@@ -14462,16 +14678,16 @@ fn test_treasury_donation_buffered_until_epoch_boundary() {
     // Immediately after block application: treasury must NOT yet include the donation;
     // it must sit in pending_donations instead.
     assert_eq!(
-        state.treasury.0, 0,
+        state.epochs.treasury.0, 0,
         "Treasury must not be credited immediately; donation is still pending. \
          treasury={}, pending_donations={}",
-        state.treasury.0, state.pending_donations.0
+        state.epochs.treasury.0, state.utxo.pending_donations.0
     );
     assert_eq!(
-        state.pending_donations.0, donation_amount,
+        state.utxo.pending_donations.0, donation_amount,
         "pending_donations must equal the donated amount after block application. \
          pending_donations={}, expected={}",
-        state.pending_donations.0, donation_amount
+        state.utxo.pending_donations.0, donation_amount
     );
 
     // --- Cross the epoch boundary (slot 200 → epoch 1) ---
@@ -14488,19 +14704,19 @@ fn test_treasury_donation_buffered_until_epoch_boundary() {
 
     // After epoch boundary: pending_donations must be zero (fully flushed).
     assert_eq!(
-        state.pending_donations.0, 0,
+        state.utxo.pending_donations.0, 0,
         "pending_donations must be zero after epoch boundary. got: {}",
-        state.pending_donations.0
+        state.utxo.pending_donations.0
     );
 
     // The donation must now appear in the treasury (plus any RUPD delta_treasury
     // from reward calculation; the reserve starts at max supply so delta_treasury
     // is non-zero — we just assert treasury ≥ donation_amount).
     assert!(
-        state.treasury.0 >= donation_amount,
+        state.epochs.treasury.0 >= donation_amount,
         "Treasury must include the flushed donation after epoch boundary. \
          treasury={}, donation_amount={}",
-        state.treasury.0,
+        state.epochs.treasury.0,
         donation_amount
     );
 }
@@ -14529,15 +14745,15 @@ fn test_treasury_donation_accumulates_across_transactions() {
         .expect("apply_block with two donations should succeed");
 
     assert_eq!(
-        state.pending_donations.0,
+        state.utxo.pending_donations.0,
         donation_a + donation_b,
         "pending_donations must equal the sum of all donations. \
          pending_donations={}, expected={}",
-        state.pending_donations.0,
+        state.utxo.pending_donations.0,
         donation_a + donation_b
     );
     assert_eq!(
-        state.treasury.0, 0,
+        state.epochs.treasury.0, 0,
         "Treasury must not be credited before epoch boundary"
     );
 
@@ -14548,13 +14764,13 @@ fn test_treasury_donation_accumulates_across_transactions() {
         .expect("epoch boundary block should succeed");
 
     assert_eq!(
-        state.pending_donations.0, 0,
+        state.utxo.pending_donations.0, 0,
         "pending_donations must be zero post-boundary"
     );
     assert!(
-        state.treasury.0 >= donation_a + donation_b,
+        state.epochs.treasury.0 >= donation_a + donation_b,
         "Treasury must include all flushed donations. treasury={}, min_expected={}",
-        state.treasury.0,
+        state.epochs.treasury.0,
         donation_a + donation_b
     );
 }
@@ -14572,17 +14788,17 @@ fn test_opcert_counters_persist_in_snapshot() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
     let pool_a = Hash28::from_bytes([0xAA; 28]);
     let pool_b = Hash28::from_bytes([0xBB; 28]);
-    state.opcert_counters.insert(pool_a, 5);
-    state.opcert_counters.insert(pool_b, 42);
+    state.consensus.opcert_counters.insert(pool_a, 5);
+    state.consensus.opcert_counters.insert(pool_b, 42);
 
     // Save and reload
     state.save_snapshot(&snapshot_path).unwrap();
     let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
 
     // Verify counters survived
-    assert_eq!(loaded.opcert_counters.len(), 2);
-    assert_eq!(loaded.opcert_counters.get(&pool_a), Some(&5));
-    assert_eq!(loaded.opcert_counters.get(&pool_b), Some(&42));
+    assert_eq!(loaded.consensus.opcert_counters.len(), 2);
+    assert_eq!(loaded.consensus.opcert_counters.get(&pool_a), Some(&5));
+    assert_eq!(loaded.consensus.opcert_counters.get(&pool_b), Some(&42));
 }
 
 #[test]
@@ -14595,7 +14811,7 @@ fn test_opcert_counters_empty_by_default_in_snapshot() {
     let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
 
     // Default: empty map
-    assert!(loaded.opcert_counters.is_empty());
+    assert!(loaded.consensus.opcert_counters.is_empty());
 }
 
 // =========================================================================
@@ -14613,8 +14829,8 @@ fn test_stake_registration_populates_deposit_map() {
 
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
 
-    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
-    assert_eq!(state.total_stake_key_deposits, 2_000_000);
+    assert_eq!(state.certs.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.certs.total_stake_key_deposits, 2_000_000);
 }
 
 /// Conway stake registration populates the per-credential deposit map.
@@ -14631,8 +14847,8 @@ fn test_conway_stake_registration_populates_deposit_map() {
         deposit: Lovelace(2_000_000),
     });
 
-    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
-    assert_eq!(state.total_stake_key_deposits, 2_000_000);
+    assert_eq!(state.certs.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.certs.total_stake_key_deposits, 2_000_000);
 }
 
 /// Stake deregistration removes from deposit map and uses stored deposit.
@@ -14646,17 +14862,17 @@ fn test_stake_deregistration_removes_from_deposit_map() {
 
     // Register
     state.process_certificate(&Certificate::StakeRegistration(cred.clone()));
-    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
-    assert_eq!(state.total_stake_key_deposits, 2_000_000);
+    assert_eq!(state.certs.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.certs.total_stake_key_deposits, 2_000_000);
 
     // Change key_deposit — deregistration should still use stored deposit
-    state.protocol_params.key_deposit = Lovelace(3_000_000);
+    state.epochs.protocol_params.key_deposit = Lovelace(3_000_000);
 
     // Deregister
     state.process_certificate(&Certificate::StakeDeregistration(cred.clone()));
-    assert!(!state.stake_key_deposits.contains_key(&key));
+    assert!(!state.certs.stake_key_deposits.contains_key(&key));
     // Decremented by stored 2M, not current 3M
-    assert_eq!(state.total_stake_key_deposits, 0);
+    assert_eq!(state.certs.total_stake_key_deposits, 0);
 }
 
 /// Conway deregistration uses stored deposit (not current param) after param change.
@@ -14673,18 +14889,18 @@ fn test_conway_deregistration_uses_stored_deposit_after_param_change() {
         credential: cred.clone(),
         deposit: Lovelace(2_000_000),
     });
-    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.certs.stake_key_deposits.get(&key), Some(&2_000_000));
 
     // Governance changes key_deposit to 3M
-    state.protocol_params.key_deposit = Lovelace(3_000_000);
+    state.epochs.protocol_params.key_deposit = Lovelace(3_000_000);
 
     // Deregister — should decrement by stored 2M
     state.process_certificate(&Certificate::ConwayStakeDeregistration {
         credential: cred.clone(),
         refund: Lovelace(2_000_000),
     });
-    assert!(!state.stake_key_deposits.contains_key(&key));
-    assert_eq!(state.total_stake_key_deposits, 0);
+    assert!(!state.certs.stake_key_deposits.contains_key(&key));
+    assert_eq!(state.certs.total_stake_key_deposits, 0);
 }
 
 /// Pool registration populates the per-pool deposit map (new pools only).
@@ -14711,7 +14927,7 @@ fn test_pool_registration_populates_deposit_map() {
     };
 
     state.process_certificate(&Certificate::PoolRegistration(pool_params));
-    assert_eq!(state.pool_deposits.get(&pool_id), Some(&500_000_000));
+    assert_eq!(state.certs.pool_deposits.get(&pool_id), Some(&500_000_000));
 }
 
 /// Pool re-registration does NOT overwrite the stored deposit.
@@ -14739,15 +14955,15 @@ fn test_pool_reregistration_preserves_deposit() {
 
     // First registration
     state.process_certificate(&Certificate::PoolRegistration(pool_params.clone()));
-    assert_eq!(state.pool_deposits.get(&pool_id), Some(&500_000_000));
+    assert_eq!(state.certs.pool_deposits.get(&pool_id), Some(&500_000_000));
 
     // Change pool_deposit, then re-register
-    state.protocol_params.pool_deposit = Lovelace(700_000_000);
+    state.epochs.protocol_params.pool_deposit = Lovelace(700_000_000);
     state.process_certificate(&Certificate::PoolRegistration(pool_params));
 
     // Deposit map should still have the original 500M, not 700M
     // (re-registration goes to future_pool_params, not pool_deposits)
-    assert_eq!(state.pool_deposits.get(&pool_id), Some(&500_000_000));
+    assert_eq!(state.certs.pool_deposits.get(&pool_id), Some(&500_000_000));
 }
 
 /// RegStakeDeleg combined cert populates deposit map.
@@ -14766,7 +14982,7 @@ fn test_reg_stake_deleg_populates_deposit_map() {
         deposit: Lovelace(2_000_000),
     });
 
-    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.certs.stake_key_deposits.get(&key), Some(&2_000_000));
 }
 
 /// RegStakeVoteDeleg combined cert populates deposit map.
@@ -14786,7 +15002,7 @@ fn test_reg_stake_vote_deleg_populates_deposit_map() {
         deposit: Lovelace(2_000_000),
     });
 
-    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.certs.stake_key_deposits.get(&key), Some(&2_000_000));
 }
 
 /// VoteRegDeleg combined cert populates deposit map.
@@ -14804,7 +15020,7 @@ fn test_vote_reg_deleg_populates_deposit_map() {
         deposit: Lovelace(2_000_000),
     });
 
-    assert_eq!(state.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(state.certs.stake_key_deposits.get(&key), Some(&2_000_000));
 }
 
 /// Snapshot round-trip preserves per-credential deposit maps.
@@ -14819,16 +15035,16 @@ fn test_snapshot_roundtrip_preserves_deposit_maps() {
     let key = cred.to_typed_hash32();
     let pool_id = Hash28::from_bytes([0x55; 28]);
 
-    state.stake_key_deposits.insert(key, 2_000_000);
-    state.pool_deposits.insert(pool_id, 500_000_000);
+    state.certs.stake_key_deposits.insert(key, 2_000_000);
+    state.certs.pool_deposits.insert(pool_id, 500_000_000);
 
     let dir = tempfile::tempdir().unwrap();
     let snapshot_path = dir.path().join("deposit_test.snap");
     state.save_snapshot(&snapshot_path).unwrap();
     let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
 
-    assert_eq!(loaded.stake_key_deposits.get(&key), Some(&2_000_000));
-    assert_eq!(loaded.pool_deposits.get(&pool_id), Some(&500_000_000));
+    assert_eq!(loaded.certs.stake_key_deposits.get(&key), Some(&2_000_000));
+    assert_eq!(loaded.certs.pool_deposits.get(&pool_id), Some(&500_000_000));
 }
 
 /// Snapshot migration populates deposit maps from params × credentials.
@@ -14841,9 +15057,9 @@ fn test_snapshot_migration_populates_deposit_maps() {
 
     // Simulate a pre-v12 snapshot: registered credentials but empty deposit maps.
     let cred_hash = Credential::VerificationKey(Hash28::from_bytes([0xDE; 28])).to_typed_hash32();
-    Arc::make_mut(&mut state.reward_accounts).insert(cred_hash, Lovelace(0));
+    Arc::make_mut(&mut state.certs.reward_accounts).insert(cred_hash, Lovelace(0));
     let pool_id = Hash28::from_bytes([0x66; 28]);
-    Arc::make_mut(&mut state.pool_params).insert(
+    Arc::make_mut(&mut state.certs.pool_params).insert(
         pool_id,
         PoolRegistration {
             pool_id,
@@ -14860,8 +15076,8 @@ fn test_snapshot_migration_populates_deposit_maps() {
         },
     );
     // Ensure deposit maps are empty (simulating old snapshot)
-    assert!(state.stake_key_deposits.is_empty());
-    assert!(state.pool_deposits.is_empty());
+    assert!(state.certs.stake_key_deposits.is_empty());
+    assert!(state.certs.pool_deposits.is_empty());
 
     let dir = tempfile::tempdir().unwrap();
     let snapshot_path = dir.path().join("migration_test.snap");
@@ -14869,6 +15085,9 @@ fn test_snapshot_migration_populates_deposit_maps() {
     let loaded = LedgerState::load_snapshot(&snapshot_path).unwrap();
 
     // Migration should have populated maps from current params
-    assert_eq!(loaded.stake_key_deposits.get(&cred_hash), Some(&2_000_000));
-    assert_eq!(loaded.pool_deposits.get(&pool_id), Some(&500_000_000));
+    assert_eq!(
+        loaded.certs.stake_key_deposits.get(&cred_hash),
+        Some(&2_000_000)
+    );
+    assert_eq!(loaded.certs.pool_deposits.get(&pool_id), Some(&500_000_000));
 }

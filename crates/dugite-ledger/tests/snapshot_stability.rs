@@ -1,10 +1,11 @@
 //! Snapshot format stability tests.
 //!
-//! LedgerState uses bincode serialization (field-order-dependent, not self-describing).
-//! Adding, removing, or reordering fields BREAKS deserialization of existing snapshots.
-//! These tests detect accidental format changes by hashing the serialized output of a
-//! canonical LedgerState and comparing against a known expected hash.
+//! LedgerState uses bincode serialization via LedgerStateSnapshot (field-order-dependent,
+//! not self-describing). Adding, removing, or reordering fields in LedgerStateSnapshot
+//! BREAKS deserialization of existing snapshots. These tests detect accidental format
+//! changes by hashing the serialized output and comparing against a known expected hash.
 
+use dugite_ledger::state::snapshot_format::LedgerStateSnapshot;
 use dugite_ledger::LedgerState;
 use dugite_primitives::protocol_params::ProtocolParameters;
 
@@ -18,9 +19,12 @@ fn canonical_ledger_state() -> LedgerState {
 fn snapshot_round_trip_deterministic() {
     let state = canonical_ledger_state();
 
-    let bytes1 = bincode::serialize(&state).expect("serialize 1");
-    let state2: LedgerState = bincode::deserialize(&bytes1).expect("deserialize");
-    let bytes2 = bincode::serialize(&state2).expect("serialize 2");
+    let snap1 = LedgerStateSnapshot::from(&state);
+    let bytes1 = bincode::serialize(&snap1).expect("serialize 1");
+    let snap2: LedgerStateSnapshot = bincode::deserialize(&bytes1).expect("deserialize");
+    let state2 = LedgerState::from(snap2);
+    let snap3 = LedgerStateSnapshot::from(&state2);
+    let bytes2 = bincode::serialize(&snap3).expect("serialize 2");
 
     assert_eq!(
         bytes1, bytes2,
@@ -29,7 +33,7 @@ fn snapshot_round_trip_deterministic() {
 }
 
 /// Hash the serialized bytes and compare against a known value.
-/// If this test fails, it means the LedgerState serialization format has changed,
+/// If this test fails, it means the LedgerStateSnapshot serialization format has changed,
 /// which will break deserialization of existing snapshots on disk.
 ///
 /// To update: run the test, copy the new hash from the failure message, and update
@@ -38,7 +42,8 @@ fn snapshot_round_trip_deterministic() {
 #[test]
 fn snapshot_format_hash_stability() {
     let state = canonical_ledger_state();
-    let bytes = bincode::serialize(&state).expect("serialize");
+    let snap = LedgerStateSnapshot::from(&state);
+    let bytes = bincode::serialize(&snap).expect("serialize");
 
     // blake2b-256 of the serialized bytes
     let hash = dugite_primitives::hash::blake2b_256(&bytes);
@@ -48,7 +53,7 @@ fn snapshot_format_hash_stability() {
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
 
-    // This hash was computed from the current LedgerState layout.
+    // This hash was computed from the current LedgerStateSnapshot layout.
     // If this changes, existing snapshot files become unreadable.
     const EXPECTED_HASH: &str = "f9c852d98d3419c44011fa00ab9577f4c07bfd078e8a05b4c6654c3cf48a2ce9";
 
@@ -81,11 +86,14 @@ fn snapshot_save_load_round_trip() {
     // Compare key fields
     assert_eq!(state.epoch, loaded.epoch);
     assert_eq!(state.era, loaded.era);
-    assert_eq!(state.treasury, loaded.treasury);
-    assert_eq!(state.reserves, loaded.reserves);
+    assert_eq!(state.epochs.treasury, loaded.epochs.treasury);
+    assert_eq!(state.epochs.reserves, loaded.epochs.reserves);
     assert_eq!(state.epoch_length, loaded.epoch_length);
-    assert_eq!(state.evolving_nonce, loaded.evolving_nonce);
-    assert_eq!(state.epoch_nonce, loaded.epoch_nonce);
+    assert_eq!(
+        state.consensus.evolving_nonce,
+        loaded.consensus.evolving_nonce
+    );
+    assert_eq!(state.consensus.epoch_nonce, loaded.consensus.epoch_nonce);
 }
 
 /// Verify that the snapshot file starts with the expected header.

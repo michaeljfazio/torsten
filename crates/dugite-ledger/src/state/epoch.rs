@@ -47,8 +47,8 @@ impl LedgerState {
         //
         // This avoids the timing issue where the d value at boundary capture
         // time differs from the d value during the epoch (due to PPUP updates).
-        let bprev_block_count = self.epoch_block_count;
-        let bprev_blocks_by_pool = Arc::clone(&self.epoch_blocks_by_pool);
+        let bprev_block_count = self.consensus.epoch_block_count;
+        let bprev_blocks_by_pool = Arc::clone(&self.consensus.epoch_blocks_by_pool);
 
         // Step 0: Flush pending treasury donations accumulated during the epoch.
         //
@@ -60,10 +60,10 @@ impl LedgerState {
         // We buffer donations in `pending_donations` during block application and
         // drain them here so the donation ADA is visible to reward-pot calculations
         // for this epoch boundary — matching Haskell's ordering exactly.
-        if self.pending_donations.0 > 0 {
-            let flushed = self.pending_donations;
-            self.treasury.0 = self.treasury.0.saturating_add(flushed.0);
-            self.pending_donations = Lovelace(0);
+        if self.utxo.pending_donations.0 > 0 {
+            let flushed = self.utxo.pending_donations;
+            self.epochs.treasury.0 = self.epochs.treasury.0.saturating_add(flushed.0);
+            self.utxo.pending_donations = Lovelace(0);
             debug!(
                 epoch = new_epoch.0,
                 donations_lovelace = flushed.0,
@@ -96,18 +96,20 @@ impl LedgerState {
             // At the very first boundary (0→1) all three are empty/zero, which is
             // correct: the RUPD yields pure monetary expansion with no pool rewards.
             let go_snapshot = self
+                .epochs
                 .snapshots
                 .go
                 .clone()
                 .unwrap_or_else(|| StakeSnapshot::empty(EpochNo(0)));
             let bprev = StakeSnapshot {
-                epoch_block_count: self.snapshots.bprev_block_count,
-                epoch_blocks_by_pool: Arc::clone(&self.snapshots.bprev_blocks_by_pool),
+                epoch_block_count: self.epochs.snapshots.bprev_block_count,
+                epoch_blocks_by_pool: Arc::clone(&self.epochs.snapshots.bprev_blocks_by_pool),
                 ..StakeSnapshot::empty(EpochNo(0))
             };
-            let rupd = self.calculate_rewards_full(&go_snapshot, &bprev, self.snapshots.ss_fee);
-            self.reserves.0 = self.reserves.0.saturating_sub(rupd.delta_reserves);
-            self.treasury.0 = self.treasury.0.saturating_add(rupd.delta_treasury);
+            let rupd =
+                self.calculate_rewards_full(&go_snapshot, &bprev, self.epochs.snapshots.ss_fee);
+            self.epochs.reserves.0 = self.epochs.reserves.0.saturating_sub(rupd.delta_reserves);
+            self.epochs.treasury.0 = self.epochs.treasury.0.saturating_add(rupd.delta_treasury);
 
             // Apply per-account rewards, matching Haskell's applyRUpdFiltered:
             // rewards for REGISTERED credentials go to their reward accounts;
@@ -118,15 +120,15 @@ impl LedgerState {
             let mut unregistered_total = 0u64;
             for (cred_hash, reward) in &rupd.rewards {
                 if reward.0 > 0 {
-                    if self.reward_accounts.contains_key(cred_hash) {
-                        *Arc::make_mut(&mut self.reward_accounts)
+                    if self.certs.reward_accounts.contains_key(cred_hash) {
+                        *Arc::make_mut(&mut self.certs.reward_accounts)
                             .entry(*cred_hash)
                             .or_insert(Lovelace(0)) += *reward;
                         total_applied += reward.0;
                     } else {
                         // Unregistered credential: forward to treasury
                         // (matches Haskell's frTotalUnregistered in applyRUpd)
-                        self.treasury.0 = self.treasury.0.saturating_add(reward.0);
+                        self.epochs.treasury.0 = self.epochs.treasury.0.saturating_add(reward.0);
                         unregistered_total += reward.0;
                     }
                 }
@@ -139,7 +141,7 @@ impl LedgerState {
                     unregistered_to_treasury = unregistered_total,
                     treasury_delta = rupd.delta_treasury,
                     reserves_delta = rupd.delta_reserves,
-                    ss_fee = self.snapshots.ss_fee.0,
+                    ss_fee = self.epochs.snapshots.ss_fee.0,
                     "RUPD applied using GO snapshot + ss_fee"
                 );
             }
@@ -154,27 +156,27 @@ impl LedgerState {
         //
         // We capture bprev BEFORE resetting the counters (step 7 equivalent).
         // bprev = current epoch's block production (matching nesBcur → nesBprev).
-        let captured_fees = self.epoch_fees;
-        self.snapshots.go = self.snapshots.set.take();
-        self.snapshots.set = self.snapshots.mark.take();
-        self.snapshots.ss_fee = captured_fees;
+        let captured_fees = self.utxo.epoch_fees;
+        self.epochs.snapshots.go = self.epochs.snapshots.set.take();
+        self.epochs.snapshots.set = self.epochs.snapshots.mark.take();
+        self.epochs.snapshots.ss_fee = captured_fees;
         // bprev = blocks from the epoch that just ended (nesBprev = nesBcur).
         // The overlay check uses the d value from the epoch that just ended
         // (captured BEFORE PPUP updates the protocol params). This was saved
         // at the top of process_epoch_transition.
-        self.snapshots.bprev_block_count = bprev_block_count;
-        self.snapshots.bprev_blocks_by_pool = bprev_blocks_by_pool;
+        self.epochs.snapshots.bprev_block_count = bprev_block_count;
+        self.epochs.snapshots.bprev_blocks_by_pool = bprev_blocks_by_pool;
         // After the first rotation, bprev/ss_fee contain real epoch data.
         // Subsequent RUPD computations can fire (matching Haskell's nesRu = SJust).
-        self.snapshots.rupd_ready = true;
+        self.epochs.snapshots.rupd_ready = true;
 
         // Full UTxO rebuild is only needed after Mithril import or snapshot restore
         // (where incremental tracking was not active). During normal block processing
         // (replay or live sync), the incremental stake_map is accurate.
-        if self.needs_stake_rebuild {
+        if self.epochs.needs_stake_rebuild {
             self.rebuild_stake_distribution();
             // Once rebuilt, disable for subsequent boundaries — incremental is correct.
-            self.needs_stake_rebuild = false;
+            self.epochs.needs_stake_rebuild = false;
         }
 
         // Conway pointer address exclusion is now handled in apply_block BEFORE
@@ -183,15 +185,17 @@ impl LedgerState {
 
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake: HashMap<dugite_primitives::hash::Hash28, Lovelace> =
-            HashMap::with_capacity(self.pool_params.len());
-        for (cred_hash, pool_id) in self.delegations.iter() {
+            HashMap::with_capacity(self.certs.pool_params.len());
+        for (cred_hash, pool_id) in self.certs.delegations.iter() {
             let utxo_stake = self
+                .certs
                 .stake_distribution
                 .stake_map
                 .get(cred_hash)
                 .copied()
                 .unwrap_or(Lovelace(0));
             let reward_balance = self
+                .certs
                 .reward_accounts
                 .get(cred_hash)
                 .copied()
@@ -207,19 +211,19 @@ impl LedgerState {
         // map when the SNAP rule runs.  Credentials that have deregistered will have had their
         // pointer_map entries removed, so their pointer-addressed coins are excluded from
         // this snapshot.  In Conway, ptr_stake is always empty (cleared at the HFC boundary).
-        if !self.ptr_stake.is_empty() {
+        if !self.epochs.ptr_stake.is_empty() {
             let mut ptr_resolved = 0u64;
             let mut ptr_excluded = 0u64;
-            for (pointer, &coin) in &self.ptr_stake {
+            for (pointer, &coin) in &self.epochs.ptr_stake {
                 if coin == 0 {
                     continue;
                 }
                 // Resolve the pointer to a credential via the CURRENT pointer_map.
                 // If the pointer has no entry (credential deregistered), exclude the coins.
-                if let Some(cred_hash) = self.pointer_map.get(pointer) {
+                if let Some(cred_hash) = self.certs.pointer_map.get(pointer) {
                     // Only count coins for registered, delegated credentials.
-                    if self.reward_accounts.contains_key(cred_hash) {
-                        if let Some(pool_id) = self.delegations.get(cred_hash) {
+                    if self.certs.reward_accounts.contains_key(cred_hash) {
+                        if let Some(pool_id) = self.certs.delegations.get(cred_hash) {
                             *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += Lovelace(coin);
                             ptr_resolved += coin;
                         }
@@ -243,15 +247,17 @@ impl LedgerState {
         // Haskell's ssStake which is the intersection of staking credentials
         // and the delegation map.
         let mut snapshot_stake: HashMap<Hash32, Lovelace> =
-            HashMap::with_capacity(self.delegations.len());
-        for cred_hash in self.delegations.keys() {
+            HashMap::with_capacity(self.certs.delegations.len());
+        for cred_hash in self.certs.delegations.keys() {
             let utxo_stake = self
+                .certs
                 .stake_distribution
                 .stake_map
                 .get(cred_hash)
                 .copied()
                 .unwrap_or(Lovelace(0));
             let reward_balance = self
+                .certs
                 .reward_accounts
                 .get(cred_hash)
                 .copied()
@@ -268,14 +274,14 @@ impl LedgerState {
         // for per-member reward calculation (individual sigma values).  Pointer
         // coins must be included here so that pool members with pointer addresses
         // receive the correct proportional rewards.
-        if !self.ptr_stake.is_empty() {
-            for (pointer, &coin) in &self.ptr_stake {
+        if !self.epochs.ptr_stake.is_empty() {
+            for (pointer, &coin) in &self.epochs.ptr_stake {
                 if coin == 0 {
                     continue;
                 }
-                if let Some(cred_hash) = self.pointer_map.get(pointer) {
-                    if self.reward_accounts.contains_key(cred_hash)
-                        && self.delegations.contains_key(cred_hash)
+                if let Some(cred_hash) = self.certs.pointer_map.get(pointer) {
+                    if self.certs.reward_accounts.contains_key(cred_hash)
+                        && self.certs.delegations.contains_key(cred_hash)
                     {
                         *snapshot_stake.entry(*cred_hash).or_insert(Lovelace(0)) += Lovelace(coin);
                     }
@@ -284,6 +290,7 @@ impl LedgerState {
         }
 
         let total_utxo_stake: u64 = self
+            .certs
             .stake_distribution
             .stake_map
             .values()
@@ -293,27 +300,27 @@ impl LedgerState {
             .fold(0u64, |acc, l| acc.saturating_add(l.0));
         debug!(
             epoch = new_epoch.0,
-            credentials = self.stake_distribution.stake_map.len(),
-            reward_accounts = self.reward_accounts.len(),
-            delegations = self.delegations.len(),
-            pool_params = self.pool_params.len(),
+            credentials = self.certs.stake_distribution.stake_map.len(),
+            reward_accounts = self.certs.reward_accounts.len(),
+            delegations = self.certs.delegations.len(),
+            pool_params = self.certs.pool_params.len(),
             pools_with_stake = pool_stake.len(),
             total_utxo_stake_ada = total_utxo_stake / 1_000_000,
             total_pool_stake_ada = total_pool_stake / 1_000_000,
             "Epoch snapshot: stake distribution rebuilt from UTxO set"
         );
 
-        self.snapshots.mark = Some(StakeSnapshot {
+        self.epochs.snapshots.mark = Some(StakeSnapshot {
             epoch: new_epoch,
-            delegations: Arc::clone(&self.delegations),
+            delegations: Arc::clone(&self.certs.delegations),
             pool_stake,
-            pool_params: Arc::clone(&self.pool_params),
+            pool_params: Arc::clone(&self.certs.pool_params),
             stake_distribution: Arc::new(snapshot_stake),
             // Block production data in the mark is used for legacy calculate_rewards().
             // The primary RUPD path uses bprev (from EpochSnapshots) instead.
-            epoch_fees: self.epoch_fees,
-            epoch_block_count: self.epoch_block_count,
-            epoch_blocks_by_pool: Arc::clone(&self.epoch_blocks_by_pool),
+            epoch_fees: self.utxo.epoch_fees,
+            epoch_block_count: self.consensus.epoch_block_count,
+            epoch_blocks_by_pool: Arc::clone(&self.consensus.epoch_blocks_by_pool),
         });
 
         // NOTE: DRep distribution snapshot is NOT captured here.  It is captured
@@ -333,11 +340,11 @@ impl LedgerState {
         //   - Pools ONLY in future (e.g., pool retired between re-reg and boundary): DROPPED
         //
         // This prevents retired pools from being resurrected by stale futurePoolParams.
-        if !self.future_pool_params.is_empty() {
+        if !self.certs.future_pool_params.is_empty() {
             let mut applied = 0u64;
             let mut dropped = 0u64;
-            let pool_params = Arc::make_mut(&mut self.pool_params);
-            for (pool_id, pool_reg) in self.future_pool_params.drain() {
+            let pool_params = Arc::make_mut(&mut self.certs.pool_params);
+            for (pool_id, pool_reg) in self.certs.future_pool_params.drain() {
                 #[allow(clippy::map_entry)] // intentional: different side-effects per branch
                 if pool_params.contains_key(&pool_id) {
                     // Pool still registered: update with new params
@@ -364,6 +371,7 @@ impl LedgerState {
         // Process pending pool retirements for this epoch.
         // Haskell: retired = {k | (k, v) <- psRetiring, v == e}
         let retiring_pools: Vec<Hash28> = self
+            .certs
             .pending_retirements
             .iter()
             .filter_map(|(pool_id, epoch)| {
@@ -377,7 +385,7 @@ impl LedgerState {
         if !retiring_pools.is_empty() {
             // Remove retired entries from pending_retirements
             for pool_id in &retiring_pools {
-                self.pending_retirements.remove(pool_id);
+                self.certs.pending_retirements.remove(pool_id);
             }
             for pool_id in &retiring_pools {
                 // Refund pool deposit to operator's registered reward account.
@@ -386,22 +394,24 @@ impl LedgerState {
                 // Also remove all delegations pointing to this pool, matching
                 // Haskell's POOLREAP which filters delegations to retired pools:
                 //   adjustedDelegs = Map.filter (\pid -> pid `Set.notMember` retired) delegs
-                if let Some(pool_reg) = Arc::make_mut(&mut self.pool_params).remove(pool_id) {
+                if let Some(pool_reg) = Arc::make_mut(&mut self.certs.pool_params).remove(pool_id) {
                     let pool_deposit = self
+                        .certs
                         .pool_deposits
                         .remove(pool_id)
                         .map(Lovelace)
-                        .unwrap_or(self.protocol_params.pool_deposit);
+                        .unwrap_or(self.epochs.protocol_params.pool_deposit);
                     let op_key = Self::reward_account_to_hash(&pool_reg.reward_account);
                     // Refund deposit: if the reward account is registered, refund to it.
                     // If unregistered, refund goes to treasury (matching Haskell's POOLREAP
                     // which filters unclaimed refunds to treasury).
-                    if self.reward_accounts.contains_key(&op_key) {
-                        *Arc::make_mut(&mut self.reward_accounts)
+                    if self.certs.reward_accounts.contains_key(&op_key) {
+                        *Arc::make_mut(&mut self.certs.reward_accounts)
                             .entry(op_key)
                             .or_insert(Lovelace(0)) += pool_deposit;
                     } else {
-                        self.treasury.0 = self.treasury.0.saturating_add(pool_deposit.0);
+                        self.epochs.treasury.0 =
+                            self.epochs.treasury.0.saturating_add(pool_deposit.0);
                         debug!(
                             "Pool {} deposit {} -> treasury (unregistered reward account)",
                             pool_id.to_hex(),
@@ -409,7 +419,7 @@ impl LedgerState {
                         );
                     }
                     // Remove delegations to the retired pool
-                    Arc::make_mut(&mut self.delegations)
+                    Arc::make_mut(&mut self.certs.delegations)
                         .retain(|_, delegated_pool| delegated_pool != pool_id);
                     debug!(
                         "Pool retired at epoch {}: {} (deposit {} refunded)",
@@ -429,22 +439,23 @@ impl LedgerState {
 
         // Clean up retirements from past epochs (shouldn't happen but be safe).
         // Haskell: psRetiring = Map.filter (\e -> e > eNo) psRetiring
-        self.pending_retirements
+        self.certs
+            .pending_retirements
             .retain(|_, epoch| *epoch > new_epoch);
 
         // Capture prevPParams BEFORE PPUP updates curPP, matching Haskell's
         // NEWPP rule: prevPParams = old curPParams (before this boundary's PPUP).
         // The RUPD at the NEXT boundary will use prev_protocol_params for ALL
         // parameter values (rho, tau, a0, n_opt, active_slots_coeff, d, proto).
-        let old_d = if self.protocol_params.protocol_version_major >= 7 {
+        let old_d = if self.epochs.protocol_params.protocol_version_major >= 7 {
             0.0
         } else {
-            let d_n = self.protocol_params.d.numerator as f64;
-            let d_d = self.protocol_params.d.denominator.max(1) as f64;
+            let d_n = self.epochs.protocol_params.d.numerator as f64;
+            let d_d = self.epochs.protocol_params.d.denominator.max(1) as f64;
             d_n / d_d
         };
-        let old_proto_major = self.protocol_params.protocol_version_major;
-        let old_params = self.protocol_params.clone();
+        let old_proto_major = self.epochs.protocol_params.protocol_version_major;
+        let old_params = self.epochs.protocol_params.clone();
 
         // Apply pre-Conway protocol parameter update proposals (PPUP/UPEC rule).
         //
@@ -468,10 +479,10 @@ impl LedgerState {
         debug!(
             new_epoch = new_epoch.0,
             lookup_epoch = lookup_epoch.0,
-            pending = ?self.pending_pp_updates.keys().map(|e| e.0).collect::<Vec<_>>(),
+            pending = ?self.epochs.pending_pp_updates.keys().map(|e| e.0).collect::<Vec<_>>(),
             "PPUP: checking for proposals"
         );
-        if let Some(proposals) = self.pending_pp_updates.remove(&lookup_epoch) {
+        if let Some(proposals) = self.epochs.pending_pp_updates.remove(&lookup_epoch) {
             // Count distinct proposers (genesis delegate hashes)
             let mut proposer_set: std::collections::HashSet<Hash32> =
                 std::collections::HashSet::with_capacity(proposals.len());
@@ -523,14 +534,14 @@ impl LedgerState {
                 {
                     info!(
                         "Protocol     version change {}.{} -> {}.{} (epoch {})",
-                        self.protocol_params.protocol_version_major,
-                        self.protocol_params.protocol_version_minor,
+                        self.epochs.protocol_params.protocol_version_major,
+                        self.epochs.protocol_params.protocol_version_minor,
                         merged
                             .protocol_version_major
-                            .unwrap_or(self.protocol_params.protocol_version_major),
+                            .unwrap_or(self.epochs.protocol_params.protocol_version_major),
                         merged
                             .protocol_version_minor
-                            .unwrap_or(self.protocol_params.protocol_version_minor),
+                            .unwrap_or(self.epochs.protocol_params.protocol_version_minor),
                         new_epoch.0,
                     );
                 }
@@ -557,17 +568,19 @@ impl LedgerState {
             }
         }
         // Clean up current proposals targeting past epochs.
-        self.pending_pp_updates
+        self.epochs
+            .pending_pp_updates
             .retain(|epoch, _| *epoch >= lookup_epoch);
 
         // Promote future proposals → current (Haskell's updatePpup: sgsCur = sgsFuture).
         // After evaluating sgsCur, future proposals become current for the next boundary.
         // This ensures proposals with ppupEpoch = E+1 (submitted during epoch E as future)
         // are promoted at E→E+1 and applied at E+1→E+2 — matching the two-step cycle.
-        if !self.future_pp_updates.is_empty() {
-            let promoted = std::mem::take(&mut self.future_pp_updates);
+        if !self.epochs.future_pp_updates.is_empty() {
+            let promoted = std::mem::take(&mut self.epochs.future_pp_updates);
             for (epoch, proposals) in promoted {
-                self.pending_pp_updates
+                self.epochs
+                    .pending_pp_updates
                     .entry(epoch)
                     .or_default()
                     .extend(proposals);
@@ -592,7 +605,7 @@ impl LedgerState {
         // Haskell's ordering: check proposals AFTER ratification/expiry (so a last-epoch
         // proposal that just got ratified means this epoch was NOT dormant).
         {
-            let gov = Arc::make_mut(&mut self.governance);
+            let gov = Arc::make_mut(&mut self.gov.governance);
             if gov.proposals.is_empty() {
                 gov.num_dormant_epochs = gov.num_dormant_epochs.saturating_add(1);
                 debug!(
@@ -620,12 +633,12 @@ impl LedgerState {
         // but matches Haskell's `vsNumDormantEpochs` semantics which is also global.
         //
         // DReps remain registered but are excluded from voting power calculations.
-        let drep_activity = self.protocol_params.drep_activity;
+        let drep_activity = self.epochs.protocol_params.drep_activity;
         if drep_activity > 0 {
-            let num_dormant = self.governance.num_dormant_epochs;
+            let num_dormant = self.gov.governance.num_dormant_epochs;
             let mut newly_inactive = 0u64;
             let mut reactivated = 0u64;
-            for drep in Arc::make_mut(&mut self.governance).dreps.values_mut() {
+            for drep in Arc::make_mut(&mut self.gov.governance).dreps.values_mut() {
                 // Compute epochs elapsed since last activity, discounting dormant epochs.
                 let elapsed = new_epoch.0.saturating_sub(drep.last_active_epoch.0);
                 let active_elapsed = elapsed.saturating_sub(num_dormant);
@@ -649,6 +662,7 @@ impl LedgerState {
 
         // Expire committee members that have passed their expiration epoch
         let expired_members: Vec<Hash32> = self
+            .gov
             .governance
             .committee_expiration
             .iter()
@@ -657,10 +671,10 @@ impl LedgerState {
             .collect();
         if !expired_members.is_empty() {
             for hash in &expired_members {
-                Arc::make_mut(&mut self.governance)
+                Arc::make_mut(&mut self.gov.governance)
                     .committee_hot_keys
                     .remove(hash);
-                Arc::make_mut(&mut self.governance)
+                Arc::make_mut(&mut self.gov.governance)
                     .committee_expiration
                     .remove(hash);
             }
@@ -682,7 +696,7 @@ impl LedgerState {
         // (so proposals/votes submitted during the new epoch are not considered),
         // and the DRep distribution by `build_drep_power_cache()` (matching the
         // one-epoch-lagged DRep pulser lifecycle in Haskell).
-        if self.protocol_params.protocol_version_major >= 9 {
+        if self.epochs.protocol_params.protocol_version_major >= 9 {
             self.capture_drep_distribution_snapshot();
             self.capture_ratification_snapshot();
         }
@@ -691,17 +705,24 @@ impl LedgerState {
         // EPOCH rule which replaces utxosDeposited with a fresh sum.  This serves
         // as both a correctness fix and a cross-check of incremental tracking.
         {
-            let obl_stake: u64 = self.stake_key_deposits.values().sum();
-            let obl_pool: u64 = self.pool_deposits.values().sum();
-            let obl_drep: u64 = self.governance.dreps.values().map(|d| d.deposit.0).sum();
+            let obl_stake: u64 = self.certs.stake_key_deposits.values().sum();
+            let obl_pool: u64 = self.certs.pool_deposits.values().sum();
+            let obl_drep: u64 = self
+                .gov
+                .governance
+                .dreps
+                .values()
+                .map(|d| d.deposit.0)
+                .sum();
             let obl_proposal: u64 = self
+                .gov
                 .governance
                 .proposals
                 .values()
                 .map(|p| p.procedure.deposit.0)
                 .sum();
             let recalculated = obl_stake + obl_pool + obl_drep + obl_proposal;
-            let running = self.total_stake_key_deposits + obl_pool + obl_drep + obl_proposal;
+            let running = self.certs.total_stake_key_deposits + obl_pool + obl_drep + obl_proposal;
             if recalculated != running {
                 debug!(
                     epoch = new_epoch.0,
@@ -709,13 +730,13 @@ impl LedgerState {
                     running,
                     diff = recalculated as i64 - running as i64,
                     obl_stake,
-                    total_stake_key_deposits = self.total_stake_key_deposits,
+                    total_stake_key_deposits = self.certs.total_stake_key_deposits,
                     "totalObligation recalculation: deposit drift detected"
                 );
             }
             // Replace the running counter with the recalculated value,
             // matching Haskell's `utxosDepositedL .~ totalObligation`.
-            self.total_stake_key_deposits = obl_stake;
+            self.certs.total_stake_key_deposits = obl_stake;
         }
 
         // Compute new epoch nonce per Haskell TICKN rule:
@@ -726,15 +747,15 @@ impl LedgerState {
         //
         // Critical: use the OLD last_epoch_block_nonce FIRST, then update it.
         // In Haskell ηh = previous ticknStatePrevHashNonce (NOT the just-captured lab).
-        let _prev_epoch_nonce = self.epoch_nonce;
-        let candidate = self.candidate_nonce;
-        let prev_hash_nonce = self.last_epoch_block_nonce; // ηh = OLD value
+        let _prev_epoch_nonce = self.consensus.epoch_nonce;
+        let candidate = self.consensus.candidate_nonce;
+        let prev_hash_nonce = self.consensus.last_epoch_block_nonce; // ηh = OLD value
 
         debug!(
             epoch = new_epoch.0,
             candidate = %candidate.to_hex(),
             prev_hash_nonce = %prev_hash_nonce.to_hex(),
-            block_count = self.epoch_block_count,
+            block_count = self.consensus.epoch_block_count,
             "Epoch nonce inputs"
         );
 
@@ -745,7 +766,7 @@ impl LedgerState {
         //   Nonce(a) ⭒ Nonce(b) = Nonce(blake2b_256(a || b))
         // extraEntropy is NeutralNonce on all real networks, so omitted.
         let zero = dugite_primitives::hash::Hash32::ZERO;
-        self.epoch_nonce = if candidate == zero && prev_hash_nonce == zero {
+        self.consensus.epoch_nonce = if candidate == zero && prev_hash_nonce == zero {
             zero
         } else if candidate == zero {
             prev_hash_nonce
@@ -759,11 +780,11 @@ impl LedgerState {
         };
 
         // Step 2: NOW update prevHashNonce to current labNonce for NEXT epoch
-        self.last_epoch_block_nonce = self.lab_nonce;
+        self.consensus.last_epoch_block_nonce = self.consensus.lab_nonce;
 
         debug!(
             epoch = new_epoch.0,
-            nonce = %self.epoch_nonce.to_hex(),
+            nonce = %self.consensus.epoch_nonce.to_hex(),
             "Epoch nonce"
         );
 
@@ -774,14 +795,14 @@ impl LedgerState {
         // Haskell's NEWPP: prevPParams = old curPParams (before this PPUP).
         // The RUPD at the NEXT boundary uses prev_protocol_params for ALL
         // parameter values (rho, tau, a0, n_opt, active_slots_coeff, etc.).
-        self.prev_d = old_d;
-        self.prev_protocol_version_major = old_proto_major;
-        self.prev_protocol_params = old_params;
+        self.epochs.prev_d = old_d;
+        self.epochs.prev_protocol_version_major = old_proto_major;
+        self.epochs.prev_protocol_params = old_params;
 
         // Reset per-epoch accumulators
-        self.epoch_fees = Lovelace(0);
-        Arc::make_mut(&mut self.epoch_blocks_by_pool).clear();
-        self.epoch_block_count = 0;
+        self.utxo.epoch_fees = Lovelace(0);
+        Arc::make_mut(&mut self.consensus.epoch_blocks_by_pool).clear();
+        self.consensus.epoch_block_count = 0;
 
         self.epoch = new_epoch;
     }
@@ -801,13 +822,13 @@ impl LedgerState {
         new_epoch: EpochNo,
     ) -> EpochTransitionDelta {
         // Snapshot pre-transition state for diffing.
-        let pre_reward_accounts: HashMap<Hash32, Lovelace> = (*self.reward_accounts).clone();
+        let pre_reward_accounts: HashMap<Hash32, Lovelace> = (*self.certs.reward_accounts).clone();
         let pre_pool_params: std::collections::HashSet<Hash28> =
-            self.pool_params.keys().copied().collect();
+            self.certs.pool_params.keys().copied().collect();
         let pre_future_pool_params: HashMap<Hash28, super::PoolRegistration> =
-            self.future_pool_params.clone();
+            self.certs.future_pool_params.clone();
         let pre_pending_pp_updates_empty =
-            self.pending_pp_updates.is_empty() && self.future_pp_updates.is_empty();
+            self.epochs.pending_pp_updates.is_empty() && self.epochs.future_pp_updates.is_empty();
 
         // Run the existing epoch transition (all state mutations happen here).
         self.process_epoch_transition(new_epoch);
@@ -816,7 +837,7 @@ impl LedgerState {
 
         // Compute reward credits: positive differences in reward_accounts.
         let mut reward_credits: HashMap<Hash32, Lovelace> = HashMap::new();
-        for (cred, &post_balance) in self.reward_accounts.iter() {
+        for (cred, &post_balance) in self.certs.reward_accounts.iter() {
             let pre_balance = pre_reward_accounts
                 .get(cred)
                 .copied()
@@ -829,7 +850,7 @@ impl LedgerState {
         // Pools retired: were in pre_pool_params but not in post pool_params.
         let pools_retired: Vec<Hash28> = pre_pool_params
             .iter()
-            .filter(|pid| !self.pool_params.contains_key(pid))
+            .filter(|pid| !self.certs.pool_params.contains_key(pid))
             .copied()
             .collect();
 
@@ -837,13 +858,14 @@ impl LedgerState {
         // in pool_params with updated registration.
         let future_params_promoted: Vec<(Hash28, super::PoolRegistration)> = pre_future_pool_params
             .into_iter()
-            .filter(|(pid, _)| self.pool_params.contains_key(pid))
+            .filter(|(pid, _)| self.certs.pool_params.contains_key(pid))
             .collect();
 
         // DRep activity updates: compare active flags.
         // We don't have a pre-snapshot of DRep active flags, so we record the
         // current state. apply_epoch_transition_delta() will set these values.
         let drep_activity_updates: HashMap<Hash32, bool> = self
+            .gov
             .governance
             .dreps
             .iter()
@@ -860,40 +882,41 @@ impl LedgerState {
 
         EpochTransitionDelta {
             new_epoch,
-            treasury: self.treasury,
-            reserves: self.reserves,
-            snapshots: self.snapshots.clone(),
-            protocol_params: self.protocol_params.clone(),
-            prev_protocol_params: self.prev_protocol_params.clone(),
-            prev_d: self.prev_d,
-            prev_protocol_version_major: self.prev_protocol_version_major,
+            treasury: self.epochs.treasury,
+            reserves: self.epochs.reserves,
+            snapshots: self.epochs.snapshots.clone(),
+            protocol_params: self.epochs.protocol_params.clone(),
+            prev_protocol_params: self.epochs.prev_protocol_params.clone(),
+            prev_d: self.epochs.prev_d,
+            prev_protocol_version_major: self.epochs.prev_protocol_version_major,
             pending_pp_updates_cleared: !pre_pending_pp_updates_empty
-                && self.pending_pp_updates.is_empty()
-                && self.future_pp_updates.is_empty(),
-            epoch_nonce: self.epoch_nonce,
-            last_epoch_block_nonce: self.last_epoch_block_nonce,
+                && self.epochs.pending_pp_updates.is_empty()
+                && self.epochs.future_pp_updates.is_empty(),
+            epoch_nonce: self.consensus.epoch_nonce,
+            last_epoch_block_nonce: self.consensus.last_epoch_block_nonce,
             reward_credits,
             pools_retired,
             future_params_promoted,
             drep_activity_updates,
-            last_ratified: self.governance.last_ratified.clone(),
-            last_expired: self.governance.last_expired.clone(),
-            last_ratify_delayed: self.governance.last_ratify_delayed,
-            new_constitution: self.governance.constitution.clone(),
-            no_confidence: Some(self.governance.no_confidence),
-            committee_threshold: Some(self.governance.committee_threshold.clone()),
+            last_ratified: self.gov.governance.last_ratified.clone(),
+            last_expired: self.gov.governance.last_expired.clone(),
+            last_ratify_delayed: self.gov.governance.last_ratify_delayed,
+            new_constitution: self.gov.governance.constitution.clone(),
+            no_confidence: Some(self.gov.governance.no_confidence),
+            committee_threshold: Some(self.gov.governance.committee_threshold.clone()),
             proposals_enacted: self
+                .gov
                 .governance
                 .last_ratified
                 .iter()
                 .map(|(id, _)| id.clone())
                 .collect(),
-            proposals_expired: self.governance.last_expired.clone(),
-            enacted_pparam_update: Some(self.governance.enacted_pparam_update.clone()),
-            enacted_hard_fork: Some(self.governance.enacted_hard_fork.clone()),
-            enacted_committee: Some(self.governance.enacted_committee.clone()),
-            enacted_constitution: Some(self.governance.enacted_constitution.clone()),
-            stake_distribution: self.stake_distribution.clone(),
+            proposals_expired: self.gov.governance.last_expired.clone(),
+            enacted_pparam_update: Some(self.gov.governance.enacted_pparam_update.clone()),
+            enacted_hard_fork: Some(self.gov.governance.enacted_hard_fork.clone()),
+            enacted_committee: Some(self.gov.governance.enacted_committee.clone()),
+            enacted_constitution: Some(self.gov.governance.enacted_constitution.clone()),
+            stake_distribution: self.certs.stake_distribution.clone(),
             delegation_changes,
         }
     }
@@ -913,13 +936,13 @@ impl LedgerState {
 
         // Pre-size to the current credential count to minimise rehashing.
         let mut new_map: HashMap<Hash32, Lovelace> =
-            HashMap::with_capacity(self.stake_distribution.stake_map.len());
+            HashMap::with_capacity(self.certs.stake_distribution.stake_map.len());
         let mut new_ptr_stake: HashMap<dugite_primitives::credentials::Pointer, u64> =
             HashMap::new();
 
-        for (_, output) in self.utxo_set.iter() {
+        for (_, output) in self.utxo.utxo_set.iter() {
             let coin = output.value.coin.0;
-            match stake_routing(&output.address, self.ptr_stake_excluded) {
+            match stake_routing(&output.address, self.epochs.ptr_stake_excluded) {
                 StakeRouting::Credential(cred_hash) => {
                     *new_map.entry(cred_hash).or_insert(Lovelace(0)) += Lovelace(coin);
                 }
@@ -930,11 +953,11 @@ impl LedgerState {
             }
         }
         // Also ensure all registered stake credentials have entries (even with 0 stake)
-        for cred_hash in self.delegations.keys() {
+        for cred_hash in self.certs.delegations.keys() {
             new_map.entry(*cred_hash).or_insert(Lovelace(0));
         }
-        self.stake_distribution.stake_map = new_map;
-        self.ptr_stake = new_ptr_stake;
+        self.certs.stake_distribution.stake_map = new_map;
+        self.epochs.ptr_stake = new_ptr_stake;
     }
 
     /// Discard deferred pointer-addressed UTxO stake at the Conway HFC boundary.
@@ -951,19 +974,19 @@ impl LedgerState {
     ///
     /// Called once at the first Conway-era block, before the epoch transition.
     pub(crate) fn exclude_pointer_address_stake(&mut self) {
-        if self.ptr_stake.is_empty() {
+        if self.epochs.ptr_stake.is_empty() {
             return;
         }
 
-        let excluded_count = self.ptr_stake.len() as u64;
-        let excluded_total: u64 = self.ptr_stake.values().sum();
+        let excluded_count = self.epochs.ptr_stake.len() as u64;
+        let excluded_total: u64 = self.epochs.ptr_stake.values().sum();
 
         // Clear ptr_stake so the new mark (built right after this) has no pointer coins.
         // Historical SET and GO snapshots keep their pool_stake values — they were
         // computed correctly in Babbage with ShelleyInstantStake pointer resolution.
         // Haskell's TranslateEra preserves historical snapshot pool distributions;
         // only the InstantStake in UTxOState is converted (dropping sisPtrStake).
-        self.ptr_stake.clear();
+        self.epochs.ptr_stake.clear();
         info!(
             excluded_count,
             excluded_total,
@@ -991,15 +1014,15 @@ impl LedgerState {
         // Borrow ptr_stake and pointer_map immutably for ptr resolution.
         // We'll use each snapshot's own delegation map for the ptr_stake lookup
         // (preserving the historical delegation state that was active at that snapshot).
-        let ptr_stake = &self.ptr_stake;
-        let pointer_map = &self.pointer_map;
-        let reward_accounts = &self.reward_accounts;
-        let stake_map = &self.stake_distribution.stake_map;
+        let ptr_stake = &self.epochs.ptr_stake;
+        let pointer_map = &self.certs.pointer_map;
+        let reward_accounts = &self.certs.reward_accounts;
+        let stake_map = &self.certs.stake_distribution.stake_map;
 
         for (name, snapshot) in [
-            ("mark", &mut self.snapshots.mark),
-            ("set", &mut self.snapshots.set),
-            ("go", &mut self.snapshots.go),
+            ("mark", &mut self.epochs.snapshots.mark),
+            ("set", &mut self.epochs.snapshots.set),
+            ("go", &mut self.epochs.snapshots.go),
         ] {
             if let Some(snap) = snapshot {
                 let old_total: u64 = snap
@@ -1081,7 +1104,7 @@ impl LedgerState {
         // This function does NOT add any extra hashing — the input IS the eta.
         // This matches Haskell's updateNonce: hash(evolving || eta)
         // where eta was already computed as vrfNonceValue in reupdateChainDepState.
-        let prev = self.evolving_nonce;
+        let prev = self.consensus.evolving_nonce;
         // ALWAYS hash the input — matching pallas's generate_rolling_nonce exactly.
         // DO NOT use a pass-through for 32-byte inputs — this was verified to produce
         // wrong nonces. The hash step is required for both TPraos and Praos:
@@ -1089,9 +1112,9 @@ impl LedgerState {
         //   Praos  (32-byte nonce_vrf_output): eta = blake2b_256(tagged_hash) — 2nd hash
         let eta_hash = dugite_primitives::hash::blake2b_256(nonce_eta);
         let mut data = Vec::with_capacity(64);
-        data.extend_from_slice(self.evolving_nonce.as_bytes());
+        data.extend_from_slice(self.consensus.evolving_nonce.as_bytes());
         data.extend_from_slice(eta_hash.as_bytes());
-        self.evolving_nonce = dugite_primitives::hash::blake2b_256(&data);
+        self.consensus.evolving_nonce = dugite_primitives::hash::blake2b_256(&data);
 
         let _ = prev; // suppress unused warning in release
     }

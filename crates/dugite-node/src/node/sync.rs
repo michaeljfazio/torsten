@@ -201,8 +201,8 @@ impl Node {
             // The genesis replay that follows builds a correct in-memory UTxO
             // set from scratch.  A fresh LSM snapshot is saved after replay
             // completes so subsequent restarts can use the canonical store.
-            let _stale_store = ls.utxo_set.detach_store(); // drops the stale fork store
-            *ls = dugite_ledger::LedgerState::new(ls.protocol_params.clone());
+            let _stale_store = ls.utxo.utxo_set.detach_store(); // drops the stale fork store
+            *ls = dugite_ledger::LedgerState::new(ls.epochs.protocol_params.clone());
             // No re-attach: replay proceeds with a clean in-memory UTxO set only.
         }
 
@@ -231,8 +231,8 @@ impl Node {
                 // reattach after we're done).
                 {
                     let mut ls = ledger_state.blocking_write();
-                    ls.utxo_set.set_indexing_enabled(false);
-                    ls.utxo_set.set_wal_enabled(false);
+                    ls.utxo.utxo_set.set_indexing_enabled(false);
+                    ls.utxo.utxo_set.set_wal_enabled(false);
                 }
 
                 let result = crate::mithril::replay_from_chunk_files(
@@ -283,8 +283,8 @@ impl Node {
                 // Re-enable indexing.
                 {
                     let mut ls = ledger_state.blocking_write();
-                    ls.utxo_set.set_indexing_enabled(true);
-                    ls.utxo_set.set_wal_enabled(true);
+                    ls.utxo.utxo_set.set_indexing_enabled(true);
+                    ls.utxo.utxo_set.set_wal_enabled(true);
                 }
 
                 // Save a fresh canonical snapshot so the next restart can load
@@ -557,7 +557,7 @@ impl Node {
                             // Pure in-memory mode (no UTxO store file): the bincode snapshot
                             // contains all UTxOs.  Detach the current (stale) store so the
                             // snapshot's in-memory UTxOs take precedence.
-                            let _ = ls.utxo_set.detach_store();
+                            let _ = ls.utxo.utxo_set.detach_store();
                             *ls = snapshot_state;
                         }
 
@@ -694,8 +694,8 @@ impl Node {
                 let tx_size = tx.raw_cbor.as_ref().map(|b| b.len() as u64).unwrap_or(0);
                 if dugite_ledger::validation::validate_transaction(
                     &tx,
-                    &ledger.utxo_set,
-                    &ledger.protocol_params,
+                    &ledger.utxo.utxo_set,
+                    &ledger.epochs.protocol_params,
                     current_slot,
                     tx_size,
                     Some(&slot_config),
@@ -774,7 +774,7 @@ impl Node {
             // Per Praos spec, leader eligibility uses the "set" snapshot
             // (stake distribution from the previous epoch boundary).
             // Fall back to current pool_params if snapshots aren't available yet.
-            let set_snapshot = ls.snapshots.set.as_ref();
+            let set_snapshot = ls.epochs.snapshots.set.as_ref();
             let total_active_stake: u64 = if let Some(snap) = set_snapshot {
                 snap.pool_stake.values().map(|s| s.0).sum()
             } else {
@@ -785,8 +785,8 @@ impl Node {
             // Build overlay context for BFT schedule validation.
             // Only needed when d > 0 and protocol version < 7 (pre-Babbage).
             // For Babbage+ (proto >= 7), d is always 0 and overlay is skipped.
-            let overlay_ctx = if ls.protocol_params.protocol_version_major < 7
-                && ls.protocol_params.d.numerator > 0
+            let overlay_ctx = if ls.epochs.protocol_params.protocol_version_major < 7
+                && ls.epochs.protocol_params.d.numerator > 0
                 && !ls.genesis_delegates.is_empty()
             {
                 let epoch = ls.epoch_of_slot(blocks.first().map(|b| b.slot().0).unwrap_or(0));
@@ -797,8 +797,8 @@ impl Node {
                     genesis_delegates: ls.genesis_delegates.clone(),
                     genesis_keys,
                     d: (
-                        ls.protocol_params.d.numerator,
-                        ls.protocol_params.d.denominator,
+                        ls.epochs.protocol_params.d.numerator,
+                        ls.epochs.protocol_params.d.denominator,
                     ),
                     first_slot_of_epoch: first_slot,
                 })
@@ -842,7 +842,7 @@ impl Node {
                     // Try set snapshot first (correct per spec)
                     let pool_reg = set_snapshot
                         .and_then(|snap| snap.pool_params.get(&pool_id))
-                        .or_else(|| ls.pool_params.get(&pool_id));
+                        .or_else(|| ls.certs.pool_params.get(&pool_id));
 
                     pool_reg.map(|reg| {
                         if total_active_stake == 0 {
@@ -875,8 +875,8 @@ impl Node {
                     block.slot(),
                     block.header.body_size,
                     None, // header CBOR size not available during ChainSync header processing
-                    ls.protocol_params.max_block_body_size,
-                    ls.protocol_params.max_block_header_size,
+                    ls.epochs.protocol_params.max_block_body_size,
+                    ls.epochs.protocol_params.max_block_header_size,
                 ) {
                     error!(
                         slot = block.slot().0,
@@ -892,7 +892,7 @@ impl Node {
                     issuer_info.as_ref(),
                     overlay_ctx.as_ref(),
                     mode,
-                    Some(ls.protocol_params.protocol_version_major),
+                    Some(ls.epochs.protocol_params.protocol_version_major),
                 ) {
                     if strict {
                         error!(
@@ -1430,7 +1430,7 @@ impl Node {
                 // Reject if any input is not in on-chain UTxO or mempool virtual UTxO.
                 // This catches orphaned chained txs whose parents were removed.
                 for input in &tx.body.inputs {
-                    if !ls.utxo_set.contains(input)
+                    if !ls.utxo.utxo_set.contains(input)
                         && self.mempool.lookup_virtual_utxo(input).is_none()
                     {
                         return false;
@@ -1619,7 +1619,7 @@ impl Node {
                     // Prune opcert counters to only keep active pools (prevents
                     // unbounded growth as pools retire over epochs).
                     let active_pools: std::collections::HashSet<_> =
-                        ledger.pool_params.keys().copied().collect();
+                        ledger.certs.pool_params.keys().copied().collect();
                     self.consensus.prune_opcert_counters(&active_pools);
 
                     // Update mempool capacity limits from the new epoch's protocol params.
@@ -1631,9 +1631,9 @@ impl Node {
                     // This must happen BEFORE revalidation so eviction uses the updated
                     // bounds when computing whether a tx still fits.
                     self.mempool.update_capacity_from_params(
-                        ledger.protocol_params.max_block_body_size,
-                        ledger.protocol_params.max_block_ex_units.mem,
-                        ledger.protocol_params.max_block_ex_units.steps,
+                        ledger.epochs.protocol_params.max_block_body_size,
+                        ledger.epochs.protocol_params.max_block_ex_units.mem,
+                        ledger.epochs.protocol_params.max_block_ex_units.steps,
                     );
 
                     // Revalidate all mempool transactions against the new epoch's
@@ -1649,10 +1649,10 @@ impl Node {
                         // cheap copies (params and slot_config are both small structs).
                         // We borrow utxo_set directly from the read-guard so we avoid
                         // cloning the potentially large UTxO map.
-                        let new_params = ledger.protocol_params.clone();
+                        let new_params = ledger.epochs.protocol_params.clone();
                         let current_slot = ledger.tip.point.slot().map(|s| s.0).unwrap_or(0);
                         let slot_config = ledger.slot_config;
-                        let utxo_ref = &ledger.utxo_set;
+                        let utxo_ref = &ledger.utxo.utxo_set;
                         let evicted = self.mempool.revalidate_all(|tx| {
                             let tx_size = tx.raw_cbor.as_ref().map(|b| b.len() as u64).unwrap_or(0);
                             dugite_ledger::validation::validate_transaction(
@@ -1701,7 +1701,7 @@ impl Node {
             {
                 let ls = self.ledger_state.read().await;
                 self.metrics.set_epoch(ls.epoch.0);
-                self.metrics.set_utxo_count(ls.utxo_set.len() as u64);
+                self.metrics.set_utxo_count(ls.utxo.utxo_set.len() as u64);
                 self.metrics.set_sync_progress(progress);
                 self.metrics.set_mempool_count(self.mempool.len() as u64);
                 self.metrics.set_mempool_max(self.mempool.capacity() as u64);
@@ -1770,26 +1770,26 @@ impl Node {
                     );
                 }
                 self.metrics.delegation_count.store(
-                    ls.delegations.len() as u64,
+                    ls.certs.delegations.len() as u64,
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 self.metrics
                     .treasury_lovelace
-                    .store(ls.treasury.0, std::sync::atomic::Ordering::Relaxed);
+                    .store(ls.epochs.treasury.0, std::sync::atomic::Ordering::Relaxed);
                 // Report only active DReps (active=true) to match what external
                 // tools like Koios expose.  Inactive DReps remain registered in
                 // `self.dreps` (they can reactivate) but are excluded from voting
                 // power and from the count that operators care about.
                 self.metrics.drep_count.store(
-                    ls.governance.active_drep_count() as u64,
+                    ls.gov.governance.active_drep_count() as u64,
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 self.metrics.proposal_count.store(
-                    ls.governance.proposals.len() as u64,
+                    ls.gov.governance.proposals.len() as u64,
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 self.metrics.pool_count.store(
-                    ls.pool_params.len() as u64,
+                    ls.certs.pool_params.len() as u64,
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 // Store tip slot time for dynamic tip_age computation
@@ -1808,7 +1808,7 @@ impl Node {
                         tip = tip_block,
                         remaining = blocks_remaining,
                         speed = format_args!("{} blk/s", blocks_per_sec as u64),
-                        utxos = ls.utxo_set.len(),
+                        utxos = ls.utxo.utxo_set.len(),
                         "Syncing",
                     );
                 }
@@ -2008,7 +2008,7 @@ impl Node {
                 let ls = ledger_state.blocking_read();
                 info!(
                     ledger_tip_slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0),
-                    utxos = ls.utxo_set.len(),
+                    utxos = ls.utxo.utxo_set.len(),
                     "Chunk replay starting",
                 );
                 ls.tip.point.slot().map(|s| s.0).unwrap_or(0)
@@ -2020,9 +2020,9 @@ impl Node {
             // Incremental stake tracking is correct during sequential replay.
             {
                 let mut ls = ledger_state.blocking_write();
-                ls.utxo_set.set_indexing_enabled(false);
-                ls.utxo_set.set_wal_enabled(false); // WAL disabled during replay for speed
-                ls.needs_stake_rebuild = false;
+                ls.utxo.utxo_set.set_indexing_enabled(false);
+                ls.utxo.utxo_set.set_wal_enabled(false); // WAL disabled during replay for speed
+                ls.epochs.needs_stake_rebuild = false;
             }
 
             let result = crate::mithril::replay_from_chunk_files(&replay_dir, |cbor| {
@@ -2062,7 +2062,7 @@ impl Node {
                             let elapsed = start.elapsed().as_secs_f64();
                             let speed = replayed as f64 / elapsed;
                             let slot = ls_guard.tip.point.slot().map(|s| s.0).unwrap_or(0);
-                            let utxos = ls_guard.utxo_set.len();
+                            let utxos = ls_guard.utxo.utxo_set.len();
                             let pct = if imm_tip_slot > 0 {
                                 slot as f64 / imm_tip_slot as f64 * 100.0
                             } else {
@@ -2125,24 +2125,24 @@ impl Node {
                     metrics.set_slot(slot);
                     metrics.set_block_number(ls.tip.block_number.0);
                     metrics.set_epoch(ls.epoch.0);
-                    metrics.set_utxo_count(ls.utxo_set.len() as u64);
+                    metrics.set_utxo_count(ls.utxo.utxo_set.len() as u64);
                     metrics.delegation_count.store(
-                        ls.delegations.len() as u64,
+                        ls.certs.delegations.len() as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     metrics
                         .treasury_lovelace
-                        .store(ls.treasury.0, std::sync::atomic::Ordering::Relaxed);
+                        .store(ls.epochs.treasury.0, std::sync::atomic::Ordering::Relaxed);
                     metrics.pool_count.store(
-                        ls.pool_params.len() as u64,
+                        ls.certs.pool_params.len() as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     metrics.drep_count.store(
-                        ls.governance.active_drep_count() as u64,
+                        ls.gov.governance.active_drep_count() as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                     metrics.proposal_count.store(
-                        ls.governance.proposals.len() as u64,
+                        ls.gov.governance.proposals.len() as u64,
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
@@ -2161,14 +2161,14 @@ impl Node {
             // Re-enable address indexing and rebuild the index
             {
                 let mut ls = ledger_state.blocking_write();
-                ls.utxo_set.set_wal_enabled(true); // Re-enable WAL after replay
-                ls.utxo_set.set_indexing_enabled(true);
-                ls.utxo_set.rebuild_address_index();
+                ls.utxo.utxo_set.set_wal_enabled(true); // Re-enable WAL after replay
+                ls.utxo.utxo_set.set_indexing_enabled(true);
+                ls.utxo.utxo_set.rebuild_address_index();
                 // Rebuild stake distribution from the full UTxO set to correct any
                 // residual state from the pre-replay snapshot. After this single
                 // rebuild, incremental tracking is accurate and needs_stake_rebuild
                 // self-disables at the next epoch boundary.
-                ls.needs_stake_rebuild = true;
+                ls.epochs.needs_stake_rebuild = true;
                 ls.rebuild_stake_distribution();
                 // Recompute pool_stake for all mark/set/go snapshots using the
                 // freshly rebuilt stake_distribution and current reward_accounts.
@@ -2225,9 +2225,9 @@ impl Node {
         // ImmutableDB and VolatileDB and so works correctly at all times.
         let (start_slot, end_slot) = {
             let mut ls = self.ledger_state.write().await;
-            ls.utxo_set.set_indexing_enabled(false);
-            ls.utxo_set.set_wal_enabled(false); // WAL disabled during replay for speed
-            ls.needs_stake_rebuild = false;
+            ls.utxo.utxo_set.set_indexing_enabled(false);
+            ls.utxo.utxo_set.set_wal_enabled(false); // WAL disabled during replay for speed
+            ls.epochs.needs_stake_rebuild = false;
             let start = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
             let end = db_tip.point.slot().map(|s| s.0).unwrap_or(0);
             (start, end)
@@ -2262,7 +2262,7 @@ impl Node {
                     current_slot, "Shutdown requested during LSM replay, saving snapshot"
                 );
                 let mut ls = self.ledger_state.write().await;
-                ls.opcert_counters = self.consensus.opcert_counters().clone();
+                ls.consensus.opcert_counters = self.consensus.opcert_counters().clone();
                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                     warn!("Failed to save snapshot on shutdown: {e}");
                 }
@@ -2320,7 +2320,7 @@ impl Node {
                                     slot = next_slot.0,
                                     end_slot,
                                     speed = format_args!("{speed:.0} blk/s"),
-                                    utxos = ls.utxo_set.len(),
+                                    utxos = ls.utxo.utxo_set.len(),
                                     "Replay",
                                 );
                                 last_log = std::time::Instant::now();
@@ -2334,7 +2334,7 @@ impl Node {
                                 // bulk snapshot has correct pool_stake values using the
                                 // current incremental stake_distribution.
                                 ls.recompute_snapshot_pool_stakes();
-                                ls.opcert_counters = self.consensus.opcert_counters().clone();
+                                ls.consensus.opcert_counters = self.consensus.opcert_counters().clone();
                                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                                     warn!("Failed to save ledger snapshot during replay: {e}");
                                 }
@@ -2389,14 +2389,14 @@ impl Node {
         // Re-enable WAL and address indexing after replay
         {
             let mut ls = self.ledger_state.write().await;
-            ls.utxo_set.set_wal_enabled(true);
-            ls.utxo_set.set_indexing_enabled(true);
-            ls.utxo_set.rebuild_address_index();
+            ls.utxo.utxo_set.set_wal_enabled(true);
+            ls.utxo.utxo_set.set_indexing_enabled(true);
+            ls.utxo.utxo_set.rebuild_address_index();
             // Rebuild stake distribution from the full UTxO set to correct any
             // residual state from the pre-replay snapshot. After this single
             // rebuild, incremental tracking is accurate and needs_stake_rebuild
             // self-disables at the next epoch boundary.
-            ls.needs_stake_rebuild = true;
+            ls.epochs.needs_stake_rebuild = true;
             ls.rebuild_stake_distribution();
             // Recompute pool_stake for all mark/set/go snapshots.
             ls.recompute_snapshot_pool_stakes();
@@ -2406,7 +2406,7 @@ impl Node {
         // Save final snapshot after replay (write lock to flush UTxO store — no WAL)
         {
             let mut ls = self.ledger_state.write().await;
-            ls.opcert_counters = self.consensus.opcert_counters().clone();
+            ls.consensus.opcert_counters = self.consensus.opcert_counters().clone();
             if let Err(e) = ls.save_utxo_snapshot() {
                 error!("Failed to save UTxO store after replay: {e}");
             }

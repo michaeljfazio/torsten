@@ -1055,9 +1055,9 @@ proptest! {
         let pool_deposit = params.pool_deposit.0;
 
         // Number of registered stake credentials.
-        let n_registered_creds = state.stake_key_deposits.len() as u64;
+        let n_registered_creds = state.certs.stake_key_deposits.len() as u64;
         // Number of registered pools (each has exactly one pool_deposits entry).
-        let n_registered_pools = state.pool_deposits.len() as u64;
+        let n_registered_pools = state.certs.pool_deposits.len() as u64;
 
         // Expected deposit totals derived from protocol parameters.
         let expected_key_total = key_deposit
@@ -1069,15 +1069,15 @@ proptest! {
         let expected_total = expected_key_total + expected_pool_total;
 
         // Actual deposit totals from the ledger state fields.
-        let actual_pool_sum: u64 = state.pool_deposits.values().sum();
-        let actual_total = state.total_stake_key_deposits + actual_pool_sum;
+        let actual_pool_sum: u64 = state.certs.pool_deposits.values().sum();
+        let actual_total = state.certs.total_stake_key_deposits + actual_pool_sum;
 
         prop_assert_eq!(
             actual_total, expected_total,
             "Deposit pot: actual={} (key_track={} + pool_sum={}), \
              expected={} (key_dep={} * n_creds={} + pool_dep={} * n_pools={})",
             actual_total,
-            state.total_stake_key_deposits,
+            state.certs.total_stake_key_deposits,
             actual_pool_sum,
             expected_total,
             key_deposit,
@@ -1088,7 +1088,7 @@ proptest! {
 
         // Each per-pool deposit entry must equal exactly pool_deposit (since the
         // generator uses mainnet protocol parameters throughout).
-        for (&pool_id, &deposit) in &state.pool_deposits {
+        for (&pool_id, &deposit) in &state.certs.pool_deposits {
             prop_assert_eq!(
                 deposit, pool_deposit,
                 "pool {:?} has deposit {}; expected {}",
@@ -1098,9 +1098,9 @@ proptest! {
 
         // total_stake_key_deposits must equal key_deposit * n_registered_creds.
         prop_assert_eq!(
-            state.total_stake_key_deposits, expected_key_total,
+            state.certs.total_stake_key_deposits, expected_key_total,
             "total_stake_key_deposits={} != key_deposit({}) * n_creds({})",
-            state.total_stake_key_deposits, key_deposit, n_registered_creds
+            state.certs.total_stake_key_deposits, key_deposit, n_registered_creds
         );
     }
 }

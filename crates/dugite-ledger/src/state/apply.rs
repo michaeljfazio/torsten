@@ -100,7 +100,7 @@ impl LedgerState {
         }
 
         // Allocate a per-block diff to record all UTxO inserts and deletes.
-        // Pushed into self.diff_seq at the end of the method, enabling fast
+        // Pushed into self.utxo.diff_seq at the end of the method, enabling fast
         // diff-based rollback without a snapshot reload + full replay.
         let mut block_diff = UtxoDiff::new();
 
@@ -115,9 +115,9 @@ impl LedgerState {
         // On preview testnet: epoch 645 = Babbage PV8, epoch 646 = Conway PV8,
         // epoch 647 = Conway PV9.  Gating on PV>=9 would delay ptr_stake exclusion
         // by one epoch, causing a 35,553 ADA poolDistribution divergence.
-        if block.era >= Era::Conway && !self.ptr_stake_excluded {
+        if block.era >= Era::Conway && !self.epochs.ptr_stake_excluded {
             self.exclude_pointer_address_stake();
-            self.ptr_stake_excluded = true;
+            self.epochs.ptr_stake_excluded = true;
         }
 
         // Check for epoch transition before processing the block.
@@ -143,12 +143,12 @@ impl LedgerState {
         // originally produced, producing spurious warnings.
         if mode == BlockValidationMode::ValidateAll
             && block.header.body_size > 0
-            && self.protocol_params.max_block_body_size > 0
-            && block.header.body_size > self.protocol_params.max_block_body_size
+            && self.epochs.protocol_params.max_block_body_size > 0
+            && block.header.body_size > self.epochs.protocol_params.max_block_body_size
         {
             warn!(
                 body_size = block.header.body_size,
-                limit = self.protocol_params.max_block_body_size,
+                limit = self.epochs.protocol_params.max_block_body_size,
                 slot = block.slot().0,
                 "Block body exceeds max_block_body_size"
             );
@@ -165,12 +165,12 @@ impl LedgerState {
         //
         // The per-block UTxO diff (`block_diff`) is populated inside the Byron
         // apply loop (see the `effect.spent` / `effect.created` recording below)
-        // and pushed to `self.diff_seq` just before returning so that Byron
+        // and pushed to `self.utxo.diff_seq` just before returning so that Byron
         // blocks participate in diff-based rollback alongside Shelley+ blocks.
         if block.era == Era::Byron {
             let fee_policy = ByronFeePolicy {
-                min_fee_a: self.protocol_params.min_fee_a,
-                min_fee_b: self.protocol_params.min_fee_b,
+                min_fee_a: self.epochs.protocol_params.min_fee_a,
+                min_fee_b: self.epochs.protocol_params.min_fee_b,
             };
             let byron_mode = match mode {
                 BlockValidationMode::ValidateAll => ByronApplyMode::ValidateAll,
@@ -182,7 +182,7 @@ impl LedgerState {
             // visible to later transactions (within-block spending chains).
             //
             // We use `apply_byron_block` with a single-transaction slice and
-            // apply each effect to self.utxo_set before moving on. This keeps
+            // apply each effect to self.utxo.utxo_set before moving on. This keeps
             // all Byron rule logic in byron.rs while preserving sequential
             // visibility without a single overlapping borrow.
             let mut total_byron_fees = Lovelace(0);
@@ -204,7 +204,7 @@ impl LedgerState {
                     fee_policy,
                     block.slot().0,
                     byron_mode,
-                    |input| self.utxo_set.lookup(input),
+                    |input| self.utxo.utxo_set.lookup(input),
                 )
                 .map_err(|e| LedgerError::BlockTxValidationFailed {
                     slot: e.slot,
@@ -216,34 +216,34 @@ impl LedgerState {
                 // same block see the correct UTxO state.
                 for input in &effect.spent {
                     // Capture the output value before removal for diff-based rollback.
-                    if let Some(spent_output) = self.utxo_set.lookup(input) {
+                    if let Some(spent_output) = self.utxo.utxo_set.lookup(input) {
                         block_diff.record_delete(input.clone(), spent_output);
                     }
-                    self.utxo_set.remove(input);
+                    self.utxo.utxo_set.remove(input);
                 }
                 for (input, output) in effect.created {
                     block_diff.record_insert(input.clone(), output.clone());
-                    self.utxo_set.insert(input, output);
+                    self.utxo.utxo_set.insert(input, output);
                 }
                 total_byron_fees.0 = total_byron_fees.0.saturating_add(effect.fees.0);
             }
-            self.epoch_fees += total_byron_fees;
+            self.utxo.epoch_fees += total_byron_fees;
 
             // Track block production and nonce state (same as Shelley+)
             if !block.header.issuer_vkey.is_empty() {
                 let pool_id = dugite_primitives::hash::blake2b_224(&block.header.issuer_vkey);
-                *Arc::make_mut(&mut self.epoch_blocks_by_pool)
+                *Arc::make_mut(&mut self.consensus.epoch_blocks_by_pool)
                     .entry(pool_id)
                     .or_insert(0) += 1;
             }
-            self.epoch_block_count += 1;
+            self.consensus.epoch_block_count += 1;
 
             // Byron uses OBFT (not VRF), so nonce_vrf_output is empty.
             // The evolving nonce does not advance during the Byron era.
             // lab_nonce = prevHashToNonce(block.prevHash) per Haskell's reupdateChainDepState.
             // prevHashToNonce: GenesisHash → NeutralNonce; BlockHash h → Nonce(castHash h).
             // castHash is a type cast only — no rehashing. The value IS the prev_hash bytes.
-            self.lab_nonce = block.header.prev_hash;
+            self.consensus.lab_nonce = block.header.prev_hash;
 
             self.tip = block.tip();
             // Detect era transitions for the HFC era history state machine.
@@ -253,12 +253,14 @@ impl LedgerState {
             self.era = block.era;
 
             // Record this block's UTxO diff for rollback support.
-            self.diff_seq.push(block.slot(), *block.hash(), block_diff);
+            self.utxo
+                .diff_seq
+                .push(block.slot(), *block.hash(), block_diff);
 
             trace!(
                 slot = block.slot().0,
                 block_no = block.block_number().0,
-                utxo_count = self.utxo_set.len(),
+                utxo_count = self.utxo.utxo_set.len(),
                 epoch = self.epoch.0,
                 "Ledger: Byron block applied successfully"
             );
@@ -283,7 +285,7 @@ impl LedgerState {
         } else {
             (0, 0) // Skip accumulation during replay
         };
-        if block_mem > self.protocol_params.max_block_ex_units.mem {
+        if block_mem > self.epochs.protocol_params.max_block_ex_units.mem {
             if mode == BlockValidationMode::ValidateAll {
                 // Hard error at the live tip: a block whose execution unit memory
                 // total exceeds the protocol limit was not produced by a conformant
@@ -299,18 +301,18 @@ impl LedgerState {
                     errors: format!(
                         "BlockExUnitsExceeded: block memory usage {} exceeds limit {} \
                          (Alonzo+ block-body ExUnits rule)",
-                        block_mem, self.protocol_params.max_block_ex_units.mem
+                        block_mem, self.epochs.protocol_params.max_block_ex_units.mem
                     ),
                 });
             } else {
                 debug!(
                     block_mem,
-                    limit = self.protocol_params.max_block_ex_units.mem,
+                    limit = self.epochs.protocol_params.max_block_ex_units.mem,
                     "Block exceeds max execution unit memory budget (expected during replay before PP updates)"
                 );
             }
         }
-        if block_steps > self.protocol_params.max_block_ex_units.steps {
+        if block_steps > self.epochs.protocol_params.max_block_ex_units.steps {
             if mode == BlockValidationMode::ValidateAll {
                 // Same logic as memory budget above: hard error at tip,
                 // permissive debug-only during replay.
@@ -320,13 +322,13 @@ impl LedgerState {
                     errors: format!(
                         "BlockExUnitsExceeded: block step usage {} exceeds limit {} \
                          (Alonzo+ block-body ExUnits rule)",
-                        block_steps, self.protocol_params.max_block_ex_units.steps
+                        block_steps, self.epochs.protocol_params.max_block_ex_units.steps
                     ),
                 });
             } else {
                 debug!(
                     block_steps,
-                    limit = self.protocol_params.max_block_ex_units.steps,
+                    limit = self.epochs.protocol_params.max_block_ex_units.steps,
                     "Block exceeds max execution unit step budget (expected during replay before PP updates)"
                 );
             }
@@ -350,15 +352,15 @@ impl LedgerState {
         // Within-block UTxO overlay: when a transaction in the block creates an output
         // that carries a reference script, and a later transaction in the same block
         // references that output (either as a spending input or reference input), the
-        // initial `self.utxo_set` does not yet contain that output. To correctly count
+        // initial `self.utxo.utxo_set` does not yet contain that output. To correctly count
         // the ref script contribution of all txs (including ones that depend on
         // within-block outputs), we build a lightweight overlay of all outputs created
         // by valid transactions in the block. The overlay is checked first; on miss,
-        // we fall back to `self.utxo_set`.
+        // we fall back to `self.utxo.utxo_set`.
         //
         // This is a pre-scan that runs before the per-tx application loop so that the
         // block is rejected early (before any state changes) if the limit is exceeded.
-        if self.protocol_params.protocol_version_major >= 9
+        if self.epochs.protocol_params.protocol_version_major >= 9
             && mode == BlockValidationMode::ValidateAll
         {
             // Build within-block UTxO overlay: maps (tx_hash, output_index) → TransactionOutput
@@ -386,7 +388,7 @@ impl LedgerState {
                 block_utxo_overlay
                     .get(input)
                     .cloned()
-                    .or_else(|| self.utxo_set.lookup(input))
+                    .or_else(|| self.utxo.utxo_set.lookup(input))
             };
 
             let total_ref_script_size: u64 = block
@@ -432,7 +434,7 @@ impl LedgerState {
 
         // Pre-compute cost_models CBOR once per block (doesn't change within a block)
         let cost_models_cbor = if mode == BlockValidationMode::ValidateAll {
-            self.protocol_params.cost_models.to_cbor()
+            self.epochs.protocol_params.cost_models.to_cbor()
         } else {
             None
         };
@@ -474,11 +476,11 @@ impl LedgerState {
                 // transactions have their regular inputs/outputs skipped so their
                 // script_ref contribution does not count toward either limit.
                 // -------------------------------------------------------
-                if self.protocol_params.protocol_version_major >= 9 && tx.is_valid {
+                if self.epochs.protocol_params.protocol_version_major >= 9 && tx.is_valid {
                     let tx_ref_script_size = calculate_ref_script_size(
                         &tx.body.inputs,
                         &tx.body.reference_inputs,
-                        &self.utxo_set,
+                        &self.utxo.utxo_set,
                     );
                     if tx_ref_script_size > MAX_REF_SCRIPT_SIZE_PER_TX {
                         return Err(LedgerError::BlockTxValidationFailed {
@@ -536,14 +538,14 @@ impl LedgerState {
                     // the canonical chain's treasury donations and withdrawals
                     // propagate through the ledger state.
                     // -------------------------------------------------------
-                    if self.protocol_params.protocol_version_major >= 9 {
+                    if self.epochs.protocol_params.protocol_version_major >= 9 {
                         if let Some(declared_treasury) = tx.body.treasury_value {
-                            if declared_treasury.0 != self.treasury.0 {
+                            if declared_treasury.0 != self.epochs.treasury.0 {
                                 warn!(
                                     tx_hash = %tx.hash.to_hex(),
                                     slot = block.slot().0,
                                     declared = declared_treasury.0,
-                                    ledger = self.treasury.0,
+                                    ledger = self.epochs.treasury.0,
                                     "TreasuryValueMismatch on confirmed block — \
                                      trusting on-chain consensus (treasury will self-correct)"
                                 );
@@ -551,7 +553,7 @@ impl LedgerState {
                                 // The block producer's view is authoritative: if they
                                 // declared a treasury value and the block was accepted
                                 // by the network, that IS the correct value.
-                                self.treasury = declared_treasury;
+                                self.epochs.treasury = declared_treasury;
                             }
                         }
                     }
@@ -580,14 +582,19 @@ impl LedgerState {
                     // and fall through: the committee state will be corrected by
                     // the subsequent governance action processing.
                     // -------------------------------------------------------
-                    if self.protocol_params.protocol_version_major >= 9 {
+                    if self.epochs.protocol_params.protocol_version_major >= 9 {
                         for cert in &tx.body.certificates {
                             if let Certificate::CommitteeHotAuth {
                                 cold_credential, ..
                             } = cert
                             {
                                 let cold_key = credential_to_hash(cold_credential);
-                                if !self.governance.committee_expiration.contains_key(&cold_key) {
+                                if !self
+                                    .gov
+                                    .governance
+                                    .committee_expiration
+                                    .contains_key(&cold_key)
+                                {
                                     warn!(
                                         tx_hash = %tx.hash.to_hex(),
                                         slot = block.slot().0,
@@ -606,7 +613,7 @@ impl LedgerState {
                     // Producer claims tx is valid — verify with full validation.
                     //
                     // Sequential UTxO visibility: by the time we reach tx[i] in this
-                    // loop, `self.utxo_set` already contains the outputs created by
+                    // loop, `self.utxo.utxo_set` already contains the outputs created by
                     // tx[0]..tx[i-1] (each was applied in its own loop iteration,
                     // before we advanced to the next tx).
                     // This matches Haskell's sequential LEDGER rule application inside
@@ -623,12 +630,12 @@ impl LedgerState {
                     // as new, causing ValueNotConserved for re-registration txs.
                     let registered_pool_ids: std::collections::HashSet<
                         dugite_primitives::hash::Hash28,
-                    > = self.pool_params.keys().copied().collect();
+                    > = self.certs.pool_params.keys().copied().collect();
                     // Build the registered DRep credential set so that duplicate
                     // RegDRep certificates are rejected (Haskell `ConwayDRepAlreadyRegistered`).
                     let registered_drep_ids: std::collections::HashSet<
                         dugite_primitives::hash::Hash32,
-                    > = self.governance.dreps.keys().copied().collect();
+                    > = self.gov.governance.dreps.keys().copied().collect();
                     // Build the VRF key → pool_id map for VRF key deduplication
                     // (Haskell `VRFKeyHashAlreadyRegistered`, Conway+ only).
                     // When protocol < 9 this map is still built but the check in
@@ -637,6 +644,7 @@ impl LedgerState {
                         dugite_primitives::hash::Hash32,
                         dugite_primitives::hash::Hash28,
                     > = self
+                        .certs
                         .pool_params
                         .values()
                         .map(|reg| (reg.vrf_keyhash, reg.pool_id))
@@ -646,6 +654,7 @@ impl LedgerState {
                     let committee_member_keys: std::collections::HashSet<
                         dugite_primitives::hash::Hash32,
                     > = self
+                        .gov
                         .governance
                         .committee_expiration
                         .keys()
@@ -655,32 +664,39 @@ impl LedgerState {
                     // "previously resigned" check (Conway+ only).
                     let committee_resigned_keys: std::collections::HashSet<
                         dugite_primitives::hash::Hash32,
-                    > = self.governance.committee_resigned.keys().copied().collect();
+                    > = self
+                        .gov
+                        .governance
+                        .committee_resigned
+                        .keys()
+                        .copied()
+                        .collect();
                     // Extract the constitution's guardrail script hash for policy_hash
                     // validation in Phase-1.  This ensures ParameterChange and
                     // TreasuryWithdrawals proposals carry the correct policy_hash.
                     let constitution_script_hash = self
+                        .gov
                         .governance
                         .constitution
                         .as_ref()
                         .and_then(|c| c.script_hash);
                     let result = validate_transaction_with_pools(
                         tx,
-                        &self.utxo_set,
-                        &self.protocol_params,
+                        &self.utxo.utxo_set,
+                        &self.epochs.protocol_params,
                         block.slot().0,
                         tx_size,
                         Some(&self.slot_config),
                         Some(&registered_pool_ids),
-                        Some(self.treasury.0),
-                        Some(&self.reward_accounts),
+                        Some(self.epochs.treasury.0),
+                        Some(&self.certs.reward_accounts),
                         Some(self.epoch.0),
                         Some(&registered_drep_ids),
                         Some(&registered_vrf_keys),
                         self.node_network,
                         Some(&committee_member_keys),
                         Some(&committee_resigned_keys),
-                        Some(&self.stake_key_deposits),
+                        Some(&self.certs.stake_key_deposits),
                         constitution_script_hash,
                     );
                     if let Err(errors) = result {
@@ -778,12 +794,12 @@ impl LedgerState {
                     // uplc expects (cpu_steps, mem_units); our ExUnits has { mem, steps } where
                     // steps=cpu and mem=memory — swap to match uplc convention.
                     let max_ex = (
-                        self.protocol_params.max_tx_ex_units.steps,
-                        self.protocol_params.max_tx_ex_units.mem,
+                        self.epochs.protocol_params.max_tx_ex_units.steps,
+                        self.epochs.protocol_params.max_tx_ex_units.mem,
                     );
                     let eval_result = evaluate_plutus_scripts(
                         tx,
-                        &self.utxo_set,
+                        &self.utxo.utxo_set,
                         cost_models_cbor.as_deref(),
                         max_ex,
                         &self.slot_config,
@@ -808,20 +824,20 @@ impl LedgerState {
                 let mut collateral_input_value: u64 = 0;
                 // Consume collateral inputs (update stake distribution)
                 for col_input in &tx.body.collateral {
-                    if let Some(spent) = self.utxo_set.lookup(col_input) {
+                    if let Some(spent) = self.utxo.utxo_set.lookup(col_input) {
                         collateral_input_value += spent.value.coin.0;
                         let coin = spent.value.coin.0;
-                        match stake_routing(&spent.address, self.ptr_stake_excluded) {
+                        match stake_routing(&spent.address, self.epochs.ptr_stake_excluded) {
                             StakeRouting::Credential(cred) => {
                                 if let Some(stake) =
-                                    self.stake_distribution.stake_map.get_mut(&cred)
+                                    self.certs.stake_distribution.stake_map.get_mut(&cred)
                                 {
                                     stake.0 = stake.0.saturating_sub(coin);
                                 }
                             }
                             StakeRouting::Pointer(ptr) => {
                                 // Subtract from deferred ptr_stake bucket.
-                                if let Some(entry) = self.ptr_stake.get_mut(&ptr) {
+                                if let Some(entry) = self.epochs.ptr_stake.get_mut(&ptr) {
                                     *entry = entry.saturating_sub(coin);
                                 }
                             }
@@ -830,21 +846,22 @@ impl LedgerState {
                         // Record collateral deletion for diff-based rollback.
                         block_diff.record_delete(col_input.clone(), spent);
                     }
-                    self.utxo_set.remove(col_input);
+                    self.utxo.utxo_set.remove(col_input);
                 }
                 // If there's a collateral return output, add it
                 let collateral_return_value = if let Some(col_return) = &tx.body.collateral_return {
                     let coin = col_return.value.coin.0;
-                    match stake_routing(&col_return.address, self.ptr_stake_excluded) {
+                    match stake_routing(&col_return.address, self.epochs.ptr_stake_excluded) {
                         StakeRouting::Credential(cred) => {
                             *self
+                                .certs
                                 .stake_distribution
                                 .stake_map
                                 .entry(cred)
                                 .or_insert(Lovelace(0)) += Lovelace(coin);
                         }
                         StakeRouting::Pointer(ptr) => {
-                            *self.ptr_stake.entry(ptr).or_insert(0) += coin;
+                            *self.epochs.ptr_stake.entry(ptr).or_insert(0) += coin;
                         }
                         StakeRouting::None => {}
                     }
@@ -855,7 +872,7 @@ impl LedgerState {
                     let return_val = col_return.value.coin.0;
                     // Record collateral return insertion for diff-based rollback.
                     block_diff.record_insert(return_input.clone(), col_return.clone());
-                    self.utxo_set.insert(return_input, col_return.clone());
+                    self.utxo.utxo_set.insert(return_input, col_return.clone());
                     return_val
                 } else {
                     0
@@ -867,7 +884,7 @@ impl LedgerState {
                 } else {
                     Lovelace(collateral_input_value.saturating_sub(collateral_return_value))
                 };
-                self.epoch_fees += collateral_fee;
+                self.utxo.epoch_fees += collateral_fee;
                 continue;
             }
 
@@ -879,7 +896,7 @@ impl LedgerState {
             //      rollback can re-insert the spent UTxOs.
             //
             // Collect into a Vec so we can iterate twice (stake update + diff record)
-            // without borrowing `self.utxo_set` mutably while iterating.
+            // without borrowing `self.utxo.utxo_set` mutably while iterating.
             //
             // NOTE: we use filter_map here so that inputs already absent from the
             // UTxO set (e.g. spent by a prior block we partially replayed) are
@@ -890,7 +907,8 @@ impl LedgerState {
                 .inputs
                 .iter()
                 .filter_map(|input| {
-                    self.utxo_set
+                    self.utxo
+                        .utxo_set
                         .lookup(input)
                         .map(|output| (input.clone(), output))
                 })
@@ -902,14 +920,16 @@ impl LedgerState {
             // bucket) rather than stake_map, mirroring the insertion path.
             for (_input, spent_output) in &spent_outputs {
                 let coin = spent_output.value.coin.0;
-                match stake_routing(&spent_output.address, self.ptr_stake_excluded) {
+                match stake_routing(&spent_output.address, self.epochs.ptr_stake_excluded) {
                     StakeRouting::Credential(cred_hash) => {
-                        if let Some(stake) = self.stake_distribution.stake_map.get_mut(&cred_hash) {
+                        if let Some(stake) =
+                            self.certs.stake_distribution.stake_map.get_mut(&cred_hash)
+                        {
                             stake.0 = stake.0.saturating_sub(coin);
                         }
                     }
                     StakeRouting::Pointer(ptr) => {
-                        if let Some(entry) = self.ptr_stake.get_mut(&ptr) {
+                        if let Some(entry) = self.epochs.ptr_stake.get_mut(&ptr) {
                             *entry = entry.saturating_sub(coin);
                         }
                     }
@@ -958,8 +978,8 @@ impl LedgerState {
                 // Pass 1: remove inputs that are present; log any that are absent.
                 let mut missing_inputs = 0usize;
                 for input in &tx.body.inputs {
-                    if self.utxo_set.contains(input) {
-                        self.utxo_set.remove(input);
+                    if self.utxo.utxo_set.contains(input) {
+                        self.utxo.utxo_set.remove(input);
                     } else {
                         missing_inputs += 1;
                         debug!(
@@ -1001,7 +1021,7 @@ impl LedgerState {
                         index: idx as u32,
                     };
                     block_diff.record_insert(new_input.clone(), output.clone());
-                    self.utxo_set.insert(new_input, output.clone());
+                    self.utxo.utxo_set.insert(new_input, output.clone());
                 }
 
                 // Pass 4: update stake distribution from new outputs.
@@ -1012,16 +1032,17 @@ impl LedgerState {
                 // sisCredentialStake from sisPtrStake.
                 for output in &tx.body.outputs {
                     let coin = output.value.coin.0;
-                    match stake_routing(&output.address, self.ptr_stake_excluded) {
+                    match stake_routing(&output.address, self.epochs.ptr_stake_excluded) {
                         StakeRouting::Credential(cred_hash) => {
                             *self
+                                .certs
                                 .stake_distribution
                                 .stake_map
                                 .entry(cred_hash)
                                 .or_insert(Lovelace(0)) += Lovelace(coin);
                         }
                         StakeRouting::Pointer(ptr) => {
-                            *self.ptr_stake.entry(ptr).or_insert(0) += coin;
+                            *self.epochs.ptr_stake.entry(ptr).or_insert(0) += coin;
                         }
                         StakeRouting::None => {}
                     }
@@ -1029,7 +1050,7 @@ impl LedgerState {
             }
 
             // Accumulate fees
-            self.epoch_fees += tx.body.fee;
+            self.utxo.epoch_fees += tx.body.fee;
 
             // Process certificates (passing slot/tx_index/cert_index for pointer map)
             let block_slot = block.slot().0;
@@ -1048,7 +1069,7 @@ impl LedgerState {
             }
 
             // Process Conway governance proposals (only in Conway era, protocol >= 9)
-            if self.protocol_params.protocol_version_major >= 9 {
+            if self.epochs.protocol_params.protocol_version_major >= 9 {
                 for (idx, proposal) in tx.body.proposal_procedures.iter().enumerate() {
                     self.process_proposal(&tx.hash, idx as u32, proposal);
                 }
@@ -1067,21 +1088,21 @@ impl LedgerState {
                 // boundary (NEWEPOCH → applyRUpd step).  We mirror this by accumulating
                 // in `pending_donations` and draining in `process_epoch_transition`.
                 if let Some(donation) = tx.body.donation {
-                    self.pending_donations += donation;
+                    self.utxo.pending_donations += donation;
                 }
             } else {
                 if !tx.body.proposal_procedures.is_empty() {
                     warn!(
                         "Ignoring {} governance proposals in pre-Conway era (protocol {})",
                         tx.body.proposal_procedures.len(),
-                        self.protocol_params.protocol_version_major,
+                        self.epochs.protocol_params.protocol_version_major,
                     );
                 }
                 if !tx.body.voting_procedures.is_empty() {
                     warn!(
                         "Ignoring {} governance votes in pre-Conway era (protocol {})",
                         tx.body.voting_procedures.len(),
-                        self.protocol_params.protocol_version_major,
+                        self.epochs.protocol_params.protocol_version_major,
                     );
                 }
             }
@@ -1107,12 +1128,14 @@ impl LedgerState {
                         "Collected protocol parameter update proposal"
                     );
                     if is_future {
-                        self.future_pp_updates
+                        self.epochs
+                            .future_pp_updates
                             .entry(EpochNo(update.epoch))
                             .or_default()
                             .push((*genesis_hash, ppu.clone()));
                     } else {
-                        self.pending_pp_updates
+                        self.epochs
+                            .pending_pp_updates
                             .entry(EpochNo(update.epoch))
                             .or_default()
                             .push((*genesis_hash, ppu.clone()));
@@ -1131,19 +1154,19 @@ impl LedgerState {
         // This is critical for reward calculation: pools only receive rewards
         // for blocks that appear in BlocksMade (bprev). Counting overlay blocks
         // would incorrectly award pool rewards during federated epochs.
-        let current_d = if self.protocol_params.protocol_version_major >= 7 {
+        let current_d = if self.epochs.protocol_params.protocol_version_major >= 7 {
             0.0
         } else {
-            self.protocol_params.d.numerator as f64
-                / self.protocol_params.d.denominator.max(1) as f64
+            self.epochs.protocol_params.d.numerator as f64
+                / self.epochs.protocol_params.d.denominator.max(1) as f64
         };
         if current_d < 0.8 && !block.header.issuer_vkey.is_empty() {
             let pool_id = dugite_primitives::hash::blake2b_224(&block.header.issuer_vkey);
-            *Arc::make_mut(&mut self.epoch_blocks_by_pool)
+            *Arc::make_mut(&mut self.consensus.epoch_blocks_by_pool)
                 .entry(pool_id)
                 .or_insert(0) += 1;
         }
-        self.epoch_block_count += 1;
+        self.consensus.epoch_block_count += 1;
 
         // Praos nonce state machine (matches Haskell reupdateChainDepState):
         //
@@ -1165,7 +1188,7 @@ impl LedgerState {
             // Select the correct stability window based on era.
             // Babbage (proto major 7-8): use 3k/f for backward-compatibility.
             // Conway+ (proto major 9+): use 4k/f.
-            let window = if self.protocol_params.protocol_version_major >= 9 {
+            let window = if self.epochs.protocol_params.protocol_version_major >= 9 {
                 self.randomness_stabilisation_window
             } else {
                 // Pre-Conway (including Babbage): ceiling(3k/f)
@@ -1175,7 +1198,7 @@ impl LedgerState {
             // Candidate nonce tracks evolving nonce OUTSIDE the stability window.
             let first_slot_of_next_epoch = self.first_slot_of_epoch(self.epoch.0.saturating_add(1));
             if block.slot().0.saturating_add(window) < first_slot_of_next_epoch {
-                self.candidate_nonce = self.evolving_nonce;
+                self.consensus.candidate_nonce = self.consensus.evolving_nonce;
             }
         } else if block.era.is_shelley_based() {
             warn!(
@@ -1191,7 +1214,7 @@ impl LedgerState {
         // Haskell: csLabNonce = prevHashToNonce (bheaderPrev bhb)
         // prevHashToNonce: GenesisHash → NeutralNonce (ZERO); BlockHash h → Nonce(h).
         // castHash is a type-reinterpret (no rehashing): just use the raw prev_hash bytes.
-        self.lab_nonce = block.header.prev_hash;
+        self.consensus.lab_nonce = block.header.prev_hash;
 
         // Update tip
         self.tip = block.tip();
@@ -1202,12 +1225,14 @@ impl LedgerState {
         self.era = block.era;
 
         // Record this block's UTxO diff for rollback support.
-        self.diff_seq.push(block.slot(), *block.hash(), block_diff);
+        self.utxo
+            .diff_seq
+            .push(block.slot(), *block.hash(), block_diff);
 
         trace!(
             slot = block.slot().0,
             block_no = block.block_number().0,
-            utxo_count = self.utxo_set.len(),
+            utxo_count = self.utxo.utxo_set.len(),
             epoch = self.epoch.0,
             era = ?self.era,
             "Ledger: block applied successfully"
@@ -1241,7 +1266,7 @@ impl LedgerState {
         self.apply_block(block, mode)?;
 
         // Extract the UTxO diff from the DiffSeq entry that apply_block just pushed.
-        if let Some((_slot, _hash, utxo_diff)) = self.diff_seq.diffs.back() {
+        if let Some((_slot, _hash, utxo_diff)) = self.utxo.diff_seq.diffs.back() {
             delta.utxo_diff = utxo_diff.clone();
         }
 
@@ -1249,55 +1274,57 @@ impl LedgerState {
         if self.epoch > pre_epoch {
             delta.epoch_transition = Some(crate::ledger_seq::EpochTransitionDelta {
                 new_epoch: self.epoch,
-                treasury: self.treasury,
-                reserves: self.reserves,
-                snapshots: self.snapshots.clone(),
-                protocol_params: self.protocol_params.clone(),
-                prev_protocol_params: self.prev_protocol_params.clone(),
-                prev_d: self.prev_d,
-                prev_protocol_version_major: self.prev_protocol_version_major,
-                pending_pp_updates_cleared: self.pending_pp_updates.is_empty()
-                    && self.future_pp_updates.is_empty(),
-                epoch_nonce: self.epoch_nonce,
-                last_epoch_block_nonce: self.last_epoch_block_nonce,
+                treasury: self.epochs.treasury,
+                reserves: self.epochs.reserves,
+                snapshots: self.epochs.snapshots.clone(),
+                protocol_params: self.epochs.protocol_params.clone(),
+                prev_protocol_params: self.epochs.prev_protocol_params.clone(),
+                prev_d: self.epochs.prev_d,
+                prev_protocol_version_major: self.epochs.prev_protocol_version_major,
+                pending_pp_updates_cleared: self.epochs.pending_pp_updates.is_empty()
+                    && self.epochs.future_pp_updates.is_empty(),
+                epoch_nonce: self.consensus.epoch_nonce,
+                last_epoch_block_nonce: self.consensus.last_epoch_block_nonce,
                 reward_credits: std::collections::HashMap::new(),
                 pools_retired: Vec::new(),
                 future_params_promoted: Vec::new(),
                 drep_activity_updates: self
+                    .gov
                     .governance
                     .dreps
                     .iter()
                     .map(|(cred, drep)| (*cred, drep.active))
                     .collect(),
-                last_ratified: self.governance.last_ratified.clone(),
-                last_expired: self.governance.last_expired.clone(),
-                last_ratify_delayed: self.governance.last_ratify_delayed,
-                new_constitution: self.governance.constitution.clone(),
-                no_confidence: Some(self.governance.no_confidence),
-                committee_threshold: Some(self.governance.committee_threshold.clone()),
+                last_ratified: self.gov.governance.last_ratified.clone(),
+                last_expired: self.gov.governance.last_expired.clone(),
+                last_ratify_delayed: self.gov.governance.last_ratify_delayed,
+                new_constitution: self.gov.governance.constitution.clone(),
+                no_confidence: Some(self.gov.governance.no_confidence),
+                committee_threshold: Some(self.gov.governance.committee_threshold.clone()),
                 proposals_enacted: self
+                    .gov
                     .governance
                     .last_ratified
                     .iter()
                     .map(|(id, _)| id.clone())
                     .collect(),
-                proposals_expired: self.governance.last_expired.clone(),
-                enacted_pparam_update: Some(self.governance.enacted_pparam_update.clone()),
-                enacted_hard_fork: Some(self.governance.enacted_hard_fork.clone()),
-                enacted_committee: Some(self.governance.enacted_committee.clone()),
-                enacted_constitution: Some(self.governance.enacted_constitution.clone()),
-                stake_distribution: self.stake_distribution.clone(),
+                proposals_expired: self.gov.governance.last_expired.clone(),
+                enacted_pparam_update: Some(self.gov.governance.enacted_pparam_update.clone()),
+                enacted_hard_fork: Some(self.gov.governance.enacted_hard_fork.clone()),
+                enacted_committee: Some(self.gov.governance.enacted_committee.clone()),
+                enacted_constitution: Some(self.gov.governance.enacted_constitution.clone()),
+                stake_distribution: self.certs.stake_distribution.clone(),
                 delegation_changes: Vec::new(),
             });
         }
 
         // Build per-block scalar field delta from post-block state.
         let pool_block_increment = if !block.header.issuer_vkey.is_empty() {
-            let current_d = if self.protocol_params.protocol_version_major >= 7 {
+            let current_d = if self.epochs.protocol_params.protocol_version_major >= 7 {
                 0.0
             } else {
-                self.protocol_params.d.numerator as f64
-                    / self.protocol_params.d.denominator.max(1) as f64
+                self.epochs.protocol_params.d.numerator as f64
+                    / self.epochs.protocol_params.d.denominator.max(1) as f64
             };
             if current_d < 0.8 {
                 Some(dugite_primitives::hash::blake2b_224(
@@ -1318,11 +1345,11 @@ impl LedgerState {
                 .map(|tx| tx.body.fee)
                 .fold(Lovelace(0), |acc, fee| Lovelace(acc.0 + fee.0)),
             pool_block_increment,
-            epoch_block_count: self.epoch_block_count,
-            evolving_nonce: self.evolving_nonce,
-            candidate_nonce: self.candidate_nonce,
-            lab_nonce: self.lab_nonce,
-            epoch_fees: self.epoch_fees,
+            epoch_block_count: self.consensus.epoch_block_count,
+            evolving_nonce: self.consensus.evolving_nonce,
+            candidate_nonce: self.consensus.candidate_nonce,
+            lab_nonce: self.consensus.lab_nonce,
+            epoch_fees: self.utxo.epoch_fees,
         };
 
         Ok(delta)

@@ -181,20 +181,27 @@ impl Node {
         // Per Cardano spec, total stake = UTxO-delegated stake + reward account balance.
         let mut pool_stake_map: std::collections::HashMap<dugite_primitives::hash::Hash28, u64> =
             std::collections::HashMap::new();
-        for (cred_hash, pool_id) in ls.delegations.iter() {
+        for (cred_hash, pool_id) in ls.certs.delegations.iter() {
             let utxo_stake = ls
+                .certs
                 .stake_distribution
                 .stake_map
                 .get(cred_hash)
                 .map(|l| l.0)
                 .unwrap_or(0);
-            let reward_balance = ls.reward_accounts.get(cred_hash).map(|l| l.0).unwrap_or(0);
+            let reward_balance = ls
+                .certs
+                .reward_accounts
+                .get(cred_hash)
+                .map(|l| l.0)
+                .unwrap_or(0);
             *pool_stake_map.entry(*pool_id).or_default() += utxo_stake + reward_balance;
         }
 
         // Build stake pool snapshots with actual per-pool stake
         let total_active_stake: u64 = pool_stake_map.values().sum();
         let stake_pools: Vec<StakePoolSnapshot> = ls
+            .certs
             .pool_params
             .iter()
             .map(|(pool_id, reg)| StakePoolSnapshot {
@@ -207,13 +214,15 @@ impl Node {
 
         // Build DRep snapshots with delegator lookup
         let drep_entries: Vec<DRepSnapshot> = ls
+            .gov
             .governance
             .dreps
             .iter()
             .map(|(hash, drep)| {
-                let expiry = drep.registered_epoch.0 + ls.protocol_params.drep_activity;
+                let expiry = drep.registered_epoch.0 + ls.epochs.protocol_params.drep_activity;
                 // Collect stake credentials delegated to this DRep
                 let delegator_hashes: Vec<Vec<u8>> = ls
+                    .gov
                     .governance
                     .vote_delegations
                     .iter()
@@ -250,6 +259,7 @@ impl Node {
         // one of them here, carrying the full GovAction enum so the CBOR encoder can
         // reproduce the complete action body on the wire (fixes issue #172).
         let governance_proposals: Vec<ProposalSnapshot> = ls
+            .gov
             .governance
             .proposals
             .iter()
@@ -283,15 +293,16 @@ impl Node {
         // committee_hot_keys, so that members without hot key authorization
         // (MemberNotAuthorized) are included in the response.
         let resigned_set: std::collections::HashSet<_> =
-            ls.governance.committee_resigned.keys().collect();
+            ls.gov.governance.committee_resigned.keys().collect();
         let committee = CommitteeSnapshot {
             members: ls
+                .gov
                 .governance
                 .committee_expiration
                 .iter()
                 .map(|(cold, _expiry)| {
                     let is_resigned = resigned_set.contains(cold);
-                    let hot_key = ls.governance.committee_hot_keys.get(cold);
+                    let hot_key = ls.gov.governance.committee_hot_keys.get(cold);
 
                     // Determine hot credential authorization status:
                     // 0 = MemberAuthorized (has hot key), 1 = MemberNotAuthorized, 2 = Resigned
@@ -310,6 +321,7 @@ impl Node {
                         // Use the script_committee_credentials set to correctly distinguish
                         // key credentials (0) from script credentials (1).
                         cold_credential_type: ls
+                            .gov
                             .governance
                             .script_committee_credentials
                             .contains(cold) as u8,
@@ -326,7 +338,10 @@ impl Node {
                         // any prior authorization for the same cold key.
                         hot_credential_type: match hot_key {
                             Some(hk) if !is_resigned => {
-                                ls.governance.script_committee_hot_credentials.contains(hk) as u8
+                                ls.gov
+                                    .governance
+                                    .script_committee_hot_credentials
+                                    .contains(hk) as u8
                             }
                             _ => 0,
                         },
@@ -336,6 +351,7 @@ impl Node {
                 })
                 .collect(),
             threshold: ls
+                .gov
                 .governance
                 .committee_threshold
                 .as_ref()
@@ -348,10 +364,12 @@ impl Node {
         // `cred_hash` is a Hash32 padded from a 28-byte stake key hash; truncate to 28 bytes.
         // `pool_id` from `delegations` is a Hash28, already the right size.
         let stake_addresses: Vec<StakeAddressSnapshot> = ls
+            .certs
             .reward_accounts
             .iter()
             .map(|(cred_hash, rewards)| {
                 let delegated_pool = ls
+                    .certs
                     .delegations
                     .get(cred_hash)
                     .map(|pool_id| pool_id.as_ref().to_vec());
@@ -368,13 +386,13 @@ impl Node {
         let stake_snapshots = {
             // Collect all unique pool IDs across all snapshots
             let mut all_pool_ids = std::collections::BTreeSet::new();
-            if let Some(ref snap) = ls.snapshots.mark {
+            if let Some(ref snap) = ls.epochs.snapshots.mark {
                 all_pool_ids.extend(snap.pool_stake.keys().cloned());
             }
-            if let Some(ref snap) = ls.snapshots.set {
+            if let Some(ref snap) = ls.epochs.snapshots.set {
                 all_pool_ids.extend(snap.pool_stake.keys().cloned());
             }
-            if let Some(ref snap) = ls.snapshots.go {
+            if let Some(ref snap) = ls.epochs.snapshots.go {
                 all_pool_ids.extend(snap.pool_stake.keys().cloned());
             }
 
@@ -383,6 +401,7 @@ impl Node {
                 .map(|pid| PoolStakeSnapshotEntry {
                     pool_id: pid.as_ref().to_vec(),
                     mark_stake: ls
+                        .epochs
                         .snapshots
                         .mark
                         .as_ref()
@@ -390,6 +409,7 @@ impl Node {
                         .map(|l| l.0)
                         .unwrap_or(0),
                     set_stake: ls
+                        .epochs
                         .snapshots
                         .set
                         .as_ref()
@@ -397,6 +417,7 @@ impl Node {
                         .map(|l| l.0)
                         .unwrap_or(0),
                     go_stake: ls
+                        .epochs
                         .snapshots
                         .go
                         .as_ref()
@@ -421,22 +442,25 @@ impl Node {
         // Build full per-credential snapshot data for DebugNewEpochState (cncli snapshot).
         // We use the live script_stake_credentials set to determine credential types.
         let snap_mark = ls
+            .epochs
             .snapshots
             .mark
             .as_ref()
-            .map(|s| build_snapshot_stake_data(s, &ls.script_stake_credentials))
+            .map(|s| build_snapshot_stake_data(s, &ls.certs.script_stake_credentials))
             .unwrap_or_default();
         let snap_set = ls
+            .epochs
             .snapshots
             .set
             .as_ref()
-            .map(|s| build_snapshot_stake_data(s, &ls.script_stake_credentials))
+            .map(|s| build_snapshot_stake_data(s, &ls.certs.script_stake_credentials))
             .unwrap_or_default();
         let snap_go = ls
+            .epochs
             .snapshots
             .go
             .as_ref()
-            .map(|s| build_snapshot_stake_data(s, &ls.script_stake_credentials))
+            .map(|s| build_snapshot_stake_data(s, &ls.certs.script_stake_credentials))
             .unwrap_or_default();
 
         // Build per-pool epoch block count map for NewEpochState [1]/[2] fields.
@@ -444,6 +468,7 @@ impl Node {
         // at [2].  We expose the current epoch's counts as [1] (best approximation
         // without a previous-epoch tracker), and leave [2] empty.
         let epoch_blocks_by_pool: Vec<(Vec<u8>, u64)> = ls
+            .consensus
             .epoch_blocks_by_pool
             .iter()
             .map(|(pool_id, count)| (pool_id.as_ref().to_vec(), *count))
@@ -451,6 +476,7 @@ impl Node {
 
         // Build pool params entries
         let pool_params_entries: Vec<PoolParamsSnapshot> = ls
+            .certs
             .pool_params
             .iter()
             .map(|(pool_id, reg)| {
@@ -499,7 +525,7 @@ impl Node {
             .collect();
 
         // Build protocol params snapshot for CBOR encoding
-        let pp = &ls.protocol_params;
+        let pp = &ls.epochs.protocol_params;
         let protocol_params = super::n2c_query::ProtocolParamsSnapshot {
             min_fee_a: pp.min_fee_a,
             min_fee_b: pp.min_fee_b,
@@ -577,15 +603,17 @@ impl Node {
         // Uses the stored deposit paid at registration time for correct values when
         // key_deposit changes via governance. Falls back to current key_deposit for
         // credentials registered before per-credential tracking was added.
-        let fallback_deposit = ls.protocol_params.key_deposit.0;
+        let fallback_deposit = ls.epochs.protocol_params.key_deposit.0;
         let stake_deleg_deposits: Vec<StakeDelegDepositEntry> = ls
+            .certs
             .reward_accounts
             .keys()
             .map(|cred_hash| StakeDelegDepositEntry {
                 credential_hash: cred_hash.as_ref()[..28].to_vec(),
                 // Use the script_stake_credentials set to distinguish key (0) from script (1).
-                credential_type: ls.script_stake_credentials.contains(cred_hash) as u8,
+                credential_type: ls.certs.script_stake_credentials.contains(cred_hash) as u8,
                 deposit: ls
+                    .certs
                     .stake_key_deposits
                     .get(cred_hash)
                     .copied()
@@ -598,8 +626,9 @@ impl Node {
             use dugite_primitives::transaction::DRep;
             let mut drep_stakes: std::collections::HashMap<String, (u8, Option<Vec<u8>>, u64)> =
                 std::collections::HashMap::new();
-            for (stake_cred, drep) in &ls.governance.vote_delegations {
+            for (stake_cred, drep) in &ls.gov.governance.vote_delegations {
                 let stake = ls
+                    .certs
                     .stake_distribution
                     .stake_map
                     .get(stake_cred)
@@ -638,7 +667,8 @@ impl Node {
         // DRep::ScriptHash contains a Hash28 (ScriptHash); already correct size.
         let vote_delegatees: Vec<VoteDelegateeEntry> = {
             use dugite_primitives::transaction::DRep;
-            ls.governance
+            ls.gov
+                .governance
                 .vote_delegations
                 .iter()
                 .map(|(stake_cred, drep)| {
@@ -654,7 +684,8 @@ impl Node {
                         // vote_delegations keys are Hash32 padded from 28-byte stake key hashes.
                         credential_hash: hash32_padded_to_28_bytes(stake_cred),
                         // Use the script_stake_credentials set to distinguish key (0) from script (1).
-                        credential_type: ls.script_stake_credentials.contains(stake_cred) as u8,
+                        credential_type: ls.certs.script_stake_credentials.contains(stake_cred)
+                            as u8,
                         drep_type,
                         drep_hash,
                     }
@@ -663,11 +694,12 @@ impl Node {
         };
 
         // Build DRep delegation entries for GetDRepDelegations (tag 39, V23+).
-        // Uses the same source as vote_delegatees (ls.governance.vote_delegations) but
+        // Uses the same source as vote_delegatees (ls.gov.governance.vote_delegations) but
         // produces DRepDelegationEntry values, keeping the two query types independent.
         let drep_delegations: Vec<DRepDelegationEntry> = {
             use dugite_primitives::transaction::DRep;
-            ls.governance
+            ls.gov
+                .governance
                 .vote_delegations
                 .iter()
                 .map(|(stake_cred, drep)| {
@@ -679,7 +711,8 @@ impl Node {
                     };
                     DRepDelegationEntry {
                         credential_hash: hash32_padded_to_28_bytes(stake_cred),
-                        credential_type: ls.script_stake_credentials.contains(stake_cred) as u8,
+                        credential_type: ls.certs.script_stake_credentials.contains(stake_cred)
+                            as u8,
                         drep_type,
                         drep_hash,
                     }
@@ -691,6 +724,7 @@ impl Node {
         // Include the full GovAction so the CBOR encoder can faithfully reproduce
         // the action body in GetRatifyState responses (same fix as for governance_proposals).
         let ratify_enacted = ls
+            .gov
             .governance
             .last_ratified
             .iter()
@@ -733,55 +767,62 @@ impl Node {
                 .as_ref()
                 .map(|g| g.system_start.clone())
                 .unwrap_or_else(|| self.config.network.system_start().to_string()),
-            utxo_count: ls.utxo_set.len(),
-            delegations_count: ls.delegations.len(),
-            pool_count: ls.pool_params.len(),
-            treasury: ls.treasury.0,
-            reserves: ls.reserves.0,
+            utxo_count: ls.utxo.utxo_set.len(),
+            delegations_count: ls.certs.delegations.len(),
+            pool_count: ls.certs.pool_params.len(),
+            treasury: ls.epochs.treasury.0,
+            reserves: ls.epochs.reserves.0,
             // Active DRep count: only DReps whose activity window has not expired.
             // Inactive DReps (active=false) remain registered in the map until
             // explicitly deregistered via UnregDRep, but external tools (Koios,
             // cardano-cli) report only the active count.
-            drep_count: ls.governance.active_drep_count(),
-            proposal_count: ls.governance.proposals.len(),
+            drep_count: ls.gov.governance.active_drep_count(),
+            proposal_count: ls.gov.governance.proposals.len(),
             protocol_params,
             stake_pools,
             drep_entries,
             governance_proposals,
             enacted_pparam_update: ls
+                .gov
                 .governance
                 .enacted_pparam_update
                 .as_ref()
                 .map(|id| (id.transaction_id.as_ref().to_vec(), id.action_index)),
             enacted_hard_fork: ls
+                .gov
                 .governance
                 .enacted_hard_fork
                 .as_ref()
                 .map(|id| (id.transaction_id.as_ref().to_vec(), id.action_index)),
             enacted_committee: ls
+                .gov
                 .governance
                 .enacted_committee
                 .as_ref()
                 .map(|id| (id.transaction_id.as_ref().to_vec(), id.action_index)),
             enacted_constitution: ls
+                .gov
                 .governance
                 .enacted_constitution
                 .as_ref()
                 .map(|id| (id.transaction_id.as_ref().to_vec(), id.action_index)),
             committee,
             constitution_url: ls
+                .gov
                 .governance
                 .constitution
                 .as_ref()
                 .map(|c| c.anchor.url.clone())
                 .unwrap_or_default(),
             constitution_hash: ls
+                .gov
                 .governance
                 .constitution
                 .as_ref()
                 .map(|c| c.anchor.data_hash.as_ref().to_vec())
                 .unwrap_or_else(|| vec![0u8; 32]),
             constitution_script: ls
+                .gov
                 .governance
                 .constitution
                 .as_ref()
@@ -795,11 +836,12 @@ impl Node {
             epoch_blocks_by_pool,
             pool_params_entries,
             pending_retirements: ls
+                .certs
                 .pending_retirements
                 .iter()
                 .map(|(pool_id, epoch)| (pool_id.as_ref().to_vec(), epoch.0))
                 .collect(),
-            pool_deposit: ls.protocol_params.pool_deposit.0,
+            pool_deposit: ls.epochs.protocol_params.pool_deposit.0,
             epoch_length: ls.epoch_length,
             slot_length_secs: self.shelley_genesis.as_ref().map_or(1, |g| g.slot_length),
             network_magic: self.network_magic as u32,
@@ -832,6 +874,7 @@ impl Node {
                 .map_or(45_000_000_000_000_000, |g| g.max_lovelace_supply),
             ratify_enacted,
             ratify_expired: ls
+                .gov
                 .governance
                 .last_expired
                 .iter()
@@ -840,26 +883,28 @@ impl Node {
                     action_index: id.action_index,
                 })
                 .collect(),
-            ratify_delayed: ls.governance.last_ratify_delayed,
-            epoch_nonce: ls.epoch_nonce.as_ref().to_vec(),
-            evolving_nonce: ls.evolving_nonce.as_ref().to_vec(),
-            candidate_nonce: ls.candidate_nonce.as_ref().to_vec(),
-            lab_nonce: ls.lab_nonce.as_ref().to_vec(),
+            ratify_delayed: ls.gov.governance.last_ratify_delayed,
+            epoch_nonce: ls.consensus.epoch_nonce.as_ref().to_vec(),
+            evolving_nonce: ls.consensus.evolving_nonce.as_ref().to_vec(),
+            candidate_nonce: ls.consensus.candidate_nonce.as_ref().to_vec(),
+            lab_nonce: ls.consensus.lab_nonce.as_ref().to_vec(),
             total_active_stake: ls
+                .certs
                 .pool_params
                 .keys()
                 .filter_map(|pid| {
-                    ls.snapshots
+                    ls.epochs
+                        .snapshots
                         .set
                         .as_ref()
                         .and_then(|s| s.pool_stake.get(pid))
                         .map(|s| s.0)
                 })
                 .sum(),
-            total_rewards: ls.reward_accounts.values().map(|r| r.0).sum(),
-            active_delegations: ls.delegations.len() as u64,
-            protocol_version_major: ls.protocol_params.protocol_version_major,
-            protocol_version_minor: ls.protocol_params.protocol_version_minor,
+            total_rewards: ls.certs.reward_accounts.values().map(|r| r.0).sum(),
+            active_delegations: ls.certs.delegations.len() as u64,
+            protocol_version_major: ls.epochs.protocol_params.protocol_version_major,
+            protocol_version_minor: ls.epochs.protocol_params.protocol_version_minor,
             genesis_config: self.shelley_genesis.as_ref().map(|g| {
                 let gp = &g.protocol_params;
                 // Convert a0 from f64 to rational
@@ -975,7 +1020,7 @@ fn build_vote_maps(
     let mut committee_votes = Vec::new();
     let mut drep_votes = Vec::new();
     let mut spo_votes = Vec::new();
-    if let Some(votes) = ls.governance.votes_by_action.get(action_id) {
+    if let Some(votes) = ls.gov.governance.votes_by_action.get(action_id) {
         for (voter, procedure) in votes {
             let vote_u8 = match procedure.vote {
                 dugite_primitives::transaction::Vote::No => 0u8,

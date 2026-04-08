@@ -504,9 +504,9 @@ pub fn arb_ledger_state(config: LedgerStateConfig) -> impl Strategy<Value = Ledg
             Just(()).prop_map(move |_| {
                 let mut state = LedgerState::new(params.clone());
                 state.epoch = EpochNo(cfg.epoch);
-                state.treasury = Lovelace(treasury);
-                state.reserves = Lovelace(reserves);
-                state.epoch_fees = Lovelace(fee_pot);
+                state.epochs.treasury = Lovelace(treasury);
+                state.epochs.reserves = Lovelace(reserves);
+                state.utxo.epoch_fees = Lovelace(fee_pot);
 
                 // ── Pools ────────────────────────────────────────────────────
                 let mut pool_map = HashMap::new();
@@ -532,8 +532,8 @@ pub fn arb_ledger_state(config: LedgerStateConfig) -> impl Strategy<Value = Ledg
                     pool_map.insert(*pool_id, reg);
                     pool_deposits_map.insert(*pool_id, pool_deposit);
                 }
-                state.pool_params = Arc::new(pool_map);
-                state.pool_deposits = pool_deposits_map;
+                state.certs.pool_params = Arc::new(pool_map);
+                state.certs.pool_deposits = pool_deposits_map;
 
                 // ── Reward accounts and delegations ──────────────────────────
                 let mut reward_accounts = HashMap::new();
@@ -581,7 +581,7 @@ pub fn arb_ledger_state(config: LedgerStateConfig) -> impl Strategy<Value = Ledg
                         is_legacy: false,
                         raw_cbor: None,
                     };
-                    state.utxo_set.insert(input, output);
+                    state.utxo.utxo_set.insert(input, output);
 
                     // Update incremental stake map to match the UTxO
                     *stake_map.entry(*sk).or_insert(Lovelace(0)) += Lovelace(utxo_per_entry);
@@ -603,14 +603,14 @@ pub fn arb_ledger_state(config: LedgerStateConfig) -> impl Strategy<Value = Ledg
                         is_legacy: false,
                         raw_cbor: None,
                     };
-                    state.utxo_set.insert(input, output);
+                    state.utxo.utxo_set.insert(input, output);
                 }
 
-                state.reward_accounts = Arc::new(reward_accounts.clone());
-                state.delegations = Arc::new(delegations.clone());
-                state.total_stake_key_deposits = (n_delegations as u64) * key_deposit;
-                state.stake_key_deposits = stake_key_deposits;
-                state.stake_distribution = StakeDistributionState { stake_map };
+                state.certs.reward_accounts = Arc::new(reward_accounts.clone());
+                state.certs.delegations = Arc::new(delegations.clone());
+                state.certs.total_stake_key_deposits = (n_delegations as u64) * key_deposit;
+                state.certs.stake_key_deposits = stake_key_deposits;
+                state.certs.stake_distribution = StakeDistributionState { stake_map };
 
                 // ── Mark / set / go snapshots ────────────────────────────────
                 // All three snapshots mirror the live pool and delegation state
@@ -625,13 +625,13 @@ pub fn arb_ledger_state(config: LedgerStateConfig) -> impl Strategy<Value = Ledg
                         }
                         ps
                     },
-                    pool_params: state.pool_params.clone(),
+                    pool_params: state.certs.pool_params.clone(),
                     stake_distribution: Arc::new(HashMap::new()),
                     epoch_fees: Lovelace(fee_pot),
                     epoch_block_count: 0,
                     epoch_blocks_by_pool: Arc::new(HashMap::new()),
                 };
-                state.snapshots = EpochSnapshots {
+                state.epochs.snapshots = EpochSnapshots {
                     mark: Some(snapshot.clone()),
                     set: Some(snapshot.clone()),
                     go: Some(snapshot),
@@ -642,7 +642,7 @@ pub fn arb_ledger_state(config: LedgerStateConfig) -> impl Strategy<Value = Ledg
                 };
 
                 // Skip stake rebuild since we populated stake_map manually.
-                state.needs_stake_rebuild = false;
+                state.epochs.needs_stake_rebuild = false;
 
                 state
             })
