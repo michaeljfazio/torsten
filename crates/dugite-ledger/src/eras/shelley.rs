@@ -96,7 +96,7 @@ impl EraRules for ShelleyRules {
         // we use 0 since the orchestrator (Task 12) will provide the correct
         // index. Certificate pointer map entries are not critical for correctness
         // (only used for pointer address resolution in snapshots).
-        common::process_shelley_certs(tx, ctx.current_slot, 0, certs, epochs, gov);
+        common::process_shelley_certs(tx, ctx.current_slot, ctx.tx_index, certs, epochs, gov);
 
         // Step 3: Apply UTxO changes (consume inputs, produce outputs).
         let diff = common::apply_utxo_changes(tx, utxo, certs, epochs);
@@ -116,6 +116,8 @@ impl EraRules for ShelleyRules {
         _mode: BlockValidationMode,
         _ctx: &RuleContext,
         _utxo: &mut UtxoSubState,
+        _certs: &mut CertSubState,
+        _epochs: &mut EpochSubState,
     ) -> Result<UtxoDiff, LedgerError> {
         Err(LedgerError::InvalidTransaction(format!(
             "Shelley/Allegra/Mary eras do not support invalid transactions \
@@ -816,6 +818,7 @@ mod tests {
             byron_epoch_length: 21600,
             stability_window: 129600,
             randomness_stabilisation_window: 129600,
+            tx_index: 0,
         }
     }
 
@@ -1110,7 +1113,16 @@ mod tests {
         let mut utxo = make_utxo_sub(vec![]);
 
         let tx = make_tx(0x01, vec![], vec![], 0);
-        let result = rules.apply_invalid_tx(&tx, BlockValidationMode::ApplyOnly, &ctx, &mut utxo);
+        let mut certs = make_cert_sub();
+        let mut epochs = make_epoch_sub();
+        let result = rules.apply_invalid_tx(
+            &tx,
+            BlockValidationMode::ApplyOnly,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut epochs,
+        );
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

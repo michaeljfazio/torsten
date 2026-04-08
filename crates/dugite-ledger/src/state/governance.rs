@@ -24,6 +24,7 @@ impl LedgerState {
     /// 3. pvCanFollow for HardForkInitiation — target version must follow the current version
     ///    by exactly one major increment (minor=0) or the same major with a higher minor
     ///    (Haskell: `pvCanFollow`).
+    #[allow(dead_code)]
     pub(crate) fn process_proposal(
         &mut self,
         tx_hash: &Hash32,
@@ -232,6 +233,7 @@ impl LedgerState {
     ///
     /// During bootstrap (protocol == 9) this check is skipped since committee
     /// membership rules are not yet fully active.
+    #[allow(dead_code)]
     pub(crate) fn process_vote(
         &mut self,
         voter: &Voter,

@@ -640,6 +640,7 @@ pub(crate) fn compute_shelley_nonce(
 /// **STUB** -- not yet implemented. Era rule impls should continue to call
 /// `validate_transaction_with_pools` from the validation module until this
 /// function is fleshed out.
+#[allow(dead_code)]
 pub(crate) fn validate_shelley_base(
     _tx: &Transaction,
     _utxo: &UtxoSubState,

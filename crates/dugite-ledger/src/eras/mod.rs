@@ -7,8 +7,6 @@
 pub mod alonzo;
 pub mod babbage;
 pub mod byron;
-// Helpers are building blocks for era rule impls (Tasks 9-11); not yet called.
-#[allow(dead_code)]
 pub mod common;
 pub mod conway;
 pub mod shelley;
@@ -31,7 +29,6 @@ use dugite_primitives::protocol_params::ProtocolParameters;
 
 /// Read-only context available to all era rules.
 /// Assembled by the orchestrator before dispatching.
-#[allow(dead_code)]
 pub struct RuleContext<'a> {
     pub params: &'a ProtocolParameters,
     pub current_slot: u64,
@@ -46,6 +43,9 @@ pub struct RuleContext<'a> {
     pub byron_epoch_length: u64,
     pub stability_window: u64,
     pub randomness_stabilisation_window: u64,
+    /// Index of the current transaction within the block (0-based).
+    /// Used for pointer map entries during certificate processing.
+    pub tx_index: u64,
 }
 
 /// Era-specific ledger rules.
@@ -55,7 +55,7 @@ pub struct RuleContext<'a> {
 ///
 /// Methods accept multiple sub-state borrows by design — each sub-state
 /// is an independently borrowable component, avoiding a single `&mut LedgerState`.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub trait EraRules {
     /// Validate block body constraints (ExUnit budgets, ref script sizes).
     fn validate_block_body(
@@ -86,6 +86,8 @@ pub trait EraRules {
         mode: BlockValidationMode,
         ctx: &RuleContext,
         utxo: &mut UtxoSubState,
+        certs: &mut CertSubState,
+        epochs: &mut EpochSubState,
     ) -> Result<UtxoDiff, LedgerError>;
 
     /// Process an epoch boundary transition.
@@ -210,13 +212,15 @@ impl EraRules for EraRulesImpl {
         mode: BlockValidationMode,
         ctx: &RuleContext,
         utxo: &mut UtxoSubState,
+        certs: &mut CertSubState,
+        epochs: &mut EpochSubState,
     ) -> Result<UtxoDiff, LedgerError> {
         match self {
-            Self::Byron(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
-            Self::Shelley(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
-            Self::Alonzo(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
-            Self::Babbage(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
-            Self::Conway(r) => r.apply_invalid_tx(tx, mode, ctx, utxo),
+            Self::Byron(r) => r.apply_invalid_tx(tx, mode, ctx, utxo, certs, epochs),
+            Self::Shelley(r) => r.apply_invalid_tx(tx, mode, ctx, utxo, certs, epochs),
+            Self::Alonzo(r) => r.apply_invalid_tx(tx, mode, ctx, utxo, certs, epochs),
+            Self::Babbage(r) => r.apply_invalid_tx(tx, mode, ctx, utxo, certs, epochs),
+            Self::Conway(r) => r.apply_invalid_tx(tx, mode, ctx, utxo, certs, epochs),
         }
     }
 

@@ -498,6 +498,8 @@ impl EraRules for ByronRules {
         _mode: BlockValidationMode,
         _ctx: &RuleContext,
         _utxo: &mut UtxoSubState,
+        _certs: &mut CertSubState,
+        _epochs: &mut EpochSubState,
     ) -> Result<UtxoDiff, LedgerError> {
         Err(LedgerError::InvalidTransaction(format!(
             "Byron era does not support invalid transactions (is_valid flag). \
@@ -1166,6 +1168,7 @@ mod tests {
             byron_epoch_length: 21600,
             stability_window: 0,
             randomness_stabilisation_window: 0,
+            tx_index: 0,
         }
     }
 
@@ -1341,7 +1344,16 @@ mod tests {
 
         let tx = make_tx(0xAA, vec![], vec![], 0);
 
-        let result = rules.apply_invalid_tx(&tx, BlockValidationMode::ValidateAll, &ctx, &mut utxo);
+        let mut certs = make_cert_sub();
+        let mut epochs = make_epoch_sub();
+        let result = rules.apply_invalid_tx(
+            &tx,
+            BlockValidationMode::ValidateAll,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut epochs,
+        );
 
         assert!(
             result.is_err(),

@@ -35,6 +35,7 @@ impl LedgerState {
     /// StakeRegistration certificates create entries in the pointer_map,
     /// mapping (slot, tx_index, cert_index) → credential hash. This enables
     /// resolution of Pointer addresses (type 4/5) in stake_credential_hash.
+    #[allow(dead_code)]
     pub(crate) fn process_certificate_with_pointer(
         &mut self,
         cert: &Certificate,
@@ -95,6 +96,7 @@ impl LedgerState {
     /// tx validation rule, not a block application rule. The block producer
     /// already validated era compatibility. During replay, the in-state
     /// protocol version may lag behind the block's actual era.
+    #[allow(dead_code)]
     pub(crate) fn process_certificate(&mut self, cert: &Certificate) {
         match cert {
             Certificate::StakeRegistration(credential) => {
@@ -570,6 +572,7 @@ impl LedgerState {
     /// Process a withdrawal from a reward account.
     /// Per Cardano spec, the withdrawal amount must exactly match the reward balance.
     /// After withdrawal, the balance is reduced by the withdrawal amount.
+    #[allow(dead_code)]
     pub(crate) fn process_withdrawal(&mut self, reward_account: &[u8], amount: Lovelace) {
         let key = Self::reward_account_to_hash(reward_account);
         if let Some(balance) = Arc::make_mut(&mut self.certs.reward_accounts).get_mut(&key) {

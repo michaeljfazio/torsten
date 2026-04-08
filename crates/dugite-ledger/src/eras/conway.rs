@@ -50,11 +50,9 @@ use super::common;
 use super::{EraRules, RuleContext};
 use crate::state::substates::*;
 use crate::state::{
-    BlockValidationMode, DRepRegistration, EpochSnapshots, LedgerError, ProposalState,
-    StakeDistributionState, StakeSnapshot,
+    BlockValidationMode, DRepRegistration, LedgerError, ProposalState, StakeSnapshot,
 };
 use crate::utxo_diff::UtxoDiff;
-use dugite_primitives::protocol_params::ProtocolParameters;
 
 /// Stateless Conway era rule strategy.
 ///
@@ -156,7 +154,7 @@ impl EraRules for ConwayRules {
 
         // Step 7: Process certificates (Shelley + Conway governance certs).
         // First, process Shelley-era certs (StakeReg, StakeDeReg, Delegation, Pool).
-        common::process_shelley_certs(tx, ctx.current_slot, 0, certs, epochs, gov);
+        common::process_shelley_certs(tx, ctx.current_slot, ctx.tx_index, certs, epochs, gov);
         // Then, process Conway-specific governance certs.
         process_conway_certs(tx, ctx.current_epoch, certs, gov, epochs);
 
@@ -185,11 +183,10 @@ impl EraRules for ConwayRules {
         _mode: BlockValidationMode,
         _ctx: &RuleContext,
         utxo: &mut UtxoSubState,
+        certs: &mut CertSubState,
+        epochs: &mut EpochSubState,
     ) -> Result<UtxoDiff, LedgerError> {
-        let mut certs_stub = make_empty_cert_sub();
-        let mut epochs_stub = make_empty_epoch_sub();
-        let diff =
-            common::apply_collateral_consumption(tx, utxo, &mut certs_stub, &mut epochs_stub);
+        let diff = common::apply_collateral_consumption(tx, utxo, certs, epochs);
         Ok(diff)
     }
 
@@ -1149,7 +1146,13 @@ fn reward_account_to_hash(reward_account: &[u8]) -> Hash32 {
 // Internal helpers for collateral stub state
 // ---------------------------------------------------------------------------
 
-/// Create a minimal CertSubState for collateral consumption.
+#[cfg(test)]
+use crate::state::{EpochSnapshots, StakeDistributionState};
+#[cfg(test)]
+use dugite_primitives::protocol_params::ProtocolParameters;
+
+/// Create a minimal CertSubState for testing collateral consumption.
+#[cfg(test)]
 fn make_empty_cert_sub() -> CertSubState {
     CertSubState {
         delegations: Arc::new(HashMap::new()),
@@ -1168,7 +1171,8 @@ fn make_empty_cert_sub() -> CertSubState {
     }
 }
 
-/// Create a minimal EpochSubState for collateral consumption.
+/// Create a minimal EpochSubState for testing collateral consumption.
+#[cfg(test)]
 fn make_empty_epoch_sub() -> EpochSubState {
     EpochSubState {
         snapshots: EpochSnapshots::default(),
@@ -1233,6 +1237,7 @@ mod tests {
             byron_epoch_length: 21600,
             stability_window: 129600,
             randomness_stabilisation_window: 129600,
+            tx_index: 0,
         }
     }
 
@@ -1530,7 +1535,16 @@ mod tests {
         tx.body.collateral_return = Some(make_output(addr, 8_000_000));
         tx.body.total_collateral = Some(Lovelace(2_000_000));
 
-        let result = rules.apply_invalid_tx(&tx, BlockValidationMode::ApplyOnly, &ctx, &mut utxo);
+        let mut certs = make_empty_cert_sub();
+        let mut epochs = make_empty_epoch_sub();
+        let result = rules.apply_invalid_tx(
+            &tx,
+            BlockValidationMode::ApplyOnly,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut epochs,
+        );
         assert!(result.is_ok());
         let diff = result.unwrap();
 

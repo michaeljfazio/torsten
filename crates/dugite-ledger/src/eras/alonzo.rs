@@ -14,15 +14,13 @@
 ///
 /// Alonzo does NOT have `collateral_return` — that was added in Babbage. When
 /// a script fails, the entire collateral input value is forfeited.
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashSet;
 
 use dugite_primitives::block::{Block, BlockHeader};
 use dugite_primitives::credentials::Credential;
 use dugite_primitives::era::Era;
 use dugite_primitives::hash::Hash28;
 use dugite_primitives::transaction::{Certificate, Transaction};
-use dugite_primitives::value::Lovelace;
 use tracing::debug;
 
 use super::common;
@@ -85,7 +83,7 @@ impl EraRules for AlonzoRules {
         common::drain_withdrawal_accounts(tx, certs);
 
         // Step 2: Process Shelley-era certificates.
-        common::process_shelley_certs(tx, ctx.current_slot, 0, certs, epochs, gov);
+        common::process_shelley_certs(tx, ctx.current_slot, ctx.tx_index, certs, epochs, gov);
 
         // Step 3: Apply UTxO changes.
         let diff = common::apply_utxo_changes(tx, utxo, certs, epochs);
@@ -109,16 +107,11 @@ impl EraRules for AlonzoRules {
         _mode: BlockValidationMode,
         _ctx: &RuleContext,
         utxo: &mut UtxoSubState,
+        certs: &mut CertSubState,
+        epochs: &mut EpochSubState,
     ) -> Result<UtxoDiff, LedgerError> {
         // Alonzo collateral consumption: no collateral_return field.
-        // We need certs/epochs for stake distribution updates in collateral consumption.
-        // The common helper takes them as params, but for invalid txs we create
-        // minimal placeholders since stake distribution tracking for collateral
-        // is best-effort during sync.
-        let mut certs_stub = make_empty_cert_sub();
-        let mut epochs_stub = make_empty_epoch_sub();
-        let diff =
-            common::apply_collateral_consumption(tx, utxo, &mut certs_stub, &mut epochs_stub);
+        let diff = common::apply_collateral_consumption(tx, utxo, certs, epochs);
         Ok(diff)
     }
 
@@ -280,18 +273,22 @@ impl EraRules for AlonzoRules {
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers for collateral stub state
+// Internal helpers for collateral stub state (test only)
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 use crate::state::{EpochSnapshots, StakeDistributionState};
+#[cfg(test)]
 use dugite_primitives::protocol_params::ProtocolParameters;
-use std::collections::BTreeMap;
+#[cfg(test)]
+use dugite_primitives::value::Lovelace;
+#[cfg(test)]
+use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::sync::Arc;
 
-/// Create a minimal CertSubState for collateral consumption.
-///
-/// Stake distribution tracking during collateral consumption is best-effort.
-/// This stub allows the `apply_collateral_consumption` helper to run without
-/// requiring the caller to pass full cert/epoch state through `apply_invalid_tx`.
+/// Create a minimal CertSubState for testing collateral consumption.
+#[cfg(test)]
 fn make_empty_cert_sub() -> CertSubState {
     CertSubState {
         delegations: Arc::new(HashMap::new()),
@@ -310,7 +307,8 @@ fn make_empty_cert_sub() -> CertSubState {
     }
 }
 
-/// Create a minimal EpochSubState for collateral consumption.
+/// Create a minimal EpochSubState for testing collateral consumption.
+#[cfg(test)]
 fn make_empty_epoch_sub() -> EpochSubState {
     EpochSubState {
         snapshots: EpochSnapshots::default(),
@@ -372,6 +370,7 @@ mod tests {
             byron_epoch_length: 21600,
             stability_window: 129600,
             randomness_stabilisation_window: 129600,
+            tx_index: 0,
         }
     }
 
@@ -645,7 +644,16 @@ mod tests {
         tx.body.collateral = vec![collateral_input.clone()];
         // Alonzo: no collateral_return, no total_collateral.
 
-        let result = rules.apply_invalid_tx(&tx, BlockValidationMode::ApplyOnly, &ctx, &mut utxo);
+        let mut certs = make_empty_cert_sub();
+        let mut epochs = make_empty_epoch_sub();
+        let result = rules.apply_invalid_tx(
+            &tx,
+            BlockValidationMode::ApplyOnly,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut epochs,
+        );
         assert!(result.is_ok());
         let diff = result.unwrap();
 
