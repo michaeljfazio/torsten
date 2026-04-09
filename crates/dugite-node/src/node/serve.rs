@@ -586,6 +586,9 @@ pub(crate) fn convert_validation_error(
                 "Extra redeemer with no matching script purpose: tag={tag}, index={index}"
             ),
         },
+        VE::ScriptLockedCollateral { inputs } => TxValidationError::ScriptFailed {
+            reason: format!("Collateral input(s) at script-locked addresses: {inputs:?}"),
+        },
     }
 }
 

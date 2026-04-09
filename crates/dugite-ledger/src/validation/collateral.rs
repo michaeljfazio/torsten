@@ -62,10 +62,30 @@ pub(crate) fn check_collateral(
     // Accumulate collateral value and multi-asset balances
     let mut collateral_value = 0u64;
     let mut collateral_multi_asset: BTreeMap<PolicyId, BTreeMap<AssetName, i128>> = BTreeMap::new();
+    let mut script_locked_inputs: Vec<String> = Vec::new();
 
     for col_input in &body.collateral {
         match utxo_set.lookup(col_input) {
             Some(output) => {
+                // ScriptsNotPaidUTxO: collateral inputs must be at VKey (non-script) addresses.
+                // Byron/bootstrap addresses are accepted. Script-locked UTxOs are rejected.
+                let is_script_locked = match &output.address {
+                    dugite_primitives::address::Address::Base(b) => {
+                        matches!(b.payment, Credential::Script(_))
+                    }
+                    dugite_primitives::address::Address::Enterprise(e) => {
+                        matches!(e.payment, Credential::Script(_))
+                    }
+                    dugite_primitives::address::Address::Pointer(p) => {
+                        matches!(p.payment, Credential::Script(_))
+                    }
+                    // Byron/Bootstrap addresses are VKey-locked — accepted as collateral
+                    _ => false,
+                };
+                if is_script_locked {
+                    script_locked_inputs.push(col_input.to_string());
+                }
+
                 collateral_value = collateral_value.saturating_add(output.value.coin.0);
                 // Accumulate multi-asset from collateral inputs
                 for (policy, assets) in &output.value.multi_asset {
@@ -82,6 +102,12 @@ pub(crate) fn check_collateral(
                 errors.push(ValidationError::CollateralNotFound(col_input.to_string()));
             }
         }
+    }
+
+    if !script_locked_inputs.is_empty() {
+        errors.push(ValidationError::ScriptLockedCollateral {
+            inputs: script_locked_inputs,
+        });
     }
 
     // Account for collateral return output (Babbage+)
@@ -1687,6 +1713,88 @@ mod tests {
         assert!(
             extra_errors.is_empty(),
             "expected no ExtraRedeemer errors, got: {extra_errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for ScriptsNotPaidUTxO check
+    // -----------------------------------------------------------------------
+
+    /// A collateral input at a script-locked Enterprise address must produce
+    /// a `ScriptLockedCollateral` error (Haskell `ScriptsNotPaidUTxO`).
+    #[test]
+    fn test_script_locked_collateral_rejected() {
+        use dugite_primitives::address::EnterpriseAddress;
+
+        let script_hash = Hash28::from_bytes([0xDE; 28]);
+        let col = input(0xD0);
+        let mut utxo = UtxoSet::new();
+        // Collateral UTxO at a script-locked Enterprise address
+        utxo.insert(
+            col.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    payment: Credential::Script(script_hash),
+                    network: dugite_primitives::network::NetworkId::Mainnet,
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = make_plutus_tx(200_000, vec![col]);
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ScriptLockedCollateral { .. })),
+            "expected ScriptLockedCollateral error, got: {errors:?}"
+        );
+    }
+
+    /// A collateral input at a VKey Enterprise address must NOT produce a
+    /// `ScriptLockedCollateral` error.
+    #[test]
+    fn test_vkey_collateral_accepted() {
+        use dugite_primitives::address::EnterpriseAddress;
+
+        let vkey_hash = Hash28::from_bytes([0xEF; 28]);
+        let col = input(0xD1);
+        let mut utxo = UtxoSet::new();
+        // Collateral UTxO at a VKey Enterprise address
+        utxo.insert(
+            col.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    payment: Credential::VerificationKey(vkey_hash),
+                    network: dugite_primitives::network::NetworkId::Mainnet,
+                }),
+                value: Value::lovelace(10_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        let tx = make_plutus_tx(200_000, vec![col]);
+        let params = default_params();
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_collateral(&tx, &utxo, &params, &mut errors);
+
+        let script_locked_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::ScriptLockedCollateral { .. }))
+            .collect();
+        assert!(
+            script_locked_errors.is_empty(),
+            "expected no ScriptLockedCollateral errors, got: {script_locked_errors:?}"
         );
     }
 }
