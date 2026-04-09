@@ -580,6 +580,20 @@ pub(crate) fn convert_validation_error(
                  delegation (ConwayWdrlNotDelegatedToDRep)"
             ),
         },
+        VE::MalformedProposal { reason } => TxValidationError::ScriptFailed {
+            reason: format!("Governance proposal rejected: malformed PParamsUpdate ({reason})"),
+        },
+        VE::ExtraRedeemer { tag, index } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Extra redeemer with no matching script purpose: tag={tag}, index={index}"
+            ),
+        },
+        VE::ScriptLockedCollateral { inputs } => TxValidationError::ScriptFailed {
+            reason: format!("Collateral input(s) at script-locked addresses: {inputs:?}"),
+        },
+        VE::ExtraneousScriptWitness { hashes } => TxValidationError::ScriptFailed {
+            reason: format!("Extraneous script witness(es) not needed by transaction: {hashes:?}"),
+        },
     }
 }
 

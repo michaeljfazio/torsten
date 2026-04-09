@@ -354,6 +354,36 @@ pub enum ValidationError {
          (ConwayWdrlNotDelegatedToDRep, requires PV >= 10)"
     )]
     WdrlNotDelegatedToDRep { credential_hash: String },
+    /// Conway GOV rule: a `ParameterChange` proposal's `PParamsUpdate` is
+    /// malformed — one or more fields fail the `ppuWellFormed` check.
+    ///
+    /// Reference: Haskell `MalformedProposal` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Gov`.
+    #[error("Governance proposal rejected: malformed PParamsUpdate ({reason})")]
+    MalformedProposal { reason: String },
+    /// Alonzo UTXOW rule: a redeemer in the witness set has no matching
+    /// script purpose (spending input, minting policy, withdrawal, cert, vote).
+    ///
+    /// Reference: Haskell `ExtraRedeemers` in
+    /// `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxow`.
+    #[error("Extra redeemer with no matching script purpose: tag={tag}, index={index}")]
+    ExtraRedeemer { tag: String, index: u32 },
+    /// Alonzo UTXO rule: collateral inputs must be at VKey (non-script)
+    /// addresses. Script-locked UTxOs cannot serve as collateral.
+    /// Byron/bootstrap addresses are accepted as collateral.
+    ///
+    /// Reference: Haskell `ScriptsNotPaidUTxO` in
+    /// `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxo`.
+    #[error("Collateral input(s) at script-locked addresses (ScriptsNotPaidUTxO): {inputs:?}")]
+    ScriptLockedCollateral { inputs: Vec<String> },
+    /// Babbage/Conway UTXOW rule: one or more scripts in the transaction
+    /// witness set are not needed by any script purpose. Reference scripts
+    /// do not count as "needed" for the witness check.
+    ///
+    /// Reference: Haskell `ExtraneousScriptWitnessesUTXOW` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+    #[error("Extraneous script witness(es) not needed by transaction: {hashes:?}")]
+    ExtraneousScriptWitness { hashes: Vec<String> },
     /// Conway rule: the total byte size of all reference scripts reachable
     /// from a single transaction's inputs and reference inputs must not exceed
     /// 200 KiB (`ppMaxRefScriptSizePerTxG`).
@@ -1245,6 +1275,9 @@ pub fn validate_transaction_with_pools(
         }
     }
 
+    // ppuWellFormed check for ParameterChange proposals (Conway GOV rule)
+    conway::check_pparam_update_well_formed(params, &tx.body, &mut errors);
+
     // ------------------------------------------------------------------
     // Rules 11, 11b, 11c, 12 — Plutus-transaction-specific checks
     //
@@ -1262,9 +1295,20 @@ pub fn validate_transaction_with_pools(
         // Matches Haskell's `scriptsNeeded` check.
         collateral::check_script_redeemers(tx, utxo_set, &mut errors);
 
+        // Alonzo UTXOW: every redeemer in the witness set must map to a valid
+        // script purpose. Redeemers with no matching purpose are rejected.
+        // Matches Haskell's `hasExactSetOfRedeemers` / `ExtraRedeemers`.
+        collateral::check_extra_redeemers(tx, utxo_set, &mut errors);
+
         // Rule 12: script data hash (mkScriptIntegrity) — covers redeemers,
         // datums, cost models, and language versions.
         scripts::check_script_data_hash(tx, utxo_set, params, &mut errors);
+
+        // Babbage/Conway UTXOW: scripts in the witness set that are not
+        // needed by any script purpose are rejected as extraneous.
+        // Matches Haskell's `ExtraneousScriptWitnessesUTXOW` /
+        // `babbageMissingScripts` check.
+        scripts::check_extraneous_script_witnesses(tx, utxo_set, &mut errors);
 
         // ------------------------------------------------------------------
         // Phase-2: Execute Plutus scripts when redeemers are present.

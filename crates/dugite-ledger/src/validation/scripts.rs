@@ -713,6 +713,159 @@ pub(super) fn check_script_data_hash(
     }
 }
 
+/// Check for extraneous script witnesses (Haskell `babbageMissingScripts`).
+///
+/// `extra = witness_scripts \ (scripts_needed \ ref_scripts)`
+///
+/// Witness scripts not needed by any script purpose (after accounting for
+/// reference scripts) are reported. A script provided as a witness that is
+/// only needed via a reference script IS considered extraneous.
+pub(super) fn check_extraneous_script_witnesses(
+    tx: &Transaction,
+    utxo_set: &dyn UtxoLookup,
+    errors: &mut Vec<ValidationError>,
+) {
+    // Only check when the transaction has witness scripts.
+    let has_witness_scripts = !tx.witness_set.plutus_v1_scripts.is_empty()
+        || !tx.witness_set.plutus_v2_scripts.is_empty()
+        || !tx.witness_set.plutus_v3_scripts.is_empty();
+    if !has_witness_scripts {
+        return;
+    }
+
+    let body = &tx.body;
+
+    // 1. Witness script hashes.
+    let mut witness_hashes: HashSet<Hash28> = HashSet::new();
+    for s in &tx.witness_set.plutus_v1_scripts {
+        witness_hashes.insert(dugite_primitives::hash::blake2b_224_tagged(1, s));
+    }
+    for s in &tx.witness_set.plutus_v2_scripts {
+        witness_hashes.insert(dugite_primitives::hash::blake2b_224_tagged(2, s));
+    }
+    for s in &tx.witness_set.plutus_v3_scripts {
+        witness_hashes.insert(dugite_primitives::hash::blake2b_224_tagged(3, s));
+    }
+
+    // 2. Scripts needed (same logic as check_script_data_hash).
+    let mut scripts_needed: HashSet<Hash28> = HashSet::new();
+    // Spending inputs.
+    for input in &body.inputs {
+        if let Some(utxo) = utxo_set.lookup(input) {
+            let ab = utxo.address.to_bytes();
+            if !ab.is_empty() {
+                let t = (ab[0] >> 4) & 0x0F;
+                if matches!(t, 1 | 3 | 5 | 7) && ab.len() >= 29 {
+                    if let Ok(h) = Hash28::try_from(&ab[1..29]) {
+                        scripts_needed.insert(h);
+                    }
+                }
+            }
+        }
+    }
+    // Minting.
+    for policy_id in body.mint.keys() {
+        scripts_needed.insert(*policy_id);
+    }
+    // Withdrawals.
+    for reward_addr in body.withdrawals.keys() {
+        if reward_addr.len() >= 29 && (reward_addr[0] & 0x10) != 0 {
+            if let Ok(h) = Hash28::try_from(&reward_addr[1..29]) {
+                scripts_needed.insert(h);
+            }
+        }
+    }
+    // Certificates with script credentials.
+    use dugite_primitives::credentials::Credential as Cred;
+    for cert in &body.certificates {
+        let cred: Option<&Cred> = match cert {
+            Certificate::StakeDeregistration(c) => Some(c),
+            Certificate::StakeDelegation { credential: c, .. } => Some(c),
+            Certificate::ConwayStakeRegistration { credential: c, .. } => Some(c),
+            Certificate::ConwayStakeDeregistration { credential: c, .. } => Some(c),
+            Certificate::VoteDelegation { credential: c, .. } => Some(c),
+            Certificate::StakeVoteDelegation { credential: c, .. } => Some(c),
+            Certificate::RegStakeDeleg { credential: c, .. } => Some(c),
+            Certificate::RegStakeVoteDeleg { credential: c, .. } => Some(c),
+            Certificate::VoteRegDeleg { credential: c, .. } => Some(c),
+            Certificate::CommitteeHotAuth {
+                cold_credential: c, ..
+            } => Some(c),
+            Certificate::CommitteeColdResign {
+                cold_credential: c, ..
+            } => Some(c),
+            Certificate::RegDRep { credential: c, .. } => Some(c),
+            Certificate::UnregDRep { credential: c, .. } => Some(c),
+            Certificate::UpdateDRep { credential: c, .. } => Some(c),
+            _ => None,
+        };
+        if let Some(Cred::Script(h)) = cred {
+            scripts_needed.insert(*h);
+        }
+    }
+    // Voting procedures: DRep and CC voter script credentials.
+    for voter in body.voting_procedures.keys() {
+        let cred: Option<&Cred> = match voter {
+            Voter::DRep(c) | Voter::ConstitutionalCommittee(c) => Some(c),
+            Voter::StakePool(_) => None,
+        };
+        if let Some(Cred::Script(h)) = cred {
+            scripts_needed.insert(*h);
+        }
+    }
+    // Proposal procedures: guardrail script hashes.
+    for proposal in &body.proposal_procedures {
+        match &proposal.gov_action {
+            GovAction::ParameterChange {
+                policy_hash: Some(h),
+                ..
+            }
+            | GovAction::TreasuryWithdrawals {
+                policy_hash: Some(h),
+                ..
+            } => {
+                scripts_needed.insert(*h);
+            }
+            _ => {}
+        }
+    }
+
+    // 3. Reference script hashes (from spending inputs AND reference inputs).
+    let mut ref_script_hashes: HashSet<Hash28> = HashSet::new();
+    for input in body.inputs.iter().chain(body.reference_inputs.iter()) {
+        if let Some(utxo) = utxo_set.lookup(input) {
+            let hash = match &utxo.script_ref {
+                Some(ScriptRef::PlutusV1(b)) => {
+                    Some(dugite_primitives::hash::blake2b_224_tagged(1, b))
+                }
+                Some(ScriptRef::PlutusV2(b)) => {
+                    Some(dugite_primitives::hash::blake2b_224_tagged(2, b))
+                }
+                Some(ScriptRef::PlutusV3(b)) => {
+                    Some(dugite_primitives::hash::blake2b_224_tagged(3, b))
+                }
+                _ => None,
+            };
+            if let Some(h) = hash {
+                ref_script_hashes.insert(h);
+            }
+        }
+    }
+
+    // 4. extra = witness_hashes \ (scripts_needed \ ref_script_hashes)
+    let needed_non_refs: HashSet<&Hash28> = scripts_needed.difference(&ref_script_hashes).collect();
+    let mut extra: Vec<String> = witness_hashes
+        .iter()
+        .filter(|h| !needed_non_refs.contains(h))
+        .map(|h| h.to_hex())
+        .collect();
+
+    if !extra.is_empty() {
+        extra.sort(); // deterministic error output
+        errors.push(ValidationError::ExtraneousScriptWitness { hashes: extra });
+    }
+}
+
 /// Return `true` when the transaction has any Plutus scripts or redeemers.
 pub(super) fn has_plutus_scripts(tx: &Transaction) -> bool {
     !tx.witness_set.plutus_v1_scripts.is_empty()
@@ -1234,6 +1387,90 @@ mod tests {
             fee,
             Lovelace(expected),
             "compute_min_fee with no scripts or ex-units must equal min_fee_a*size + min_fee_b"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Extraneous script witness checks — 2 tests
+    // -----------------------------------------------------------------------
+
+    /// A Plutus V2 script in the witness set that is not referenced by any
+    /// spending input, minting policy, withdrawal, certificate, vote, or
+    /// proposal must be rejected as extraneous.
+    #[test]
+    fn test_extraneous_witness_script_rejected() {
+        // Build a dummy V2 script that is NOT needed by any script purpose.
+        let script_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02];
+        let script_hash = dugite_primitives::hash::blake2b_224_tagged(2, &script_bytes);
+
+        let mut tx = Transaction::empty_with_hash(TransactionHash::from_bytes([0xAA; 32]));
+        tx.witness_set.plutus_v2_scripts.push(script_bytes.clone());
+
+        // Spend a VKey-locked UTxO — not script-locked, so nothing is "needed".
+        let input = tx_input(0x01);
+        tx.body.inputs.push(input.clone());
+        let mut utxo_set = UtxoSet::new();
+        utxo_set.insert(input, simple_output());
+
+        let mut errors = Vec::new();
+        check_extraneous_script_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "Expected exactly one ExtraneousScriptWitness error"
+        );
+        match &errors[0] {
+            ValidationError::ExtraneousScriptWitness { hashes } => {
+                assert_eq!(hashes.len(), 1);
+                assert_eq!(hashes[0], script_hash.to_hex());
+            }
+            other => panic!("Expected ExtraneousScriptWitness, got: {other:?}"),
+        }
+    }
+
+    /// A Plutus V2 script in the witness set whose hash matches the payment
+    /// credential of a script-locked spending input must NOT be flagged as
+    /// extraneous — it is needed.
+    #[test]
+    fn test_needed_witness_script_accepted() {
+        use dugite_primitives::address::{Address, BaseAddress};
+        use dugite_primitives::credentials::Credential;
+
+        // Build a dummy V2 script.
+        let script_bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x07];
+        let script_hash = dugite_primitives::hash::blake2b_224_tagged(2, &script_bytes);
+
+        // Build a script-locked base address: Script payment + VKey stake.
+        let address = Address::Base(BaseAddress {
+            network: dugite_primitives::network::NetworkId::Testnet,
+            payment: Credential::Script(script_hash),
+            stake: Credential::VerificationKey(hash28(0xEE)),
+        });
+
+        let input = tx_input(0x02);
+        let utxo = TransactionOutput {
+            address,
+            value: Value::lovelace(2_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+
+        let mut utxo_set = UtxoSet::new();
+        utxo_set.insert(input.clone(), utxo);
+
+        let mut tx = Transaction::empty_with_hash(TransactionHash::from_bytes([0xBB; 32]));
+        tx.body.inputs.push(input);
+        tx.witness_set.plutus_v2_scripts.push(script_bytes);
+
+        let mut errors = Vec::new();
+        check_extraneous_script_witnesses(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors.is_empty(),
+            "Witness script matching a script-locked input must not be flagged as extraneous; got: {errors:?}"
         );
     }
 }
