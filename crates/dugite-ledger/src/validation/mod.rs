@@ -375,6 +375,14 @@ pub enum ValidationError {
     /// `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxo`.
     #[error("Collateral input(s) at script-locked addresses (ScriptsNotPaidUTxO): {inputs:?}")]
     ScriptLockedCollateral { inputs: Vec<String> },
+    /// Babbage/Conway UTXOW rule: one or more scripts in the transaction
+    /// witness set are not needed by any script purpose. Reference scripts
+    /// do not count as "needed" for the witness check.
+    ///
+    /// Reference: Haskell `ExtraneousScriptWitnessesUTXOW` in
+    /// `cardano-ledger-shelley:Cardano.Ledger.Shelley.Rules.Utxow`.
+    #[error("Extraneous script witness(es) not needed by transaction: {hashes:?}")]
+    ExtraneousScriptWitness { hashes: Vec<String> },
     /// Conway rule: the total byte size of all reference scripts reachable
     /// from a single transaction's inputs and reference inputs must not exceed
     /// 200 KiB (`ppMaxRefScriptSizePerTxG`).
@@ -1294,6 +1302,12 @@ pub fn validate_transaction_with_pools(
         // Rule 12: script data hash (mkScriptIntegrity) — covers redeemers,
         // datums, cost models, and language versions.
         scripts::check_script_data_hash(tx, utxo_set, params, &mut errors);
+
+        // Babbage/Conway UTXOW: scripts in the witness set that are not
+        // needed by any script purpose are rejected as extraneous.
+        // Matches Haskell's `ExtraneousScriptWitnessesUTXOW` /
+        // `babbageMissingScripts` check.
+        scripts::check_extraneous_script_witnesses(tx, utxo_set, &mut errors);
 
         // ------------------------------------------------------------------
         // Phase-2: Execute Plutus scripts when redeemers are present.

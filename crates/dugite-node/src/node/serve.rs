@@ -589,6 +589,9 @@ pub(crate) fn convert_validation_error(
         VE::ScriptLockedCollateral { inputs } => TxValidationError::ScriptFailed {
             reason: format!("Collateral input(s) at script-locked addresses: {inputs:?}"),
         },
+        VE::ExtraneousScriptWitness { hashes } => TxValidationError::ScriptFailed {
+            reason: format!("Extraneous script witness(es) not needed by transaction: {hashes:?}"),
+        },
     }
 }
 

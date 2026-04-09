@@ -2470,14 +2470,26 @@ mod tests {
             transaction_id: Hash32::from_bytes([2u8; 32]),
             index: 0,
         };
+        // The Plutus V1 script in the witness set has bytes [0x01, 0x02, 0x03].
+        // Build a script-locked enterprise address whose payment credential hash
+        // equals the hash of that script so it is "needed" by the spend redeemer.
+        let plutus_script_bytes = vec![0x01u8, 0x02, 0x03];
+        let script_hash = dugite_primitives::hash::blake2b_224_tagged(1, &plutus_script_bytes);
+        let script_address = Address::Enterprise(dugite_primitives::address::EnterpriseAddress {
+            network: dugite_primitives::network::NetworkId::Mainnet,
+            payment: dugite_primitives::credentials::Credential::Script(script_hash),
+        });
         utxo_set.insert(
             input.clone(),
             TransactionOutput {
-                address: Address::Byron(ByronAddress {
-                    payload: vec![0u8; 32],
-                }),
+                address: script_address,
                 value: Value::lovelace(10_000_000),
-                datum: OutputDatum::None,
+                // Script-locked Plutus inputs must carry a datum; use inline so
+                // no datum witness in the witness set is required.
+                datum: OutputDatum::InlineDatum {
+                    data: PlutusData::Integer(0),
+                    raw_cbor: None,
+                },
                 script_ref: None,
                 is_legacy: false,
                 raw_cbor: None,
