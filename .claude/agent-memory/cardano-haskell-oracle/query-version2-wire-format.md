@@ -13,42 +13,78 @@ type: reference
 - Shelley query tags: `ouroboros-consensus-cardano/.../Shelley/Ledger/Query.hs` (lines 843-929)
 - HFC Query types: `ouroboros-consensus/.../HardFork/Combinator/Ledger/Query.hs`
 
-## Three-Level Nesting
+## Four-Level Nesting (complete MsgQuery to inner tag)
+
+### Level 0: LocalStateQuery MsgQuery message (codec)
+`array(2)[3, <query_body>]`
+MsgQuery is message tag 3 in the LSQ codec.
 
 ### Level 1: Query discriminator (queryEncodeNodeToClient)
-- tag 0, listlen 2: BlockQuery → `[2, 0, <hfc_query>]`
-- tag 1, listlen 1: GetSystemStart → `[1, 1]`
-- tag 2, listlen 1: GetChainBlockNo → `[1, 2]`
-- tag 3, listlen 1: GetChainPoint → `[1, 3]`
-- tag 4, listlen 1: DebugLedgerConfig → `[1, 4]` (V3+ only)
+This is what `encodeQuery` in the LSQ codec receives.
+- tag 0, listlen 2: BlockQuery → `array(2)[0, <hfc_query>]`
+- tag 1, listlen 1: GetSystemStart → `array(1)[1]`
+- tag 2, listlen 1: GetChainBlockNo → `array(1)[2]`
+- tag 3, listlen 1: GetChainPoint → `array(1)[3]`
+- tag 4, listlen 1: DebugLedgerConfig → `array(1)[4]` (V3+ only)
 
 ### Level 2: HFC discriminator (encodeNodeToClient for SomeBlockQuery)
-- tag 0, listlen 2: QueryIfCurrent → `[2, 0, <NS-encoded>]`
-- tag 1, listlen 3: QueryAnytime → `[3, 1, <query>, <era_index>]`
-- tag 2, listlen 2: QueryHardFork → `[2, 2, <hf_query>]`
+This is the inner `<hfc_query>` from Level 1 BlockQuery.
+- tag 0, listlen 2: QueryIfCurrent → `array(2)[0, <NS-encoded>]`
+- tag 1, listlen 3: QueryAnytime → `array(3)[1, <query>, <era_index>]`
+- tag 2, listlen 2: QueryHardFork → `array(2)[2, <hf_query>]`
 
-### Level 3: NS encoding (encodeNS)
-`[2, era_idx, <payload>]`
+### Level 3: NS encoding (encodeNS — era dispatch layer)
+`array(2)[era_idx, <shelley_query_payload>]`
 - era 0=Byron, 1=Shelley, 2=Allegra, 3=Mary, 4=Alonzo, 5=Babbage, 6=Conway, 7=Dijkstra
 
-### QueryAnytime inner payload
-- GetEraStart: `[1, 0]`
+### Level 4: Shelley inner query (encodeShelleyQuery)
+`array(N)[shelley_tag, ...]`
+- See n2c-protocol-details.md for the full tag table (0-39)
 
-### QueryHardFork inner payload
-- GetInterpreter: `[1, 0]`
-- GetCurrentEra: `[1, 1]`
+### QueryAnytime inner payload
+- GetEraStart: `array(1)[0]`
+
+### QueryHardFork inner payload (encodeQueryHardFork)
+- GetInterpreter: `array(1)[0]`
+- GetCurrentEra: `array(1)[1]`
 
 ## Golden Test Examples (verified from ouroboros-consensus golden files)
-- Conway GetCurrentPParams: `82 00 82 06 81 03` → `[0, [6, [3]]]`
-- Conway GetLedgerTip: `82 00 82 06 81 00` → `[0, [6, [0]]]`
-- Shelley GetLedgerTip: `82 00 82 01 81 00` → `[0, [1, [0]]]`
-- Byron query: `82 00 82 00 00` → `[0, [0, 0]]`
-- AnytimeByron: `83 01 81 00 00` → `[1, [0], 0]`
-- AnytimeShelley: `83 01 81 00 01` → `[1, [0], 1]`
-- HardFork GetInterpreter: `82 02 81 00` → `[2, [0]]`
 
-NOTE: These golden hex values are the HFC-level encoding ONLY (no Level 1 wrapping).
-Full MsgQuery adds `[3, <full_query>]` protocol message tag.
+### NOTE on golden files
+Golden files at `ouroboros-consensus-cardano/golden/cardano/QueryVersion2/.../Query_Conway_*`
+contain the HFC-level encoding (Level 2+), NOT including Level 0 (MsgQuery) or Level 1 (BlockQuery wrapper).
+The file content is what `encodeNodeToClient for SomeBlockQuery` produces.
+
+### Golden file bytes (HFC level, no Level 0/1 wrapper):
+- Conway GetCurrentPParams: `82 00 82 06 81 03` → CBOR tree: `[0, [6, [3]]]`
+- Conway GetLedgerTip:       `82 00 82 06 81 00` → CBOR tree: `[0, [6, [0]]]`
+- Conway GetEpochNo:         `82 00 82 06 81 01` → CBOR tree: `[0, [6, [1]]]`
+- Shelley GetLedgerTip:      `82 00 82 01 81 00` → CBOR tree: `[0, [1, [0]]]`
+- Byron query:               `82 00 82 00 00` → CBOR tree: `[0, [0, 0]]`
+- AnytimeByron:              `83 01 81 00 00` → CBOR tree: `[1, [0], 0]`
+- AnytimeShelley:            `83 01 81 00 01` → CBOR tree: `[1, [0], 1]`
+- HardFork GetInterpreter:   `82 02 81 00` → CBOR tree: `[2, [0]]`
+- HardFork GetCurrentEra:    `82 02 81 01` → CBOR tree: `[2, [1]]`
+
+### Complete MsgQuery wire bytes (Level 0 through Level 4):
+All values below are the full bytes Dugite must send for MsgQuery.
+
+**Conway era BlockQueries (via QueryIfCurrent)**:
+- GetLedgerTip:        `82 03 82 00 82 00 82 06 81 00`
+- GetEpochNo:          `82 03 82 00 82 00 82 06 81 01`
+- GetCurrentPParams:   `82 03 82 00 82 00 82 06 81 03`
+- GetGenesisConfig:    `82 03 82 00 82 00 82 06 81 0b`
+- GetGovState:         `82 03 82 00 82 00 82 06 81 18 18`  (tag=24=0x18)
+- GetAccountState:     `82 03 82 00 82 00 82 06 81 18 1d`  (tag=29=0x1d)
+
+**Top-level queries (NOT BlockQuery, no QueryIfCurrent)**:
+- GetChainBlockNo:     `82 03 81 02`
+- GetChainPoint:       `82 03 81 03`
+- GetSystemStart:      `82 03 81 01`
+
+**HardFork queries (BlockQuery wrapping, then QueryHardFork)**:
+- GetInterpreter:      `82 03 82 00 82 02 81 00`
+- GetCurrentEra:       `82 03 82 00 82 02 81 01`
 
 ## Result Wrapping Rules (MsgResult = [4, <result_encoding>])
 
