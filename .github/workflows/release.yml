@@ -28,7 +28,7 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: dugite-aarch64-linux
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact: dugite-x86_64-macos
           - os: macos-latest
@@ -87,7 +87,7 @@ jobs:
         uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
