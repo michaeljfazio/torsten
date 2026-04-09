@@ -483,7 +483,13 @@ impl LedgerState {
                     // ConwayWdrlNotDelegatedToDRep check (PV >= 10 only).
                     let vote_delegation_keys: std::collections::HashSet<
                         dugite_primitives::hash::Hash32,
-                    > = self.gov.governance.vote_delegations.keys().copied().collect();
+                    > = self
+                        .gov
+                        .governance
+                        .vote_delegations
+                        .keys()
+                        .copied()
+                        .collect();
                     let result = validate_transaction_with_pools(
                         tx,
                         &self.utxo.utxo_set,

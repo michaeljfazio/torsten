@@ -1910,7 +1910,11 @@ mod tests {
             hot_credential: hot_cred1,
         });
         assert!(
-            state.gov.governance.committee_hot_keys.contains_key(&cold_key),
+            state
+                .gov
+                .governance
+                .committee_hot_keys
+                .contains_key(&cold_key),
             "committee_hot_keys should contain cold key after CommitteeHotAuth"
         );
 
@@ -1920,7 +1924,11 @@ mod tests {
             anchor: None,
         });
         assert!(
-            state.gov.governance.committee_resigned.contains_key(&cold_key),
+            state
+                .gov
+                .governance
+                .committee_resigned
+                .contains_key(&cold_key),
             "committee_resigned should contain cold key after CommitteeColdResign"
         );
 
