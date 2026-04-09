@@ -72,6 +72,9 @@ pub struct ValidationContext {
     /// `TreasuryWithdrawals` must carry a matching `policy_hash`.  When `None`,
     /// the constitution policy-hash check is skipped.
     pub constitution_script_hash: Option<Hash28>,
+    /// DRep vote delegations — keys are stake credential hashes of accounts
+    /// that have delegated to any DRep (including AlwaysAbstain / AlwaysNoConfidence).
+    pub vote_delegations: Option<HashSet<Hash32>>,
 }
 
 impl ValidationContext {
@@ -131,6 +134,11 @@ impl ValidationContext {
 
     pub fn with_constitution_script_hash(mut self, hash: Hash28) -> Self {
         self.constitution_script_hash = Some(hash);
+        self
+    }
+
+    pub fn with_vote_delegations(mut self, delegations: HashSet<Hash32>) -> Self {
+        self.vote_delegations = Some(delegations);
         self
     }
 
@@ -324,6 +332,28 @@ pub enum ValidationError {
     /// `UTXOW` predicate "allowedSupplementalDatums ⊇ suppliedDatums".
     #[error("Extra (unreferenced) datum witness in transaction: datum hash {0}")]
     ExtraDatumWitness(String),
+    /// Alonzo UTXO rule: a script-locked spending input has no datum
+    /// (OutputDatum::None) and the locking script is PlutusV1 or PlutusV2.
+    /// PlutusV3 inputs are exempt per CIP-0069.
+    ///
+    /// Reference: Haskell `UnspendableUTxONoDatumHash` in
+    /// `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxo`.
+    #[error(
+        "Script-locked input {input} has no datum (NoDatum) and locking script is {language} \
+         (UnspendableUTxONoDatumHash — PlutusV3 exempt per CIP-0069)"
+    )]
+    UnspendableUTxONoDatumHash { input: String, language: String },
+    /// Conway LEDGER rule (PV ≥ 10): a KeyHash reward account making a
+    /// withdrawal must have an active DRep delegation (any delegation value
+    /// including AlwaysAbstain/AlwaysNoConfidence satisfies this).
+    ///
+    /// Reference: Haskell `ConwayWdrlNotDelegatedToDRep` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Ledger`.
+    #[error(
+        "Withdrawal rejected: KeyHash reward account {credential_hash} has no DRep delegation \
+         (ConwayWdrlNotDelegatedToDRep, requires PV >= 10)"
+    )]
+    WdrlNotDelegatedToDRep { credential_hash: String },
     /// Conway rule: the total byte size of all reference scripts reachable
     /// from a single transaction's inputs and reference inputs must not exceed
     /// 200 KiB (`ppMaxRefScriptSizePerTxG`).
@@ -641,6 +671,7 @@ pub fn validate_transaction(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -699,6 +730,7 @@ pub fn validate_transaction_with_context(
         context.committee_resigned.as_ref(),
         context.stake_key_deposits.as_ref(),
         context.constitution_script_hash,
+        context.vote_delegations.as_ref(),
     )
 }
 
@@ -757,6 +789,7 @@ pub fn validate_transaction_with_pools(
     committee_resigned: Option<&HashSet<Hash32>>,
     stake_key_deposits: Option<&HashMap<Hash32, u64>>,
     constitution_script_hash: Option<Hash28>,
+    vote_delegations: Option<&HashSet<Hash32>>,
 ) -> Result<(), Vec<ValidationError>> {
     trace!(
         tx_hash = %tx.hash.to_hex(),
@@ -1114,6 +1147,42 @@ pub fn validate_transaction_with_pools(
                         declared: amount.0,
                         actual: 0,
                     });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Conway LEDGER rule: ConwayWdrlNotDelegatedToDRep (PV >= 10)
+    //
+    // Every KeyHash reward account making a withdrawal must have a DRep
+    // delegation. Script-credential accounts are exempt. Any delegation
+    // value (including AlwaysAbstain/AlwaysNoConfidence) satisfies the check.
+    // Uses the certState BEFORE the current tx's certificates are applied.
+    //
+    // Reference: Haskell `validateWithdrawalsDelegated` in
+    // `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Ledger`.
+    // ------------------------------------------------------------------
+    if params.protocol_version_major >= 10 {
+        if let Some(delegations) = vote_delegations {
+            for reward_addr in tx.body.withdrawals.keys() {
+                if reward_addr.len() < 29 {
+                    continue;
+                }
+                let header = reward_addr[0];
+                // Script-credential reward accounts (header bit 4 set) are exempt
+                let is_script = (header & 0x10) != 0;
+                if is_script {
+                    continue;
+                }
+                // KeyHash credential — must have DRep delegation
+                if let Ok(cred_hash) = Hash28::try_from(&reward_addr[1..29]) {
+                    let key = cred_hash.to_hash32_padded();
+                    if !delegations.contains(&key) {
+                        errors.push(ValidationError::WdrlNotDelegatedToDRep {
+                            credential_hash: key.to_hex(),
+                        });
+                    }
                 }
             }
         }

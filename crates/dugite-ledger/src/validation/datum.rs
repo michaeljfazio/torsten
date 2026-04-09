@@ -37,10 +37,10 @@
 //! - `notAllowedSupplementalDatums` — witness datums whose hash is not in
 //!   `requiredDatums ∪ allowedSupplementalDatums`
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use dugite_primitives::credentials::Credential;
-use dugite_primitives::hash::{DatumHash, Hash32};
+use dugite_primitives::hash::{DatumHash, Hash28, Hash32};
 use dugite_primitives::transaction::{OutputDatum, Transaction};
 
 use crate::utxo::UtxoLookup;
@@ -68,6 +68,9 @@ fn hash_plutus_datum(datum: &dugite_primitives::transaction::PlutusData) -> Hash
 /// Check datum witness completeness: Rule 9c.
 ///
 /// Populates `errors` with:
+/// - [`ValidationError::UnspendableUTxONoDatumHash`] for each script-locked
+///   input with `OutputDatum::None` whose locking script is PlutusV1 or
+///   PlutusV2 (CIP-0069: PlutusV3 inputs are exempt).
 /// - [`ValidationError::MissingDatumWitness`] for each script-locked input
 ///   whose UTxO carries a `DatumHash` with no matching entry in the witness
 ///   plutus_data.
@@ -75,11 +78,17 @@ fn hash_plutus_datum(datum: &dugite_primitives::transaction::PlutusData) -> Hash
 ///   is not in the needed set (required input datums ∪ allowed supplemental
 ///   output datums).
 ///
+/// `script_versions` maps each Plutus script hash (from witness set and
+/// reference inputs) to its language version (1=V1, 2=V2, 3=V3).  This is
+/// used to distinguish V1/V2 (which require a datum) from V3 (exempt per
+/// CIP-0069).  Build it via `collateral::plutus_script_version_map`.
+///
 /// Called unconditionally from `run_phase1_rules` after input existence has
 /// been confirmed (so UTxO lookups are safe).
 pub(super) fn check_datum_witnesses(
     tx: &Transaction,
     utxo_set: &dyn UtxoLookup,
+    script_versions: &HashMap<Hash28, u8>,
     errors: &mut Vec<ValidationError>,
 ) {
     // ------------------------------------------------------------------
@@ -115,11 +124,40 @@ pub(super) fn check_datum_witnesses(
             continue;
         }
 
+        // CIP-0069 / Haskell UnspendableUTxONoDatumHash:
+        // Script-locked inputs with OutputDatum::None are only rejected when
+        // the locking script is PlutusV1 or PlutusV2.  Native scripts and
+        // PlutusV3 scripts are exempt.
+        //
+        // Mirrors Haskell:
+        //   | Just lang <- spendingPlutusScriptLanguage addr
+        //   , lang < PlutusV3 -> add to "missing datum" set
+        //
+        // `spendingPlutusScriptLanguage` returns Nothing for native scripts,
+        // so version == 0 (not found in the Plutus map) means native script —
+        // exempt from this rule.
+        if matches!(utxo.datum, OutputDatum::None) {
+            if let Some(Credential::Script(script_hash)) = utxo.address.payment_credential() {
+                let version = script_versions.get(script_hash).copied().unwrap_or(0);
+                // Only reject if the locking script IS a Plutus V1/V2 script.
+                if version > 0 && version < 3 {
+                    errors.push(ValidationError::UnspendableUTxONoDatumHash {
+                        input: input.to_string(),
+                        language: match version {
+                            1 => "PlutusV1".to_string(),
+                            2 => "PlutusV2".to_string(),
+                            _ => format!("PlutusV{version}"),
+                        },
+                    });
+                }
+                // V3 or native script: NoDatum is fine — do not add to required_datum_hashes
+            }
+            continue; // NoDatum inputs never contribute to required_datum_hashes
+        }
+
         // Only DatumHash outputs require a witness datum.
         // InlineDatum outputs embed the datum in the UTxO itself — no witness
-        // needed.  OutputDatum::None means the script either doesn't need a
-        // datum or uses the redeemer alone (e.g. minting policies executed via
-        // a spending input do not require a datum).
+        // needed.
         if let OutputDatum::DatumHash(hash) = &utxo.datum {
             required_datum_hashes.insert(*hash);
         }
@@ -353,7 +391,12 @@ mod tests {
         let tx = make_tx(vec![input], vec![], vec![], vec![datum]);
 
         let mut errors: Vec<ValidationError> = vec![];
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
 
         assert!(
             !errors
@@ -380,7 +423,12 @@ mod tests {
         let tx = make_tx(vec![input], vec![], vec![], vec![]);
 
         let mut errors: Vec<ValidationError> = vec![];
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
 
         assert!(
             errors
@@ -405,7 +453,12 @@ mod tests {
         let tx = make_tx(vec![input], vec![], vec![], vec![]);
 
         let mut errors: Vec<ValidationError> = vec![];
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
 
         assert!(
             errors.is_empty(),
@@ -425,7 +478,12 @@ mod tests {
         let tx = make_tx(vec![input], vec![], vec![], vec![]);
 
         let mut errors: Vec<ValidationError> = vec![];
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
 
         assert!(
             errors.is_empty(),
@@ -447,7 +505,12 @@ mod tests {
         let tx = make_tx(vec![input], vec![], vec![], vec![spurious_datum]);
 
         let mut errors: Vec<ValidationError> = vec![];
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
 
         assert!(
             errors
@@ -490,7 +553,12 @@ mod tests {
         let tx = make_tx(vec![input], vec![tx_output], vec![], vec![datum]);
 
         let mut errors: Vec<ValidationError> = vec![];
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
 
         assert!(
             !errors
@@ -548,7 +616,12 @@ mod tests {
         );
 
         let mut errors: Vec<ValidationError> = vec![];
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
 
         assert!(
             errors
@@ -590,7 +663,12 @@ mod tests {
         let tx = make_tx(vec![input_a, input_b], vec![], vec![], vec![datum_a]);
 
         let mut errors: Vec<ValidationError> = vec![];
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
 
         let missing: Vec<_> = errors
             .iter()
@@ -611,5 +689,97 @@ mod tests {
                 "wrong hash in MissingDatumWitness error"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9 — CIP-0069: V1 script-locked input with NoDatum → error
+    //
+    // A PlutusV1 script-locked spending input with OutputDatum::None must be
+    // rejected with UnspendableUTxONoDatumHash.  V1/V2 scripts require a datum
+    // (either DatumHash witness or InlineDatum).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_v1_script_no_datum_rejected() {
+        // Script hash for a fictional PlutusV1 script.
+        let script_hash = Hash28::from_bytes([0x11u8; 28]);
+
+        // UTxO: script-locked, OutputDatum::None.
+        let utxo_output = TransactionOutput {
+            address: Address::Base(BaseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::Script(script_hash),
+                stake: Credential::VerificationKey(Hash28::from_bytes([0x22u8; 28])),
+            }),
+            value: Value::lovelace(2_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        let (utxo_set, input) = make_utxo(utxo_output);
+
+        let tx = make_tx(vec![input], vec![], vec![], vec![]);
+
+        // script_versions: the locking script is V1.
+        let mut script_versions = std::collections::HashMap::new();
+        script_versions.insert(script_hash, 1u8);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &script_versions, &mut errors);
+
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UnspendableUTxONoDatumHash { language, .. }
+                if language == "PlutusV1"
+            )),
+            "expected UnspendableUTxONoDatumHash(PlutusV1), got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10 — CIP-0069: V3 script-locked input with NoDatum → allowed
+    //
+    // A PlutusV3 script-locked spending input with OutputDatum::None must NOT
+    // produce UnspendableUTxONoDatumHash — V3 is exempt per CIP-0069.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_v3_script_no_datum_allowed() {
+        // Script hash for a fictional PlutusV3 script.
+        let script_hash = Hash28::from_bytes([0x33u8; 28]);
+
+        // UTxO: script-locked, OutputDatum::None.
+        let utxo_output = TransactionOutput {
+            address: Address::Base(BaseAddress {
+                network: NetworkId::Testnet,
+                payment: Credential::Script(script_hash),
+                stake: Credential::VerificationKey(Hash28::from_bytes([0x44u8; 28])),
+            }),
+            value: Value::lovelace(2_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        };
+        let (utxo_set, input) = make_utxo(utxo_output);
+
+        let tx = make_tx(vec![input], vec![], vec![], vec![]);
+
+        // script_versions: the locking script is V3 — exempt from datum requirement.
+        let mut script_versions = std::collections::HashMap::new();
+        script_versions.insert(script_hash, 3u8);
+
+        let mut errors: Vec<ValidationError> = vec![];
+        check_datum_witnesses(&tx, &utxo_set, &script_versions, &mut errors);
+
+        assert!(
+            !errors.iter().any(|e| matches!(
+                e,
+                ValidationError::UnspendableUTxONoDatumHash { .. }
+            )),
+            "expected no UnspendableUTxONoDatumHash for V3 input (CIP-0069 exempt), got: {errors:?}"
+        );
     }
 }

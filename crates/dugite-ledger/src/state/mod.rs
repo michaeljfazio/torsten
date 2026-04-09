@@ -1693,6 +1693,8 @@ pub enum LedgerError {
         tx_hash: String,
         errors: String,
     },
+    #[error("Block body size mismatch: actual serialized size {actual} != header claimed size {claimed} (WrongBlockBodySizeBBODY)")]
+    WrongBlockBodySize { actual: u64, claimed: u64 },
 }
 
 #[cfg(test)]

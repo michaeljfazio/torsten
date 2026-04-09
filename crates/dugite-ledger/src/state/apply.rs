@@ -182,18 +182,33 @@ impl LedgerState {
             }
         }
 
-        // ── Step 4: Block body validation (size check) ────────────────────
+        // Block body size check (BBODY rule) — only in ValidateAll mode (not during replay).
+        // During replay, max_block_body_size may differ from when the block was
+        // originally produced.
+        //
+        // The Haskell BBODY rule checks:
+        //   bBodySize protVer (blockBody block) == block.header.body_size
+        // i.e. actual serialized body size must equal the header-claimed size.
+        //
+        // TODO(#377): Implement the full equality check (actual == claimed) once
+        // we have infrastructure to extract or re-serialize just the block body
+        // bytes from `Block::raw_cbor`. For now, `raw_cbor` stores the full
+        // block (header + body), not the body alone, so we cannot cheaply compute
+        // the exact body byte length without a CBOR re-serialization pass.
+        //
+        // Pragmatic approximation: reject blocks whose header-claimed body_size
+        // exceeds the current protocol limit (max_block_body_size). This catches
+        // obviously invalid blocks and is a hard error rather than a warning,
+        // matching the spirit of WrongBlockBodySizeBBODY.
         if mode == BlockValidationMode::ValidateAll
             && block.header.body_size > 0
             && self.epochs.protocol_params.max_block_body_size > 0
             && block.header.body_size > self.epochs.protocol_params.max_block_body_size
         {
-            warn!(
-                body_size = block.header.body_size,
-                limit = self.epochs.protocol_params.max_block_body_size,
-                slot = block.slot().0,
-                "Block body exceeds max_block_body_size"
-            );
+            return Err(LedgerError::WrongBlockBodySize {
+                actual: block.header.body_size,
+                claimed: self.epochs.protocol_params.max_block_body_size,
+            });
         }
 
         // Allocate a per-block diff to record all UTxO inserts and deletes.
@@ -464,6 +479,11 @@ impl LedgerState {
                         .constitution
                         .as_ref()
                         .and_then(|c| c.script_hash);
+                    // Build the set of vote delegation credential hashes for the
+                    // ConwayWdrlNotDelegatedToDRep check (PV >= 10 only).
+                    let vote_delegation_keys: std::collections::HashSet<
+                        dugite_primitives::hash::Hash32,
+                    > = self.gov.governance.vote_delegations.keys().copied().collect();
                     let result = validate_transaction_with_pools(
                         tx,
                         &self.utxo.utxo_set,
@@ -482,6 +502,7 @@ impl LedgerState {
                         Some(&committee_resigned_keys),
                         Some(&self.certs.stake_key_deposits),
                         constitution_script_hash,
+                        Some(&vote_delegation_keys),
                     );
                     if let Err(errors) = result {
                         let has_script_failure = errors
@@ -1147,15 +1168,19 @@ mod tests {
         assert_eq!(state.epoch, EpochNo(3));
     }
 
-    // ── Test 7: body_size exceeds max — only a warning, not an error ─────────
+    // ── Test 7: body_size exceeds max — hard error in ValidateAll mode ───────
     //
-    // `apply_block` logs a warning but deliberately does NOT return Err when
-    // `body_size > max_block_body_size`.  This mirrors the Haskell node's
-    // behaviour for confirmed on-chain blocks: if the canonical chain accepted
-    // the block, we must accept it too.
+    // The Haskell BBODY rule (WrongBlockBodySizeBBODY) requires the actual
+    // serialized body size to equal the header-claimed size.  As a pragmatic
+    // approximation until full CBOR re-serialization is available, we reject
+    // blocks whose header-claimed body_size exceeds max_block_body_size.
+    //
+    // In ValidateAll mode (new network blocks) this must be a hard error.
+    // In ApplyOnly mode (ImmutableDB replay) the check is skipped so that
+    // blocks already accepted by the network are replayed without rejection.
 
     #[test]
-    fn test_body_size_exceeds_max_warns_not_errors() {
+    fn test_apply_block_body_size_check_fires_in_validate_all_mode() {
         let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
         assert!(state.epochs.protocol_params.max_block_body_size > 0);
 
@@ -1163,10 +1188,27 @@ mod tests {
         let oversized = state.epochs.protocol_params.max_block_body_size + 1;
         let block = make_test_block(Era::Conway, 1_000, 1, 9, oversized, vec![]);
 
-        // Must succeed — the oversized body_size only triggers a log warning.
+        // Must fail with WrongBlockBodySize in ValidateAll mode.
+        let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+        assert!(
+            matches!(result, Err(LedgerError::WrongBlockBodySize { .. })),
+            "Oversized body_size must return WrongBlockBodySize in ValidateAll mode, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_block_body_size_check_skipped_in_apply_only_mode() {
+        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        assert!(state.epochs.protocol_params.max_block_body_size > 0);
+
+        // body_size is strictly greater than the protocol limit.
+        let oversized = state.epochs.protocol_params.max_block_body_size + 1;
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, oversized, vec![]);
+
+        // Must succeed in ApplyOnly mode — body_size check is skipped during replay.
         state
-            .apply_block(&block, BlockValidationMode::ValidateAll)
-            .expect("Oversized body_size must not be an error in apply_block");
+            .apply_block(&block, BlockValidationMode::ApplyOnly)
+            .expect("Oversized body_size must not be an error in ApplyOnly (replay) mode");
 
         // The block was still applied: tip advanced.
         assert_eq!(state.tip.block_number, BlockNo(1));

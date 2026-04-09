@@ -568,6 +568,18 @@ pub(crate) fn convert_validation_error(
                  proposal has {actual} (ConstitutionPolicyMismatch)"
             ),
         },
+        VE::UnspendableUTxONoDatumHash { input, language } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Script-locked input {input} has no datum hash but uses {language} \
+                 (UnspendableUTxONoDatumHash)"
+            ),
+        },
+        VE::WdrlNotDelegatedToDRep { credential_hash } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Withdrawal rejected: KeyHash reward account {credential_hash} has no DRep \
+                 delegation (ConwayWdrlNotDelegatedToDRep)"
+            ),
+        },
     }
 }
 

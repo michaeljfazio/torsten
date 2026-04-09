@@ -2322,6 +2322,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
         assert!(
             result.is_ok(),
@@ -2379,6 +2380,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
         assert!(
             result.is_ok(),
@@ -2431,6 +2433,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
         assert!(result.is_err(), "New pool reg without deposit should fail");
         let errors = result.unwrap_err();
@@ -7516,7 +7519,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors
                 .iter()
@@ -7599,7 +7607,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
@@ -7679,7 +7692,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors.is_empty(),
             "Expected no errors for inline datum UTxO, got: {errors:?}"
@@ -7761,7 +7779,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors.is_empty(),
             "Expected no errors for VKey input with DatumHash, got: {errors:?}"
@@ -7843,7 +7866,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors
                 .iter()
@@ -7944,7 +7972,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors.is_empty(),
             "Expected no errors when all needed datums present, got: {errors:?}"
@@ -8035,7 +8068,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors.is_empty(),
             "Expected no errors for supplemental output datum witness, got: {errors:?}"
@@ -8112,7 +8150,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
@@ -8308,6 +8351,7 @@ mod tests {
             None,      // committee_resigned
             None,      // stake_key_deposits
             None,      // constitution_script_hash
+            None,      // vote_delegations
         );
 
         assert!(
@@ -8374,6 +8418,7 @@ mod tests {
             None,      // committee_resigned
             None,      // stake_key_deposits
             None,      // constitution_script_hash
+            None,      // vote_delegations
         );
 
         // The tx may still fail other rules, but it must NOT fail with
@@ -8428,6 +8473,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         // Must not produce TreasuryValueMismatch regardless of the declared value.
@@ -8542,6 +8588,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         // There should be no StakeKeyHasNonZeroBalance error.
@@ -8592,6 +8639,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -8635,6 +8683,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_balance_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8687,6 +8736,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_target_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8744,6 +8794,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -8802,6 +8853,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -8859,6 +8911,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_refund_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -8946,6 +8999,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -9000,6 +9054,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9040,6 +9095,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_dup_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9093,6 +9149,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -9179,6 +9236,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -9234,6 +9292,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9274,6 +9333,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_pool_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9367,6 +9427,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -9418,6 +9479,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9450,6 +9512,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9525,6 +9588,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_drep_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9627,6 +9691,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -9708,6 +9773,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -9780,6 +9846,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_vrf_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -9851,6 +9918,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         // The only expected error is VRF dedup — all other checks should pass.
@@ -9927,6 +9995,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -10003,6 +10072,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -10076,6 +10146,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -10154,6 +10225,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -10221,6 +10293,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_net_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10316,6 +10389,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -10367,6 +10441,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_unelected = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10418,6 +10493,7 @@ mod tests {
             Some(&committee_resigned),
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -10452,6 +10528,7 @@ mod tests {
             None, // committee_resigned = None → check skipped
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_committee_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -10502,6 +10579,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         // Must not produce UnelectedCommitteeMember in pre-Conway — the check is gated.
@@ -10553,6 +10631,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -10598,6 +10677,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         // Content matches — no mismatch error.
@@ -10638,6 +10718,7 @@ mod tests {
             None, // committee_resigned
             None, // stake_key_deposits
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         // The content check is skipped when raw_cbor is absent; this should
@@ -10699,6 +10780,7 @@ mod tests {
             None,                     // committee_resigned
             None,                     // stake_key_deposits
             None,                     // constitution_script_hash
+            None,                     // vote_delegations
         );
 
         assert!(
@@ -10760,6 +10842,7 @@ mod tests {
             None,                     // committee_resigned
             None,                     // stake_key_deposits
             None,                     // constitution_script_hash
+            None,                     // vote_delegations
         );
 
         let has_wrong_network = matches!(&result, Err(errs) if errs.iter().any(|e| {
@@ -10835,6 +10918,7 @@ mod tests {
             None,                     // committee_resigned
             None,                     // stake_key_deposits
             None,                     // constitution_script_hash
+            None,                     // vote_delegations
         );
 
         // The network check fires regardless of whether other withdrawal
@@ -10908,6 +10992,7 @@ mod tests {
             None,
             None,
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -10966,6 +11051,7 @@ mod tests {
             None,
             None,
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -11026,6 +11112,7 @@ mod tests {
             None,
             None,
             None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -11066,6 +11153,7 @@ mod tests {
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
             None, None, None, None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -11095,6 +11183,7 @@ mod tests {
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
             None, None, None, None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_deposit_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -11175,6 +11264,7 @@ mod tests {
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
             None, None, None, None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         assert!(
@@ -11204,6 +11294,7 @@ mod tests {
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
             None, None, None, None, // constitution_script_hash
+            None, // vote_delegations
         );
 
         let has_deposit_err = matches!(&result, Err(errors) if errors.iter().any(|e| {
@@ -11876,6 +11967,7 @@ mod tests {
             None,
             None,
             Some(script_hash), // constitution_script_hash matches policy_hash
+            None,              // vote_delegations
         );
         // Should not have ConstitutionPolicyMismatch (may have other errors
         // like MissingWitness — that's fine, we only care about the policy check).
@@ -11914,6 +12006,7 @@ mod tests {
             None,
             None,
             Some(constitution_hash), // constitution expects 0xAB, proposal has 0xCD
+            None,                    // vote_delegations
         );
         let errors = result.expect_err("should reject mismatched policy_hash");
         assert!(
@@ -11950,6 +12043,7 @@ mod tests {
             None,
             None,
             Some(constitution_hash), // constitution requires guardrail, proposal has None
+            None,                    // vote_delegations
         );
         let errors = result.expect_err("should reject missing policy_hash");
         assert!(
@@ -11970,6 +12064,7 @@ mod tests {
         let result = validate_transaction_with_pools(
             &tx, &utxo_set, &params, 100, 300, None, None, None, None, None, None, None, None,
             None, None, None, None, // no constitution script hash
+            None, // vote_delegations
         );
         // Should not have ConstitutionPolicyMismatch.
         if let Err(errors) = result {
@@ -12013,6 +12108,7 @@ mod tests {
             None,
             None,
             Some(constitution_hash),
+            None, // vote_delegations
         );
         let errors = result.expect_err("should reject mismatched TreasuryWithdrawals policy_hash");
         assert!(
@@ -12087,6 +12183,7 @@ mod tests {
             None,
             None,
             Some(script_hash),
+            None, // vote_delegations
         );
         // The redeemer at index 2 should NOT trigger RedeemerIndexOutOfRange
         // (it may trigger other errors, but not a bounds error).
@@ -12097,6 +12194,249 @@ mod tests {
                     if tag == "Propose" && *index == 2
                 )),
                 "Propose redeemer at index 2 should be within bounds (3 proposals), got: {errors:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for ConwayWdrlNotDelegatedToDRep (PV >= 10)
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal Transaction with a single withdrawal for a KeyHash reward address.
+    ///
+    /// Reward address format:
+    ///   byte 0  = 0xE0 (mainnet KeyHash reward account)
+    ///   bytes 1-28 = credential hash
+    fn make_withdrawal_tx(
+        utxo_set: &mut crate::utxo::UtxoSet,
+        cred_bytes: [u8; 28],
+        protocol_version: u64,
+    ) -> (
+        Transaction,
+        dugite_primitives::protocol_params::ProtocolParameters,
+    ) {
+        let input = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x11u8; 32]),
+            index: 0,
+        };
+        utxo_set.insert(
+            input.clone(),
+            TransactionOutput {
+                address: Address::Byron(ByronAddress {
+                    payload: vec![0u8; 32],
+                }),
+                value: Value::lovelace(100_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Build reward address: header + 28-byte credential
+        let mut reward_addr = vec![0xE0u8]; // mainnet KeyHash reward
+        reward_addr.extend_from_slice(&cred_bytes);
+
+        let mut withdrawals = std::collections::BTreeMap::new();
+        withdrawals.insert(reward_addr, Lovelace(1_000_000));
+
+        let tx = Transaction {
+            era: dugite_primitives::era::Era::Conway,
+            hash: Hash32::ZERO,
+            body: TransactionBody {
+                inputs: vec![input],
+                outputs: vec![TransactionOutput {
+                    address: Address::Byron(ByronAddress {
+                        payload: vec![0u8; 32],
+                    }),
+                    value: Value::lovelace(98_800_000),
+                    datum: OutputDatum::None,
+                    script_ref: None,
+                    is_legacy: false,
+                    raw_cbor: None,
+                }],
+                fee: Lovelace(200_000),
+                ttl: None,
+                certificates: vec![],
+                withdrawals,
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: std::collections::BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: std::collections::BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        };
+
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = protocol_version;
+        (tx, params)
+    }
+
+    #[test]
+    fn test_wdrl_not_delegated_to_drep_pv10_rejects_undelegated() {
+        // PV=10: KeyHash reward account with no DRep delegation must be rejected.
+        let cred_bytes = [0xAAu8; 28];
+        let mut utxo_set = UtxoSet::new();
+        let (tx, params) = make_withdrawal_tx(&mut utxo_set, cred_bytes, 10);
+
+        // Empty vote_delegations — no delegation for this account
+        let vote_delegations: HashSet<Hash32> = HashSet::new();
+
+        // Also provide a matching reward account balance so withdrawal amount check passes
+        let mut reward_accounts = std::collections::HashMap::new();
+        let cred_hash = Hash28::from_bytes(cred_bytes).to_hash32_padded();
+        reward_accounts.insert(cred_hash, Lovelace(1_000_000));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None, // registered_pools
+            None, // current_treasury
+            Some(&reward_accounts),
+            None,                    // current_epoch
+            None,                    // registered_dreps
+            None,                    // registered_vrf_keys
+            None,                    // node_network
+            None,                    // committee_members
+            None,                    // committee_resigned
+            None,                    // stake_key_deposits
+            None,                    // constitution_script_hash
+            Some(&vote_delegations), // vote_delegations — empty, so should reject
+        );
+
+        assert!(result.is_err(), "Expected WdrlNotDelegatedToDRep; got Ok");
+        let errors = result.unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::WdrlNotDelegatedToDRep { .. })),
+            "Expected WdrlNotDelegatedToDRep; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_wdrl_not_delegated_to_drep_pv10_accepts_delegated() {
+        // PV=10: KeyHash reward account WITH DRep delegation must be accepted.
+        let cred_bytes = [0xBBu8; 28];
+        let mut utxo_set = UtxoSet::new();
+        let (tx, params) = make_withdrawal_tx(&mut utxo_set, cred_bytes, 10);
+
+        // vote_delegations contains the credential — delegation exists
+        let cred_hash = Hash28::from_bytes(cred_bytes).to_hash32_padded();
+        let mut vote_delegations: HashSet<Hash32> = HashSet::new();
+        vote_delegations.insert(cred_hash);
+
+        // Provide a matching reward account balance
+        let mut reward_accounts = std::collections::HashMap::new();
+        reward_accounts.insert(cred_hash, Lovelace(1_000_000));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None, // registered_pools
+            None, // current_treasury
+            Some(&reward_accounts),
+            None,                    // current_epoch
+            None,                    // registered_dreps
+            None,                    // registered_vrf_keys
+            None,                    // node_network
+            None,                    // committee_members
+            None,                    // committee_resigned
+            None,                    // stake_key_deposits
+            None,                    // constitution_script_hash
+            Some(&vote_delegations), // vote_delegations — has the credential
+        );
+
+        // Should not have WdrlNotDelegatedToDRep (may have other errors e.g. MissingWitness)
+        if let Err(errors) = result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::WdrlNotDelegatedToDRep { .. })),
+                "Should NOT have WdrlNotDelegatedToDRep when account is delegated; got: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_wdrl_not_delegated_to_drep_pv9_skips_check() {
+        // PV=9: The ConwayWdrlNotDelegatedToDRep check must NOT fire (rule only applies PV >= 10).
+        let cred_bytes = [0xCCu8; 28];
+        let mut utxo_set = UtxoSet::new();
+        let (tx, params) = make_withdrawal_tx(&mut utxo_set, cred_bytes, 9);
+
+        // Empty vote_delegations — but check should not fire at PV9
+        let vote_delegations: HashSet<Hash32> = HashSet::new();
+
+        // Provide matching reward account balance
+        let mut reward_accounts = std::collections::HashMap::new();
+        let cred_hash = Hash28::from_bytes(cred_bytes).to_hash32_padded();
+        reward_accounts.insert(cred_hash, Lovelace(1_000_000));
+
+        let result = validate_transaction_with_pools(
+            &tx,
+            &utxo_set,
+            &params,
+            100,
+            300,
+            None,
+            None, // registered_pools
+            None, // current_treasury
+            Some(&reward_accounts),
+            None,                    // current_epoch
+            None,                    // registered_dreps
+            None,                    // registered_vrf_keys
+            None,                    // node_network
+            None,                    // committee_members
+            None,                    // committee_resigned
+            None,                    // stake_key_deposits
+            None,                    // constitution_script_hash
+            Some(&vote_delegations), // vote_delegations — empty, but PV=9 so check skipped
+        );
+
+        // WdrlNotDelegatedToDRep must NOT appear at PV9
+        if let Err(errors) = result {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::WdrlNotDelegatedToDRep { .. })),
+                "WdrlNotDelegatedToDRep must NOT fire at PV=9; got: {errors:?}"
             );
         }
     }

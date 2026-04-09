@@ -175,9 +175,11 @@ impl LedgerState {
                 credential,
                 refund: _,
             } => {
-                // Conway cert tag 8: deregistration returns remaining reward balance
-                // as part of the deposit refund. Remove from delegations/rewards but
-                // keep the stake_map entry — UTxOs may still exist at this credential.
+                // Conway cert tag 8: deregistration refunds the stored deposit.
+                // Phase-1 validation enforces that the reward balance is zero
+                // (StakeKeyHasNonZeroAccountBalanceDELEG) before this point.
+                // Remove from delegations/rewards but keep the stake_map entry —
+                // UTxOs may still exist at this credential.
                 let key = credential_to_hash(credential);
                 // Use the stored deposit for correct refund when key_deposit changes.
                 let stored_deposit = self
@@ -382,8 +384,9 @@ impl LedgerState {
                 let hot_key = credential_to_hash(hot_credential);
                 let gov = Arc::make_mut(&mut self.gov.governance);
                 gov.committee_hot_keys.insert(cold_key, hot_key);
-                // Remove from resigned if re-authorizing
-                gov.committee_resigned.remove(&cold_key);
+                // NOTE: Do NOT remove from committee_resigned here. Resignation is
+                // permanent per Haskell's checkAndOverwriteCommitteeMemberState.
+                // ConwayCommitteeHasPreviouslyResigned rejects this cert at validation.
                 // Track script cold credentials for correct cold_credential_type in N2C responses.
                 if matches!(cold_credential, Credential::Script(_)) {
                     gov.script_committee_credentials.insert(cold_key);
@@ -1017,7 +1020,9 @@ impl LedgerState {
                 let hot_is_script = matches!(hot_credential, Credential::Script(_));
                 let gov = Arc::make_mut(&mut self.gov.governance);
                 gov.committee_hot_keys.insert(cold_key, hot_key);
-                gov.committee_resigned.remove(&cold_key);
+                // NOTE: Do NOT remove from committee_resigned here. Resignation is
+                // permanent per Haskell's checkAndOverwriteCommitteeMemberState.
+                // ConwayCommitteeHasPreviouslyResigned rejects this cert at validation.
                 if cold_is_script {
                     gov.script_committee_credentials.insert(cold_key);
                 }
@@ -1875,6 +1880,59 @@ mod tests {
         assert!(
             state.certs.reward_accounts.contains_key(&key),
             "reward_accounts should be populated by process_certificate_with_pointer"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16 — CommitteeHotAuth does not clear resigned state (#381)
+    // -----------------------------------------------------------------------
+
+    /// Resignation must be permanent: a subsequent CommitteeHotAuth must NOT
+    /// remove the cold key from `committee_resigned`.  Haskell's
+    /// `checkAndOverwriteCommitteeMemberState` rejects the cert outright via
+    /// `ConwayCommitteeHasPreviouslyResigned`; Dugite enforces the same
+    /// invariant at the validation layer (validation/mod.rs:1038-1066) and
+    /// must NOT undo it during state application.
+    #[test]
+    fn committee_resignation_is_permanent() {
+        let mut state = make_state();
+        let cold_cred = Credential::VerificationKey(Hash28::from_bytes([0xCC; 28]));
+        let hot_cred1 = Credential::VerificationKey(Hash28::from_bytes([0xAA; 28]));
+
+        // Put cold key in committee expiration so CommitteeHotAuth has a target.
+        let cold_key = credential_to_hash(&cold_cred);
+        let gov = Arc::make_mut(&mut state.gov.governance);
+        gov.committee_expiration.insert(cold_key, EpochNo(100));
+
+        // Authorize hot key.
+        state.process_certificate(&Certificate::CommitteeHotAuth {
+            cold_credential: cold_cred.clone(),
+            hot_credential: hot_cred1,
+        });
+        assert!(
+            state.gov.governance.committee_hot_keys.contains_key(&cold_key),
+            "committee_hot_keys should contain cold key after CommitteeHotAuth"
+        );
+
+        // Resign.
+        state.process_certificate(&Certificate::CommitteeColdResign {
+            cold_credential: cold_cred.clone(),
+            anchor: None,
+        });
+        assert!(
+            state.gov.governance.committee_resigned.contains_key(&cold_key),
+            "committee_resigned should contain cold key after CommitteeColdResign"
+        );
+
+        // Attempt re-authorization — resigned set must NOT be cleared.
+        let hot_cred2 = Credential::VerificationKey(Hash28::from_bytes([0xBB; 28]));
+        state.process_certificate(&Certificate::CommitteeHotAuth {
+            cold_credential: cold_cred.clone(),
+            hot_credential: hot_cred2,
+        });
+        assert!(
+            state.gov.governance.committee_resigned.contains_key(&cold_key),
+            "Committee resignation must be permanent — resigned set should not be cleared by CommitteeHotAuth"
         );
     }
 }
