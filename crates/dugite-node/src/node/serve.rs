@@ -578,6 +578,9 @@ pub(crate) fn convert_validation_error(
                  delegation (ConwayWdrlNotDelegatedToDRep)"
             ),
         },
+        VE::MalformedProposal { reason } => TxValidationError::ScriptFailed {
+            reason: format!("Governance proposal rejected: malformed PParamsUpdate ({reason})"),
+        },
     }
 }
 

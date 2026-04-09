@@ -11,7 +11,8 @@ use std::collections::{HashMap, HashSet};
 
 use dugite_primitives::hash::{Hash28, Hash32};
 use dugite_primitives::protocol_params::ProtocolParameters;
-use dugite_primitives::transaction::Certificate;
+use dugite_primitives::transaction::{Certificate, GovAction, TransactionBody};
+use dugite_primitives::value::Lovelace;
 
 use super::ValidationError;
 
@@ -174,6 +175,127 @@ pub(super) fn calculate_deposits_and_refunds(
     }
 
     (deposits, refunds)
+}
+
+/// Check ppuWellFormed for ParameterChange governance proposals.
+///
+/// Haskell's `ppuWellFormed` (Conway/PParams.hs) rejects proposals with
+/// zero values in specific fields. Only applies to ParameterChange actions.
+pub(super) fn check_pparam_update_well_formed(
+    params: &ProtocolParameters,
+    body: &TransactionBody,
+    errors: &mut Vec<ValidationError>,
+) {
+    if params.protocol_version_major < 9 {
+        return;
+    }
+    for proposal in &body.proposal_procedures {
+        if let GovAction::ParameterChange {
+            protocol_param_update,
+            ..
+        } = &proposal.gov_action
+        {
+            let ppu = protocol_param_update;
+            let mut reasons = Vec::new();
+
+            if ppu.max_block_body_size == Some(0) {
+                reasons.push("maxBBSize=0");
+            }
+            if ppu.max_tx_size == Some(0) {
+                reasons.push("maxTxSize=0");
+            }
+            if ppu.max_block_header_size == Some(0) {
+                reasons.push("maxBHSize=0");
+            }
+            if ppu.max_val_size == Some(0) {
+                reasons.push("maxValSize=0");
+            }
+            if ppu.collateral_percentage == Some(0) {
+                reasons.push("collateralPercentage=0");
+            }
+            if ppu.committee_term_limit == Some(0) {
+                reasons.push("committeeMaxTermLength=0");
+            }
+            if ppu.gov_action_lifetime == Some(0) {
+                reasons.push("govActionLifetime=0");
+            }
+            if matches!(ppu.pool_deposit, Some(Lovelace(0))) {
+                reasons.push("poolDeposit=0");
+            }
+            if matches!(ppu.gov_action_deposit, Some(Lovelace(0))) {
+                reasons.push("govActionDeposit=0");
+            }
+            if matches!(ppu.drep_deposit, Some(Lovelace(0))) {
+                reasons.push("dRepDeposit=0");
+            }
+            // coinsPerUTxOByte zero check — only enforced post-bootstrap (PV >= 10)
+            if params.protocol_version_major >= 10
+                && matches!(ppu.ada_per_utxo_byte, Some(Lovelace(0)))
+            {
+                reasons.push("coinsPerUTxOByte=0");
+            }
+            // nOpt zero check — PV >= 11
+            if params.protocol_version_major >= 11 && ppu.n_opt == Some(0) {
+                reasons.push("nOpt=0");
+            }
+            // Empty update check — all Option fields are None
+            let is_empty = ppu.min_fee_a.is_none()
+                && ppu.min_fee_b.is_none()
+                && ppu.max_block_body_size.is_none()
+                && ppu.max_tx_size.is_none()
+                && ppu.max_block_header_size.is_none()
+                && ppu.key_deposit.is_none()
+                && ppu.pool_deposit.is_none()
+                && ppu.e_max.is_none()
+                && ppu.n_opt.is_none()
+                && ppu.a0.is_none()
+                && ppu.rho.is_none()
+                && ppu.tau.is_none()
+                && ppu.min_pool_cost.is_none()
+                && ppu.ada_per_utxo_byte.is_none()
+                && ppu.cost_models.is_none()
+                && ppu.execution_costs.is_none()
+                && ppu.max_tx_ex_units.is_none()
+                && ppu.max_block_ex_units.is_none()
+                && ppu.max_val_size.is_none()
+                && ppu.collateral_percentage.is_none()
+                && ppu.max_collateral_inputs.is_none()
+                && ppu.min_fee_ref_script_cost_per_byte.is_none()
+                && ppu.d.is_none()
+                && ppu.protocol_version_major.is_none()
+                && ppu.protocol_version_minor.is_none()
+                && ppu.drep_deposit.is_none()
+                && ppu.gov_action_deposit.is_none()
+                && ppu.gov_action_lifetime.is_none()
+                && ppu.dvt_pp_network_group.is_none()
+                && ppu.dvt_pp_economic_group.is_none()
+                && ppu.dvt_pp_technical_group.is_none()
+                && ppu.dvt_pp_gov_group.is_none()
+                && ppu.dvt_hard_fork.is_none()
+                && ppu.dvt_no_confidence.is_none()
+                && ppu.dvt_committee_normal.is_none()
+                && ppu.dvt_committee_no_confidence.is_none()
+                && ppu.dvt_constitution.is_none()
+                && ppu.dvt_treasury_withdrawal.is_none()
+                && ppu.pvt_motion_no_confidence.is_none()
+                && ppu.pvt_committee_normal.is_none()
+                && ppu.pvt_committee_no_confidence.is_none()
+                && ppu.pvt_hard_fork.is_none()
+                && ppu.pvt_pp_security_group.is_none()
+                && ppu.min_committee_size.is_none()
+                && ppu.committee_term_limit.is_none()
+                && ppu.drep_activity.is_none();
+            if is_empty {
+                reasons.push("empty PParamsUpdate");
+            }
+
+            if !reasons.is_empty() {
+                errors.push(ValidationError::MalformedProposal {
+                    reason: reasons.join(", "),
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -610,6 +732,162 @@ mod tests {
             "ConwayStakeDeregistration refund must use the inline cert amount, \
              not the current key_deposit ({}) or deposit map",
             params.key_deposit.0
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // check_pparam_update_well_formed — zero maxTxSize rejected
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_pparam_update_zero_max_tx_size_rejected() {
+        let params = {
+            let mut p = ProtocolParameters::mainnet_defaults();
+            p.protocol_version_major = 9;
+            p
+        };
+        let body = make_body_full(
+            vec![],
+            BTreeMap::new(),
+            vec![ProposalProcedure {
+                deposit: Lovelace(0),
+                return_addr: vec![0xe0; 29],
+                gov_action: GovAction::ParameterChange {
+                    prev_action_id: None,
+                    protocol_param_update: Box::new(
+                        dugite_primitives::transaction::ProtocolParamUpdate {
+                            max_tx_size: Some(0),
+                            ..Default::default()
+                        },
+                    ),
+                    policy_hash: None,
+                },
+                anchor: Anchor {
+                    url: String::new(),
+                    data_hash: Hash32::from_bytes([0u8; 32]),
+                },
+            }],
+        );
+        let mut errors = Vec::new();
+        check_pparam_update_well_formed(&params, &body, &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors[0], ValidationError::MalformedProposal { reason } if reason.contains("maxTxSize=0")),
+            "Expected MalformedProposal with maxTxSize=0, got: {:?}",
+            errors
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // check_pparam_update_well_formed — valid nonzero field accepted
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_pparam_update_valid_nonzero_accepted() {
+        let params = {
+            let mut p = ProtocolParameters::mainnet_defaults();
+            p.protocol_version_major = 9;
+            p
+        };
+        let body = make_body_full(
+            vec![],
+            BTreeMap::new(),
+            vec![ProposalProcedure {
+                deposit: Lovelace(0),
+                return_addr: vec![0xe0; 29],
+                gov_action: GovAction::ParameterChange {
+                    prev_action_id: None,
+                    protocol_param_update: Box::new(
+                        dugite_primitives::transaction::ProtocolParamUpdate {
+                            max_tx_size: Some(16384),
+                            ..Default::default()
+                        },
+                    ),
+                    policy_hash: None,
+                },
+                anchor: Anchor {
+                    url: String::new(),
+                    data_hash: Hash32::from_bytes([0u8; 32]),
+                },
+            }],
+        );
+        let mut errors = Vec::new();
+        check_pparam_update_well_formed(&params, &body, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "Valid nonzero max_tx_size should not trigger MalformedProposal, got: {:?}",
+            errors
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // check_pparam_update_well_formed — empty PParamsUpdate rejected
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_pparam_update_empty_rejected() {
+        let params = {
+            let mut p = ProtocolParameters::mainnet_defaults();
+            p.protocol_version_major = 9;
+            p
+        };
+        let body = make_body_full(
+            vec![],
+            BTreeMap::new(),
+            vec![ProposalProcedure {
+                deposit: Lovelace(0),
+                return_addr: vec![0xe0; 29],
+                gov_action: GovAction::ParameterChange {
+                    prev_action_id: None,
+                    protocol_param_update: Box::default(),
+                    policy_hash: None,
+                },
+                anchor: Anchor {
+                    url: String::new(),
+                    data_hash: Hash32::from_bytes([0u8; 32]),
+                },
+            }],
+        );
+        let mut errors = Vec::new();
+        check_pparam_update_well_formed(&params, &body, &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors[0], ValidationError::MalformedProposal { reason } if reason.contains("empty")),
+            "Expected MalformedProposal with 'empty', got: {:?}",
+            errors
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // check_pparam_update_well_formed — non-ParameterChange proposal skipped
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_pparam_update_non_parameter_change_skipped() {
+        let params = {
+            let mut p = ProtocolParameters::mainnet_defaults();
+            p.protocol_version_major = 9;
+            p
+        };
+        let body = make_body_full(
+            vec![],
+            BTreeMap::new(),
+            vec![ProposalProcedure {
+                deposit: Lovelace(0),
+                return_addr: vec![0xe0; 29],
+                gov_action: GovAction::InfoAction,
+                anchor: Anchor {
+                    url: String::new(),
+                    data_hash: Hash32::from_bytes([0u8; 32]),
+                },
+            }],
+        );
+        let mut errors = Vec::new();
+        check_pparam_update_well_formed(&params, &body, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "Non-ParameterChange proposals should not trigger ppuWellFormed check, got: {:?}",
+            errors
         );
     }
 

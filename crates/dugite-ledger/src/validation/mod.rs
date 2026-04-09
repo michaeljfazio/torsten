@@ -353,6 +353,13 @@ pub enum ValidationError {
          (ConwayWdrlNotDelegatedToDRep, requires PV >= 10)"
     )]
     WdrlNotDelegatedToDRep { credential_hash: String },
+    /// Conway GOV rule: a `ParameterChange` proposal's `PParamsUpdate` is
+    /// malformed — one or more fields fail the `ppuWellFormed` check.
+    ///
+    /// Reference: Haskell `MalformedProposal` in
+    /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Gov`.
+    #[error("Governance proposal rejected: malformed PParamsUpdate ({reason})")]
+    MalformedProposal { reason: String },
     /// Conway rule: the total byte size of all reference scripts reachable
     /// from a single transaction's inputs and reference inputs must not exceed
     /// 200 KiB (`ppMaxRefScriptSizePerTxG`).
@@ -1243,6 +1250,9 @@ pub fn validate_transaction_with_pools(
             }
         }
     }
+
+    // ppuWellFormed check for ParameterChange proposals (Conway GOV rule)
+    conway::check_pparam_update_well_formed(params, &tx.body, &mut errors);
 
     // ------------------------------------------------------------------
     // Rules 11, 11b, 11c, 12 — Plutus-transaction-specific checks
