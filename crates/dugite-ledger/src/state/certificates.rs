@@ -166,9 +166,11 @@ impl LedgerState {
                 credential,
                 refund: _,
             } => {
-                // Conway cert tag 8: deregistration returns remaining reward balance
-                // as part of the deposit refund. Remove from delegations/rewards but
-                // keep the stake_map entry — UTxOs may still exist at this credential.
+                // Conway cert tag 8: deregistration refunds the stored deposit.
+                // Phase-1 validation enforces that the reward balance is zero
+                // (StakeKeyHasNonZeroAccountBalanceDELEG) before this point.
+                // Remove from delegations/rewards but keep the stake_map entry —
+                // UTxOs may still exist at this credential.
                 let key = credential_to_hash(credential);
                 // Use the stored deposit for correct refund when key_deposit changes.
                 let stored_deposit = self
