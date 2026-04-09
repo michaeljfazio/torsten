@@ -937,7 +937,8 @@ pub(super) fn run_phase1_rules(
     //     input or output → ExtraDatumWitness
     // ------------------------------------------------------------------
     if errors.is_empty() {
-        super::datum::check_datum_witnesses(tx, utxo_set, errors);
+        let script_versions = super::collateral::plutus_script_version_map(tx, utxo_set);
+        super::datum::check_datum_witnesses(tx, utxo_set, &script_versions, errors);
     }
 
     // ------------------------------------------------------------------

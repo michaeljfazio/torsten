@@ -566,6 +566,12 @@ pub(crate) fn convert_validation_error(
                  proposal has {actual} (ConstitutionPolicyMismatch)"
             ),
         },
+        VE::UnspendableUTxONoDatumHash { input, language } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Script-locked input {input} has no datum hash but uses {language} \
+                 (UnspendableUTxONoDatumHash)"
+            ),
+        },
     }
 }
 

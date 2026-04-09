@@ -7516,7 +7516,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors
                 .iter()
@@ -7599,7 +7604,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
@@ -7679,7 +7689,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors.is_empty(),
             "Expected no errors for inline datum UTxO, got: {errors:?}"
@@ -7761,7 +7776,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors.is_empty(),
             "Expected no errors for VKey input with DatumHash, got: {errors:?}"
@@ -7843,7 +7863,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors
                 .iter()
@@ -7944,7 +7969,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors.is_empty(),
             "Expected no errors when all needed datums present, got: {errors:?}"
@@ -8035,7 +8065,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(
             errors.is_empty(),
             "Expected no errors for supplemental output datum witness, got: {errors:?}"
@@ -8112,7 +8147,12 @@ mod tests {
         };
 
         let mut errors = Vec::new();
-        check_datum_witnesses(&tx, &utxo_set, &mut errors);
+        check_datum_witnesses(
+            &tx,
+            &utxo_set,
+            &std::collections::HashMap::new(),
+            &mut errors,
+        );
         assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 

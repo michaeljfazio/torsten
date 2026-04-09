@@ -323,6 +323,17 @@ pub enum ValidationError {
     /// `UTXOW` predicate "allowedSupplementalDatums ⊇ suppliedDatums".
     #[error("Extra (unreferenced) datum witness in transaction: datum hash {0}")]
     ExtraDatumWitness(String),
+    /// Alonzo UTXO rule: a script-locked spending input has no datum
+    /// (OutputDatum::None) and the locking script is PlutusV1 or PlutusV2.
+    /// PlutusV3 inputs are exempt per CIP-0069.
+    ///
+    /// Reference: Haskell `UnspendableUTxONoDatumHash` in
+    /// `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxo`.
+    #[error(
+        "Script-locked input {input} has no datum (NoDatum) and locking script is {language} \
+         (UnspendableUTxONoDatumHash — PlutusV3 exempt per CIP-0069)"
+    )]
+    UnspendableUTxONoDatumHash { input: String, language: String },
     /// Conway rule: the total byte size of all reference scripts reachable
     /// from a single transaction's inputs and reference inputs must not exceed
     /// 200 KiB (`ppMaxRefScriptSizePerTxG`).
