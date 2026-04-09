@@ -50,27 +50,6 @@ impl LedgerState {
         let bprev_block_count = self.epoch_block_count;
         let bprev_blocks_by_pool = Arc::clone(&self.epoch_blocks_by_pool);
 
-        // Step 0: Flush pending treasury donations accumulated during the epoch.
-        //
-        // In Haskell, `UTxOState.utxosDonation` (collected from `txDonation` fields
-        // in each transaction) is transferred into the treasury as part of the
-        // NEWEPOCH rule before reward computation (Haskell's `applyRUpd` receives
-        // the post-donation treasury balance).
-        //
-        // We buffer donations in `pending_donations` during block application and
-        // drain them here so the donation ADA is visible to reward-pot calculations
-        // for this epoch boundary — matching Haskell's ordering exactly.
-        if self.pending_donations.0 > 0 {
-            let flushed = self.pending_donations;
-            self.treasury.0 = self.treasury.0.saturating_add(flushed.0);
-            self.pending_donations = Lovelace(0);
-            debug!(
-                epoch = new_epoch.0,
-                donations_lovelace = flushed.0,
-                "Flushed pending treasury donations to treasury at epoch boundary"
-            );
-        }
-
         // Step 1: Apply any pending reward update (backward compat for old snapshots).
         self.apply_pending_reward_update();
 
@@ -718,6 +697,26 @@ impl LedgerState {
             self.total_stake_key_deposits = obl_stake;
         }
 
+        // Step 9 (Haskell EPOCH rule): Flush pending treasury donations.
+        //
+        // In Haskell, `utxosDonation` (collected from `txDonation` fields during
+        // block application) is added to the treasury AFTER governance enactment
+        // has subtracted enacted treasury withdrawals.  Moving this flush here
+        // ensures treasury conservation invariants hold: withdrawal subtraction
+        // sees only the pre-donation balance, then donations are credited.
+        //
+        // Reference: Conway.Rules.Epoch, step ordering in the EPOCH STS rule.
+        if self.pending_donations.0 > 0 {
+            let flushed = self.pending_donations;
+            self.treasury.0 = self.treasury.0.saturating_add(flushed.0);
+            self.pending_donations = Lovelace(0);
+            debug!(
+                epoch = new_epoch.0,
+                donations_lovelace = flushed.0,
+                "Flushed pending treasury donations to treasury (Step 9, after governance enactment)"
+            );
+        }
+
         // Compute new epoch nonce per Haskell TICKN rule:
         //
         //   TRC (TicknEnv extraEntropy ηc ηph, TicknState _ ηh, newEpoch)
@@ -1171,10 +1170,10 @@ mod tests {
         );
     }
 
-    // ── Test 2: Pending donations flushed before RUPD ────────────────────────
+    // ── Test 2: Pending donations flushed at epoch boundary ──────────────────
 
     /// Treasury donations buffered during the epoch are flushed into the
-    /// treasury at the epoch boundary, before any reward computation.
+    /// treasury at the epoch boundary (Step 9, after governance enactment).
     #[test]
     fn test_donations_flushed_before_rewards() {
         let mut state = new_state();
@@ -1778,6 +1777,43 @@ mod tests {
         assert!(
             !state.needs_stake_rebuild,
             "needs_stake_rebuild must be cleared after the rebuild"
+        );
+    }
+
+    // ── Test 15: Donations flushed after governance enactment (Step 9) ───────
+
+    /// `pending_donations` must be zero after the epoch transition and the full
+    /// donation amount must appear in the treasury.  The flush happens at Step 9
+    /// (Haskell EPOCH rule) — AFTER `ratify_proposals()` and AFTER the
+    /// `totalObligation` recalculation, not at Step 0 before SNAP.
+    ///
+    /// This guards against a regression where donations were flushed before
+    /// governance enactment, inflating the treasury balance that enacted treasury
+    /// withdrawals would be subtracted from.
+    #[test]
+    fn test_donations_flushed_after_governance_enactment() {
+        let mut state = new_state();
+
+        let donation = Lovelace(5_000_000); // 5 ADA
+        state.pending_donations = donation;
+        let treasury_before = state.treasury;
+
+        state.process_epoch_transition(EpochNo(1));
+
+        // After the transition the donation must have landed in the treasury.
+        assert!(
+            state.treasury.0 >= treasury_before.0 + donation.0,
+            "treasury must include the donation (treasury_before={}, treasury_after={}, donation={})",
+            treasury_before.0,
+            state.treasury.0,
+            donation.0
+        );
+
+        // pending_donations must be cleared — no leftover.
+        assert_eq!(
+            state.pending_donations,
+            Lovelace(0),
+            "pending_donations must be zero after epoch transition"
         );
     }
 }
