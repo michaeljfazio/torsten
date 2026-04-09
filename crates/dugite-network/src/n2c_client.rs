@@ -320,7 +320,7 @@ impl N2CClient {
         let mut enc = minicbor::Encoder::new(&mut inner);
         enc.array(2).map_err(cbor_err)?;
         enc.u32(15).map_err(cbor_err)?; // GetUTxOByTxIn
-        // tag(258) Set<TxIn> where TxIn = [tx_hash, output_index]
+                                        // tag(258) Set<TxIn> where TxIn = [tx_hash, output_index]
         enc.tag(minicbor::data::Tag::new(258)).map_err(cbor_err)?;
         enc.array(inputs.len() as u64).map_err(cbor_err)?;
         for (tx_hash, index) in inputs {
@@ -836,16 +836,46 @@ fn parse_tip_result(payload: &[u8]) -> Result<TipResult, NetworkError> {
     strip_msg_result(&mut dec)?;
     strip_hfc_wrapper(&mut dec)?;
 
-    // Wire format: [[slot, hash], block_no]
-    let _ = dec.array();
-    let _ = dec.array();
-    let slot = dec
+    // Haskell `Tip` CBOR encoding (ouroboros-network):
+    //   TipGenesis  = [0, null]
+    //   Tip sl h bn = [[1, [sl, h]], bn]   -- discriminated BlockPoint form
+    //
+    // Dugite's own server sends the older compact form:
+    //   [[slot, hash], block_no]           -- no discriminator
+    //
+    // We detect which format we're in by checking whether the element
+    // following the first integer in the inner (Point) array is an array
+    // (Haskell form) or bytes (compact form).
+    let _ = dec.array(); // outer Tip array
+    let _ = dec.array(); // Point array: either [disc, [sl, h]] or [sl, h]
+
+    let first = dec
         .u64()
-        .map_err(|e| protocol_err(format!("bad slot: {e}")))?;
-    let hash = dec
-        .bytes()
-        .map_err(|e| protocol_err(format!("bad hash: {e}")))?
-        .to_vec();
+        .map_err(|e| protocol_err(format!("bad tip first field: {e}")))?;
+
+    let (slot, hash) = match dec.datatype().unwrap_or(minicbor::data::Type::Undefined) {
+        minicbor::data::Type::Array => {
+            // Haskell form: first = discriminator (1), next = [slot, hash]
+            let _ = dec.array();
+            let slot = dec
+                .u64()
+                .map_err(|e| protocol_err(format!("bad slot: {e}")))?;
+            let hash = dec
+                .bytes()
+                .map_err(|e| protocol_err(format!("bad hash: {e}")))?
+                .to_vec();
+            (slot, hash)
+        }
+        _ => {
+            // Compact form: first = slot, next = hash bytes
+            let hash = dec
+                .bytes()
+                .map_err(|e| protocol_err(format!("bad hash: {e}")))?
+                .to_vec();
+            (first, hash)
+        }
+    };
+
     let block_no = dec
         .u64()
         .map_err(|e| protocol_err(format!("bad block_no: {e}")))?;
@@ -1468,5 +1498,4 @@ mod tests {
         let s = utctime_to_iso8601(2022, 298, 0);
         assert_eq!(s, "2022-10-25T00:00:00Z");
     }
-
 }
