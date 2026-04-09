@@ -220,12 +220,17 @@ impl N2CClient {
         Ok(era)
     }
 
-    /// Query the system start time (`GetEraStart` -- QueryAnytime sub-tag 0).
+    /// Query the system start time (`GetSystemStart` -- top-level query tag 1).
     ///
-    /// Wire format: `MsgQuery [3, [1, [0]]]` — QueryAnytime, GetEraStart.
+    /// Wire format: `MsgQuery [3, [1]]` — top-level GetSystemStart, no BlockQuery wrapper.
     /// Returns an ISO-8601 UTC string, e.g. `"2022-10-25T00:00:00Z"`.
     pub async fn query_system_start(&mut self) -> Result<String, NetworkError> {
-        let payload = encode_anytime_query(0)?; // sub-tag 0 = GetEraStart
+        let mut payload = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut payload);
+        enc.array(2).map_err(cbor_err)?;
+        enc.u32(3).map_err(cbor_err)?; // MsgQuery
+        enc.array(1).map_err(cbor_err)?;
+        enc.u32(1).map_err(cbor_err)?; // GetSystemStart (top-level tag 1)
         self.send_query(payload).await?;
         let resp = self.recv_query().await?;
 
@@ -252,13 +257,39 @@ impl N2CClient {
         Ok(utctime_to_iso8601(year, day_of_year, pico_of_day))
     }
 
-    /// Query the chain block number (`GetChainBlockNo` -- Shelley query tag 2).
+    /// Query the chain block number (`GetChainBlockNo` -- top-level query tag 2).
     ///
-    /// Note: Despite being conceptually top-level, this is encoded as a
-    /// Shelley BlockQuery tag 2 for Dugite compatibility.
+    /// Wire format: `MsgQuery [3, [2]]` — top-level query, no BlockQuery/QueryIfCurrent wrapper.
+    /// Returns the current block number, or 0 if at chain Origin.
     pub async fn query_block_no(&mut self) -> Result<u64, NetworkError> {
-        let result = self.send_shelley_query(2).await?;
-        parse_u64_result(&result)
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).map_err(cbor_err)?;
+        enc.u32(3).map_err(cbor_err)?; // MsgQuery
+        enc.array(1).map_err(cbor_err)?;
+        enc.u32(2).map_err(cbor_err)?; // GetChainBlockNo (top-level tag 2)
+        self.send_query(buf).await?;
+        let result = self.recv_query().await?;
+        // Response: MsgResult [4, WithOrigin BlockNo]
+        // WithOrigin: Origin = word(0), At n = array(2)[1, n]
+        let mut dec = minicbor::Decoder::new(&result);
+        strip_msg_result(&mut dec)?;
+        match dec.datatype().unwrap_or(minicbor::data::Type::Undefined) {
+            minicbor::data::Type::U8
+            | minicbor::data::Type::U16
+            | minicbor::data::Type::U32
+            | minicbor::data::Type::U64 => {
+                // Origin encoded as bare word(0)
+                Ok(dec.u64().unwrap_or(0))
+            }
+            _ => {
+                // At n encoded as array(2)[1, n]
+                let _ = dec.array();
+                let _disc = dec.u64().unwrap_or(0);
+                dec.u64()
+                    .map_err(|e| protocol_err(format!("bad block_no: {e}")))
+            }
+        }
     }
 
     /// Query protocol parameters (`GetCurrentPParams` -- Shelley query tag 3).
@@ -284,14 +315,11 @@ impl N2CClient {
         &mut self,
         inputs: &[(Vec<u8>, u32)],
     ) -> Result<Vec<u8>, NetworkError> {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
+        // Inner: array(2)[15, tag(258) Set<TxIn>]
+        let mut inner = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut inner);
         enc.array(2).map_err(cbor_err)?;
-        enc.u32(3).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(0).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(15).map_err(cbor_err)?;
+        enc.u32(15).map_err(cbor_err)?; // GetUTxOByTxIn
         // tag(258) Set<TxIn> where TxIn = [tx_hash, output_index]
         enc.tag(minicbor::data::Tag::new(258)).map_err(cbor_err)?;
         enc.array(inputs.len() as u64).map_err(cbor_err)?;
@@ -300,7 +328,7 @@ impl N2CClient {
             enc.bytes(tx_hash).map_err(cbor_err)?;
             enc.u32(*index).map_err(cbor_err)?;
         }
-
+        let buf = encode_conway_block_query(&inner)?;
         self.send_query(buf).await?;
         self.recv_query().await
     }
@@ -313,16 +341,13 @@ impl N2CClient {
         &mut self,
         addr_bytes: &[u8],
     ) -> Result<Vec<u8>, NetworkError> {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
+        // Inner: array(2)[6, addr_bytes]
+        let mut inner = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut inner);
         enc.array(2).map_err(cbor_err)?;
-        enc.u32(3).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(0).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(6).map_err(cbor_err)?;
+        enc.u32(6).map_err(cbor_err)?; // GetUTxOByAddress
         enc.bytes(addr_bytes).map_err(cbor_err)?;
-
+        let buf = encode_conway_block_query(&inner)?;
         self.send_query(buf).await?;
         self.recv_query().await
     }
@@ -378,15 +403,11 @@ impl N2CClient {
         &mut self,
         credential_hash: &[u8],
     ) -> Result<Vec<u8>, NetworkError> {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
+        // Inner: array(2)[10, tag(258) Set<StakeCredential>]
+        let mut inner = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut inner);
         enc.array(2).map_err(cbor_err)?;
-        enc.u32(3).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(0).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(10).map_err(cbor_err)?;
-
+        enc.u32(10).map_err(cbor_err)?; // GetFilteredDelegationsAndRewardAccounts
         if credential_hash.is_empty() {
             enc.tag(minicbor::data::Tag::new(258)).map_err(cbor_err)?;
             enc.array(0).map_err(cbor_err)?;
@@ -397,7 +418,7 @@ impl N2CClient {
             enc.u32(0).map_err(cbor_err)?;
             enc.bytes(credential_hash).map_err(cbor_err)?;
         }
-
+        let buf = encode_conway_block_query(&inner)?;
         self.send_query(buf).await?;
         self.recv_query().await
     }
@@ -446,20 +467,12 @@ impl N2CClient {
         self.send_shelley_query(32).await
     }
 
-    /// Query era history (`GetInterpreter` / `GetEraHistory`) via HardFork combinator.
+    /// Query era history (`GetInterpreter`) via HardFork combinator.
     ///
-    /// Wire format: `MsgQuery [3, [2, [0]]]` where 2=QueryHardFork, 0=GetInterpreter.
+    /// Wire format: `MsgQuery [3, [0, [2, [0]]]]` where 0=BlockQuery, 2=QueryHardFork, 0=GetInterpreter.
     /// Returns raw MsgResult payload bytes.
     pub async fn query_era_history(&mut self) -> Result<Vec<u8>, NetworkError> {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(3).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(2).map_err(cbor_err)?;
-        enc.array(1).map_err(cbor_err)?;
-        enc.u32(0).map_err(cbor_err)?;
-
+        let buf = encode_hard_fork_query(0)?; // 0 = GetInterpreter
         self.send_query(buf).await?;
         self.recv_query().await
     }
@@ -472,16 +485,13 @@ impl N2CClient {
     /// The `tx_body_cbor` should be the raw CBOR-encoded transaction body.
     /// Returns a CBOR-encoded evaluation result that can be parsed into script costs.
     pub async fn evaluate_tx(&mut self, tx_body_cbor: &[u8]) -> Result<Vec<u8>, NetworkError> {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
+        // Inner: array(2)[36, tx_body_cbor]
+        let mut inner = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut inner);
         enc.array(2).map_err(cbor_err)?;
-        enc.u32(3).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(0).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(36).map_err(cbor_err)?;
+        enc.u32(36).map_err(cbor_err)?; // EvaluateTx
         enc.bytes(tx_body_cbor).map_err(cbor_err)?;
-
+        let buf = encode_conway_block_query(&inner)?;
         self.send_query(buf).await?;
         self.recv_query().await
     }
@@ -707,19 +717,20 @@ impl N2CClient {
 
     // ── Internal helpers ─────────────────────────────────────────────────
 
-    /// Send a Shelley-era BlockQuery and return the raw MsgResult payload bytes.
+    /// Send a Conway-era BlockQuery and return the raw MsgResult payload bytes.
     ///
-    /// Wire format: `MsgQuery [3, [0, [shelley_tag]]]`
+    /// Wire format: `MsgQuery [3, [0, [0, [6, [shelley_tag]]]]]`
+    /// - Layer 0: MsgQuery(3)
+    /// - Layer 1: BlockQuery constructor (0)
+    /// - Layer 2: QueryIfCurrent (0)
+    /// - Layer 3: era NS index 6 (Conway)
+    /// - Layer 4: `[shelley_tag]`
     async fn send_shelley_query(&mut self, shelley_tag: u32) -> Result<Vec<u8>, NetworkError> {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(3).map_err(cbor_err)?;
-        enc.array(2).map_err(cbor_err)?;
-        enc.u32(0).map_err(cbor_err)?;
+        let mut inner = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut inner);
         enc.array(1).map_err(cbor_err)?;
         enc.u32(shelley_tag).map_err(cbor_err)?;
-
+        let buf = encode_conway_block_query(&inner)?;
         self.send_query(buf).await?;
         self.recv_query().await
     }
@@ -740,33 +751,45 @@ fn protocol_err(reason: String) -> NetworkError {
     })
 }
 
-/// Encode a QueryAnytime query: `MsgQuery [3, [1, [sub_tag]]]`.
+/// Encode a QueryHardFork query: `MsgQuery [3, [0, [2, [sub_tag]]]]`.
 ///
-/// Sub-tags: 0=GetEraStart, 2=GetCurrentEra.
-fn encode_anytime_query(sub_tag: u32) -> Result<Vec<u8>, NetworkError> {
+/// Sub-tags: 0=GetInterpreter (EraHistory), 1=GetCurrentEra.
+fn encode_hard_fork_query(sub_tag: u32) -> Result<Vec<u8>, NetworkError> {
+    // Layer 0: MsgQuery(3), Layer 1: BlockQuery(0),
+    // Layer 2: QueryHardFork(2), [sub_tag]
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
     enc.array(2).map_err(cbor_err)?;
     enc.u32(3).map_err(cbor_err)?; // MsgQuery
     enc.array(2).map_err(cbor_err)?;
-    enc.u32(1).map_err(cbor_err)?; // QueryAnytime
+    enc.u32(0).map_err(cbor_err)?; // BlockQuery wrapper
+    enc.array(2).map_err(cbor_err)?;
+    enc.u32(2).map_err(cbor_err)?; // QueryHardFork
     enc.array(1).map_err(cbor_err)?;
     enc.u32(sub_tag).map_err(cbor_err)?;
     Ok(buf)
 }
 
-/// Encode a QueryHardFork query: `MsgQuery [3, [2, [sub_tag]]]`.
+/// Encode a Conway-era BlockQuery (QueryIfCurrent) with full HFC telescope.
 ///
-/// Sub-tags: 0=GetInterpreter (EraHistory), 1=GetCurrentEra.
-fn encode_hard_fork_query(sub_tag: u32) -> Result<Vec<u8>, NetworkError> {
+/// Wire format: `MsgQuery [3, [0, [0, [6, <inner>]]]]`
+/// - Layer 0: MsgQuery(3)
+/// - Layer 1: BlockQuery constructor (0)
+/// - Layer 2: QueryIfCurrent (0)
+/// - Layer 3: era NS index 6 (Conway)
+/// - Layer 4: `inner` — pre-encoded era-specific query bytes
+fn encode_conway_block_query(inner: &[u8]) -> Result<Vec<u8>, NetworkError> {
     let mut buf = Vec::new();
     let mut enc = minicbor::Encoder::new(&mut buf);
     enc.array(2).map_err(cbor_err)?;
     enc.u32(3).map_err(cbor_err)?; // MsgQuery
     enc.array(2).map_err(cbor_err)?;
-    enc.u32(2).map_err(cbor_err)?; // QueryHardFork
-    enc.array(1).map_err(cbor_err)?;
-    enc.u32(sub_tag).map_err(cbor_err)?;
+    enc.u32(0).map_err(cbor_err)?; // BlockQuery
+    enc.array(2).map_err(cbor_err)?;
+    enc.u32(0).map_err(cbor_err)?; // QueryIfCurrent
+    enc.array(2).map_err(cbor_err)?;
+    enc.u32(6).map_err(cbor_err)?; // era 6 = Conway
+    enc.writer_mut().extend_from_slice(inner);
     Ok(buf)
 }
 
@@ -843,14 +866,6 @@ fn parse_epoch_result(payload: &[u8]) -> Result<u64, NetworkError> {
     strip_hfc_wrapper(&mut dec)?;
     dec.u64()
         .map_err(|e| protocol_err(format!("bad epoch: {e}")))
-}
-
-/// Parse a MsgResult containing a single `u64` (with HFC wrapper).
-fn parse_u64_result(payload: &[u8]) -> Result<u64, NetworkError> {
-    let mut dec = minicbor::Decoder::new(payload);
-    strip_msg_result(&mut dec)?;
-    strip_hfc_wrapper(&mut dec)?;
-    dec.u64().map_err(|e| protocol_err(format!("bad u64: {e}")))
 }
 
 /// Convert a UTCTime triple `(year, day_of_year, pico_of_day)` to ISO-8601 UTC.
@@ -1454,16 +1469,4 @@ mod tests {
         assert_eq!(s, "2022-10-25T00:00:00Z");
     }
 
-    #[test]
-    fn test_parse_u64_result() {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).unwrap();
-        enc.u32(4).unwrap(); // MsgResult tag
-        enc.array(1).unwrap(); // HFC success wrapper: array(1)[result]
-        enc.u64(999).unwrap();
-
-        let result = parse_u64_result(&buf).unwrap();
-        assert_eq!(result, 999);
-    }
 }
