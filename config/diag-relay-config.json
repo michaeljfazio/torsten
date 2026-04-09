@@ -1,0 +1,149 @@
+{
+  "AlonzoGenesisFile": "alonzo-genesis.json",
+  "AlonzoGenesisHash": "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
+  "ByronGenesisFile": "byron-genesis.json",
+  "ByronGenesisHash": "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
+  "ConsensusMode": "PraosMode",
+  "ConwayGenesisFile": "conway-genesis.json",
+  "ConwayGenesisHash": "9cc5084f02e27210eacba47af0872e3dba8946ad9460b6072d793e1d2f3987ef",
+  "ExperimentalHardForksEnabled": false,
+  "ExperimentalProtocolsEnabled": false,
+  "LastKnownBlockVersion-Alt": 0,
+  "LastKnownBlockVersion-Major": 3,
+  "LastKnownBlockVersion-Minor": 1,
+  "LedgerDB": {
+    "Backend": "V2InMemory",
+    "NumOfDiskSnapshots": 2,
+    "QueryBatchSize": 100000,
+    "SnapshotInterval": 864
+  },
+  "MinNodeVersion": "10.6.2",
+  "Protocol": "Cardano",
+  "RequiresNetworkMagic": "RequiresMagic",
+  "ShelleyGenesisFile": "shelley-genesis.json",
+  "ShelleyGenesisHash": "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+  "TestAllegraHardForkAtEpoch": 0,
+  "TestAlonzoHardForkAtEpoch": 0,
+  "TestMaryHardForkAtEpoch": 0,
+  "TestShelleyHardForkAtEpoch": 0,
+  "TraceOptionForwarder": {
+    "connQueueSize": 64,
+    "disconnQueueSize": 128,
+    "maxReconnectDelay": 30
+  },
+  "TraceOptionMetricsPrefix": "cardano.node.metrics.",
+  "TraceOptionResourceFrequency": 1000,
+  "TraceOptions": {
+    "": {
+      "backends": [
+        "EKGBackend",
+        "Forwarder",
+        "Stdout HumanFormatColoured"
+      ],
+      "detail": "DNormal",
+      "severity": "Info"
+    },
+    "BlockFetch.Client.CompletedBlockFetch": {
+      "severity": "Info"
+    },
+    "BlockFetch.Decision": {
+      "severity": "Info"
+    },
+    "ChainDB": {
+      "severity": "Info"
+    },
+    "ChainDB.AddBlockEvent": {
+      "severity": "Info"
+    },
+    "ChainDB.AddBlockEvent.AddBlockValidation": {
+      "severity": "Info"
+    },
+    "ChainDB.AddBlockEvent.AddBlockValidation.ValidCandidate": {
+      "severity": "Info"
+    },
+    "ChainDB.AddBlockEvent.AddBlockValidation.InvalidBlock": {
+      "severity": "Info"
+    },
+    "ChainDB.AddBlockEvent.AddedBlockToQueue": {
+      "severity": "Info"
+    },
+    "ChainDB.AddBlockEvent.AddedBlockToVolatileDB": {
+      "severity": "Info"
+    },
+    "ChainDB.AddBlockEvent.TrySwitchToAFork": {
+      "severity": "Info"
+    },
+    "ChainDB.CopyToImmutableDBEvent.CopiedBlockToImmutableDB": {
+      "maxFrequency": 2.0
+    },
+    "ChainDB.LedgerEvent.Forker": {
+      "severity": "Silence"
+    },
+    "ChainSync.Client": {
+      "severity": "Info"
+    },
+    "ChainSync.ServerHeader": {
+      "severity": "Info"
+    },
+    "ChainSync.ServerBlock": {
+      "severity": "Info"
+    },
+    "Forge.Loop": {
+      "severity": "Info"
+    },
+    "Forge.StateInfo": {
+      "severity": "Info"
+    },
+    "Mempool": {
+      "severity": "Info"
+    },
+    "Net.ConnectionManager.Remote": {
+      "severity": "Info"
+    },
+    "Net.InboundGovernor": {
+      "severity": "Info"
+    },
+    "Net.InboundGovernor.Remote": {
+      "severity": "Info"
+    },
+    "Net.Mux.Remote": {
+      "severity": "Info"
+    },
+    "Net.PeerSelection": {
+      "severity": "Info"
+    },
+    "Resources": {
+      "severity": "Silence"
+    },
+    "Startup.DiffusionInit": {
+      "severity": "Info"
+    }
+  },
+  "TurnOnLogMetrics": true,
+  "TurnOnLogging": true,
+  "UseTraceDispatcher": true,
+  "defaultBackends": [],
+  "defaultScribes": [],
+  "minSeverity": "Critical",
+  "options": {},
+  "setupBackends": [],
+  "setupScribes": [],
+  "PeerSharing": true,
+  "TargetNumberOfActivePeers": 20,
+  "TargetNumberOfEstablishedPeers": 30,
+  "TargetNumberOfKnownPeers": 100,
+  "TargetNumberOfRootPeers": 50,
+  "TargetNumberOfActiveBigLedgerPeers": 5,
+  "TargetNumberOfEstablishedBigLedgerPeers": 10,
+  "TargetNumberOfKnownBigLedgerPeers": 15,
+  "hasPrometheus": [
+    "127.0.0.1",
+    12798
+  ],
+  "TraceMempool": true,
+  "TraceTxInbound": true,
+  "TraceTxOutbound": true,
+  "TraceTxSubmissionProtocol": true,
+  "TraceTxSubmission2Protocol": true,
+  "TraceHandshake": true
+}

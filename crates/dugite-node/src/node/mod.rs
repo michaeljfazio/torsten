@@ -839,7 +839,7 @@ impl Node {
         // A snapshot saved at epoch N means N epoch transitions were processed
         // before the snapshot was taken, so the epoch nonce in the snapshot is
         // already reliable. We prime epoch_transitions_observed from this value
-        // so that enable_strict_verification() can set nonce_established=true
+        // so that nonce_established can be set to true
         // immediately at tip — no live epoch boundary is required after restore.
         //
         // This fixes the bug where a node restored from a snapshot and catching
@@ -1504,6 +1504,22 @@ impl Node {
         // at tip without requiring a live epoch boundary.  For a fresh start (no
         // snapshot, epoch=0) or after a full reset the value starts at 0 and
         // nonce_established remains false until the first live boundary is crossed.
+        //
+        // Enable strict verification and nonce_established based on accumulated
+        // epoch transitions. This replaces the deleted enable_strict_verification().
+        if self.epoch_transitions_observed >= 1 {
+            if !self.consensus.nonce_established {
+                info!(
+                    epoch_transitions_observed = self.epoch_transitions_observed,
+                    "Epoch nonce established — VRF nonce is reliable for leader checks"
+                );
+            }
+            self.consensus.nonce_established = true;
+        }
+        // Enable strict verification (full crypto checks for new blocks).
+        // After replay, we're at the chain tip from storage — enable strict
+        // mode so live blocks are fully validated.
+        self.consensus.set_strict_verification(true);
 
         // If running as block producer, log the pool's stake in the set snapshot
         // so operators can immediately diagnose eligibility issues.

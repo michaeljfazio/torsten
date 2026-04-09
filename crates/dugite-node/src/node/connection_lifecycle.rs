@@ -1372,9 +1372,9 @@ impl ConnectionLifecycleManager {
         addr: SocketAddr,
         conn: &mut PeerConnection,
     ) -> Result<(), PeerConnectionError> {
-        // InitiatorOnly connections have no server channels — skip server
-        // protocols entirely. This is the correct behaviour: an InitiatorOnly
-        // peer only runs client protocols and does not serve to the remote.
+        // Defensive check: all connections should have server channels now.
+        // Previously InitiatorOnly connections skipped server channels, but
+        // that prevented BPs from serving blocks to relays.
         if !conn.has_server_channels() {
             return Ok(());
         }

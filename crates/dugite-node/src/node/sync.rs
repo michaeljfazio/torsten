@@ -1569,6 +1569,17 @@ impl Node {
                 self.live_epoch_transitions =
                     self.live_epoch_transitions.saturating_add(epochs_crossed);
 
+                // Mark epoch nonce as established once we've accumulated at least
+                // one epoch transition. This enables correct VRF leader checks
+                // for block forging.
+                if self.epoch_transitions_observed >= 1 && !self.consensus.nonce_established {
+                    self.consensus.nonce_established = true;
+                    info!(
+                        epoch_transitions_observed = self.epoch_transitions_observed,
+                        "Epoch nonce established — VRF nonce is reliable for leader checks"
+                    );
+                }
+
                 // Finalize immutable chunk at epoch boundary and persist.
                 // Pass the new epoch's parameters for Haskell-compatible
                 // chunk naming and primary index generation.
@@ -1827,9 +1838,11 @@ impl Node {
     }
 
     // NOTE: chain_sync_loop and its helper methods (Node::validate_genesis_blocks,
-    // Node::enable_strict_verification, Node::extract_slot_from_wrapped_header) were
-    // deleted as part of the networking layer rewrite. The new connection lifecycle
-    // manager (connection_lifecycle.rs) handles per-peer ChainSync/BlockFetch tasks.
+    // Node::extract_slot_from_wrapped_header) were deleted as part of the networking
+    // layer rewrite. enable_strict_verification() logic now lives in Node::run()
+    // (after replay) and the epoch transition path in apply_blocks_batch().
+    // The new connection lifecycle manager (connection_lifecycle.rs) handles
+    // per-peer ChainSync/BlockFetch tasks.
     // The free function validate_genesis_blocks() is retained for tests.
     // process_forward_blocks() is retained as the block application entry point.
 

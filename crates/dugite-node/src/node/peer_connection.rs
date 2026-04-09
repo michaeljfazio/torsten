@@ -120,22 +120,22 @@ pub struct PeerConnection {
     pub(crate) peersharing_client_channel: Option<MuxChannel>,
 
     // ── Server protocol channels ──
-    // Only populated when `initiator_only=false` (duplex mode).
+    // Always populated on both outbound and inbound connections.
     // For outbound connections: subscribed on ResponderDir (remote initiates, we respond).
     // For inbound connections: subscribed on ResponderDir (remote initiates, we respond).
-    /// ChainSync server channel (protocol 2, ResponderDir). Only set in duplex mode.
+    /// ChainSync server channel (protocol 2, ResponderDir).
     pub(crate) chainsync_server_channel: Option<MuxChannel>,
 
-    /// BlockFetch server channel (protocol 3, ResponderDir). Only set in duplex mode.
+    /// BlockFetch server channel (protocol 3, ResponderDir).
     pub(crate) blockfetch_server_channel: Option<MuxChannel>,
 
-    /// TxSubmission2 server channel (protocol 4, ResponderDir). Only set in duplex mode.
+    /// TxSubmission2 server channel (protocol 4, ResponderDir).
     pub(crate) txsubmission_server_channel: Option<MuxChannel>,
 
-    /// KeepAlive server channel (protocol 8, ResponderDir). Only set in duplex mode.
+    /// KeepAlive server channel (protocol 8, ResponderDir).
     pub(crate) keepalive_server_channel: Option<MuxChannel>,
 
-    /// PeerSharing server channel (protocol 10, ResponderDir). Only set in duplex mode.
+    /// PeerSharing server channel (protocol 10, ResponderDir).
     pub(crate) peersharing_server_channel: Option<MuxChannel>,
 
     // ── Mux lifecycle ──
@@ -153,7 +153,7 @@ pub struct PeerConnection {
     hot_tasks: Vec<(JoinHandle<()>, CancellationToken)>,
 
     /// Server protocol tasks (ChainSync, BlockFetch, TxSubmission2, KeepAlive, PeerSharing responders).
-    /// Only populated when running in duplex mode (`initiator_only=false`).
+    /// Always populated — server protocols run on all connections so remote peers can pull blocks.
     server_tasks: Vec<(JoinHandle<()>, CancellationToken)>,
 }
 
@@ -169,9 +169,8 @@ pub type ProtocolTaskFn = Box<
 impl PeerConnection {
     /// Returns `true` if this connection has server-side (responder) channels.
     ///
-    /// Server channels are only present when the connection was created in
-    /// duplex mode (`initiator_only=false`). InitiatorOnly connections do
-    /// not have server channels and should not attempt to start server protocols.
+    /// Server channels are always present on both outbound and inbound connections.
+    /// This check exists for defensive correctness — it should always return true.
     pub fn has_server_channels(&self) -> bool {
         self.chainsync_server_channel.is_some()
     }
@@ -251,40 +250,40 @@ impl PeerConnection {
             DEFAULT_INGRESS_LIMIT,
         );
 
-        // In duplex mode, also subscribe ResponderDir channels for server protocols.
-        // The mux flips direction on ingress: remote's InitiatorDir messages arrive
-        // on our ResponderDir. So when the remote peer acts as client (InitiatorDir),
-        // we serve on ResponderDir.
-        let (cs_srv, bf_srv, tx_srv, ka_srv, ps_srv) = if !initiator_only {
-            let cs = mux.subscribe(
-                PROTOCOL_N2N_CHAINSYNC,
-                Direction::ResponderDir,
-                DEFAULT_INGRESS_LIMIT,
-            );
-            let bf = mux.subscribe(
-                PROTOCOL_N2N_BLOCKFETCH,
-                Direction::ResponderDir,
-                DEFAULT_INGRESS_LIMIT,
-            );
-            let tx = mux.subscribe(
-                PROTOCOL_N2N_TXSUBMISSION,
-                Direction::ResponderDir,
-                DEFAULT_INGRESS_LIMIT,
-            );
-            let ka = mux.subscribe(
-                PROTOCOL_N2N_KEEPALIVE,
-                Direction::ResponderDir,
-                DEFAULT_INGRESS_LIMIT,
-            );
-            let ps = mux.subscribe(
-                PROTOCOL_N2N_PEERSHARING,
-                Direction::ResponderDir,
-                DEFAULT_INGRESS_LIMIT,
-            );
-            (Some(cs), Some(bf), Some(tx), Some(ka), Some(ps))
-        } else {
-            (None, None, None, None, None)
-        };
+        // Always subscribe ResponderDir channels for server protocols, regardless
+        // of initiator_only. The mux flips direction on ingress: remote's InitiatorDir
+        // messages arrive on our ResponderDir. The remote peer needs to pull blocks
+        // from us via ChainSync/BlockFetch on this connection.
+        //
+        // InitiatorOnly only controls whether the node opens a TCP listener — it does
+        // NOT prevent server protocols from running on outbound connections. This
+        // matches Haskell's behavior where a BP with InitiatorOnly still serves
+        // blocks to its relay over the outbound connection.
+        let cs_srv = mux.subscribe(
+            PROTOCOL_N2N_CHAINSYNC,
+            Direction::ResponderDir,
+            DEFAULT_INGRESS_LIMIT,
+        );
+        let bf_srv = mux.subscribe(
+            PROTOCOL_N2N_BLOCKFETCH,
+            Direction::ResponderDir,
+            DEFAULT_INGRESS_LIMIT,
+        );
+        let tx_srv = mux.subscribe(
+            PROTOCOL_N2N_TXSUBMISSION,
+            Direction::ResponderDir,
+            DEFAULT_INGRESS_LIMIT,
+        );
+        let ka_srv = mux.subscribe(
+            PROTOCOL_N2N_KEEPALIVE,
+            Direction::ResponderDir,
+            DEFAULT_INGRESS_LIMIT,
+        );
+        let ps_srv = mux.subscribe(
+            PROTOCOL_N2N_PEERSHARING,
+            Direction::ResponderDir,
+            DEFAULT_INGRESS_LIMIT,
+        );
 
         // Spawn mux task — runs until bearer closes or error.
         let cancel = CancellationToken::new();
@@ -308,11 +307,11 @@ impl PeerConnection {
             txsubmission_client_channel: Some(txsubmission_client_ch),
             keepalive_client_channel: Some(keepalive_client_ch),
             peersharing_client_channel: Some(peersharing_client_ch),
-            chainsync_server_channel: cs_srv,
-            blockfetch_server_channel: bf_srv,
-            txsubmission_server_channel: tx_srv,
-            keepalive_server_channel: ka_srv,
-            peersharing_server_channel: ps_srv,
+            chainsync_server_channel: Some(cs_srv),
+            blockfetch_server_channel: Some(bf_srv),
+            txsubmission_server_channel: Some(tx_srv),
+            keepalive_server_channel: Some(ka_srv),
+            peersharing_server_channel: Some(ps_srv),
             mux_handle,
             cancel,
             warm_tasks: Vec::new(),
