@@ -412,23 +412,19 @@ fn parse_cbor_nonce(d: &mut minicbor::Decoder<'_>) -> Result<[u8; 32]> {
 fn parse_protocol_state_nonces(raw: &[u8]) -> Result<PraosNonces> {
     let mut d = minicbor::Decoder::new(raw);
 
-    // MsgResult: array(2)[tag, payload]
-    // tag 4 = MsgResult (standard), tag 6 = legacy MsgResult
+    // MsgResult: array(2)[4, payload]
+    // Haskell LocalStateQuery codec: MsgResult tag = 4 (not 6, which is MsgReAcquire)
     let _ = d.array();
     let tag = d.u32()?;
-    if tag != 4 && tag != 6 {
-        anyhow::bail!("Protocol state query failed (tag {tag})");
+    if tag != 4 {
+        anyhow::bail!("Protocol state query failed: expected MsgResult tag 4, got {tag}");
     }
 
-    // Strip HFC wrapper: array(2)[1, payload] or array(1)[payload]
+    // Strip HFC EitherMismatch success wrapper: array(1)[payload]
+    // Discriminant is array LENGTH (1=success, 2=mismatch), not a leading integer.
     let pos = d.position();
-    if let Ok(Some(2)) = d.array() {
-        let _ = d.u64(); // HFC success tag
-    } else if let Ok(Some(1)) = {
-        d.set_position(pos);
-        d.array()
-    } {
-        // single-element wrapper, consumed
+    if let Ok(Some(1)) = d.array() {
+        // Success: wrapper consumed
     } else {
         d.set_position(pos);
     }
@@ -495,22 +491,18 @@ struct PoolStakeInfo {
 fn parse_stake_for_pool(raw: &[u8], pool_id_hex: &str, use_mark: bool) -> Result<PoolStakeInfo> {
     let mut d = minicbor::Decoder::new(raw);
 
-    // MsgResult: array(2)[tag, payload]
-    // tag 4 = MsgResult (standard), tag 6 = legacy MsgResult
+    // MsgResult: array(2)[4, payload]
+    // Haskell LocalStateQuery: MsgResult tag = 4
     let _ = d.array();
     let tag = d.u32()?;
-    if tag != 4 && tag != 6 {
-        anyhow::bail!("Stake snapshot query failed (tag {tag})");
+    if tag != 4 {
+        anyhow::bail!("Stake snapshot query failed: expected MsgResult tag 4, got {tag}");
     }
 
-    // Strip HFC wrapper
+    // Strip HFC EitherMismatch success wrapper: array(1)[result]
     let pos = d.position();
-    if let Ok(Some(2)) = d.array() {
-        let _ = d.u64();
-    } else if let Ok(Some(1)) = {
-        d.set_position(pos);
-        d.array()
-    } {
+    if let Ok(Some(1)) = d.array() {
+        // Success: consumed
     } else {
         d.set_position(pos);
     }
@@ -757,19 +749,24 @@ where
 }
 
 fn print_utxo_result(raw: &[u8]) -> Result<()> {
-    // Parse MsgResult [6, [1, map{...}]]
+    // Parse MsgResult [4, [utxo_map]]
+    // Haskell LocalStateQuery codec: MsgResult = array(2)[4, payload]
+    // HFC EitherMismatch success = array(1)[result]  (discriminant is array LENGTH not a tag)
     let mut decoder = minicbor::Decoder::new(raw);
     let _ = decoder.array();
     let tag = decoder.u32().unwrap_or(999);
-    if tag != 6 {
-        anyhow::bail!("Expected MsgResult(6), got {tag}");
+    if tag != 4 {
+        anyhow::bail!("Expected MsgResult tag 4, got {tag}");
     }
 
-    // Strip HFC success wrapper: [1, result] (2-element array with success tag)
+    // Strip HFC EitherMismatch success wrapper.
+    // Haskell encodes success as array(1)[result], mismatch as array(2)[era1, era2].
+    // Discriminant is array LENGTH, not a leading integer tag.
     let pos = decoder.position();
-    if let Ok(Some(2)) = decoder.array() {
-        let _ = decoder.u64(); // consume HFC success tag (1)
+    if let Ok(Some(1)) = decoder.array() {
+        // Success: array(1) wrapper consumed, result follows directly
     } else {
+        // Not wrapped (top-level or QueryAnytime result) — reset
         decoder.set_position(pos);
     }
 
@@ -1046,22 +1043,18 @@ impl QueryCmd {
                 release_and_done(&mut client).await;
 
                 // Parse MsgResult [4, [map{pool_id => [tag(30)[num,den], vrf_hash]}]]
+                // Haskell: MsgResult tag=4, HFC success wrapper=array(1)[result]
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
 
-                // Strip HFC wrapper
+                // Strip HFC EitherMismatch success wrapper: array(1)[result]
                 let pos = decoder.position();
-                if let Ok(Some(2)) = decoder.array() {
-                    let _ = decoder.u64(); // consume HFC success tag (1)
-                } else if let Ok(Some(1)) = {
-                    decoder.set_position(pos);
-                    decoder.array()
-                } {
-                    // consumed wrapper
+                if let Ok(Some(1)) = decoder.array() {
+                    // Success: array(1) consumed, result follows
                 } else {
                     decoder.set_position(pos);
                 }
@@ -1118,21 +1111,17 @@ impl QueryCmd {
                 release_and_done(&mut client).await;
 
                 // Parse MsgResult [4, [array(2) [delegations_map, rewards_map]]]
+                // Haskell: MsgResult tag=4, HFC success wrapper=array(1)[result]
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
-                // Strip HFC success wrapper: array(1)
+                // Strip HFC EitherMismatch success wrapper: array(1)[result]
                 let pos = decoder.position();
-                if let Ok(Some(2)) = decoder.array() {
-                    let _ = decoder.u64(); // consume HFC success tag (1)
-                } else if let Ok(Some(1)) = {
-                    decoder.set_position(pos);
-                    decoder.array()
-                } {
-                    // HFC wrapper consumed
+                if let Ok(Some(1)) = decoder.array() {
+                    // Success: array(1) consumed, result follows
                 } else {
                     decoder.set_position(pos);
                 }
@@ -2831,10 +2820,9 @@ mod tests {
     fn test_parse_protocol_state_nonces() {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).ok(); // MsgResult
-        enc.u32(6).ok();
-        enc.array(2).ok(); // HFC wrapper
-        enc.u64(1).ok();
+        enc.array(2).ok(); // MsgResult [4, payload]
+        enc.u32(4).ok(); // tag 4 = MsgResult (not 6 which is MsgReAcquire)
+        enc.array(1).ok(); // HFC EitherMismatch success: array(1)[result]
         enc.array(2).ok(); // Versioned
         enc.u8(0).ok();
         enc.array(7).ok(); // PraosState
@@ -2875,10 +2863,9 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).ok(); // MsgResult
-        enc.u32(6).ok();
-        enc.array(2).ok(); // HFC
-        enc.u64(1).ok();
+        enc.array(2).ok(); // MsgResult [4, payload]
+        enc.u32(4).ok(); // tag 4 = MsgResult
+        enc.array(1).ok(); // HFC EitherMismatch success: array(1)[result]
         enc.array(4).ok(); // stake snapshot
 
         // pool map with 1 entry

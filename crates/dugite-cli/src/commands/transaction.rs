@@ -1975,19 +1975,21 @@ pub(crate) fn calculate_change(
 fn sum_utxo_value(raw: &[u8]) -> Result<(u64, MultiAssetMap)> {
     let mut decoder = minicbor::Decoder::new(raw);
 
-    // Outer: MsgResult = [6, result]
+    // Outer: MsgResult = [4, result]
+    // Haskell LocalStateQuery codec: MsgResult tag = 4
     let _ = decoder.array();
     let tag = decoder
         .u32()
         .map_err(|e| anyhow::anyhow!("Expected MsgResult tag: {e}"))?;
-    if tag != 6 {
-        bail!("Expected MsgResult(6), got {tag}");
+    if tag != 4 {
+        bail!("Expected MsgResult tag 4, got {tag}");
     }
 
-    // Strip HFC success wrapper: [1, actual_result] (2-element array with success tag)
+    // Strip HFC EitherMismatch success wrapper: array(1)[result]
+    // Haskell uses array LENGTH as discriminant (1=success, 2=mismatch), not a tag integer.
     let pos = decoder.position();
-    if let Ok(Some(2)) = decoder.array() {
-        let _ = decoder.u64(); // consume HFC success tag (1)
+    if let Ok(Some(1)) = decoder.array() {
+        // Success: array(1) consumed, UTxO map follows directly
     } else {
         decoder.set_position(pos);
     }
@@ -4411,17 +4413,17 @@ mod tests {
     /// Build a synthetic UTxO MsgResult payload for testing (ADA-only outputs).
     ///
     /// Format: [4, [Map<[tx_hash, index], {1: lovelace}>]]
+    /// Haskell wire: array(2)[4, array(1)[utxo_map]]
     fn build_utxo_msg_result(entries: &[([u8; 32], u32, u64)]) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
 
-        // [6, [1, map]]
+        // MsgResult: array(2)[4, payload]
         enc.array(2).unwrap();
-        enc.u32(6).unwrap(); // MsgResult tag
+        enc.u32(4).unwrap(); // tag 4 = MsgResult
 
-        // HFC success wrapper: [1, result]
-        enc.array(2).unwrap();
-        enc.u64(1).unwrap(); // HFC success tag
+        // HFC EitherMismatch success: array(1)[result]
+        enc.array(1).unwrap();
 
         // UTxO map
         enc.map(entries.len() as u64).unwrap();
@@ -4451,10 +4453,11 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
 
+        // MsgResult: array(2)[4, payload]
         enc.array(2).unwrap();
-        enc.u32(6).unwrap(); // MsgResult tag
-        enc.array(2).unwrap(); // HFC success wrapper
-        enc.u64(1).unwrap(); // HFC success tag
+        enc.u32(4).unwrap(); // tag 4 = MsgResult
+                             // HFC EitherMismatch success: array(1)[result]
+        enc.array(1).unwrap();
 
         enc.map(entries.len() as u64).unwrap();
         for (hash, index, lovelace, tokens) in entries {

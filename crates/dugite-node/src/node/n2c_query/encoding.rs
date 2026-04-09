@@ -2956,4 +2956,154 @@ mod tests {
         let map_len = dec.map().unwrap().unwrap();
         assert_eq!(map_len, 0, "Empty DRepDelegations should encode as map(0)");
     }
+
+    // ── N2C protocol wire-format regression tests (Haskell compatibility) ─────
+    //
+    // These tests verify that Dugite's N2C encoding matches the Haskell
+    // cardano-node wire format exactly, so that cardano-cli works against our node.
+    //
+    // Reference: ouroboros-network/protocols/lib/Ouroboros/Network/Protocol/
+    //            LocalStateQuery/Codec.hs and ouroboros-consensus HFC encoding.
+
+    /// MsgResult outer structure: array(2)[4, payload]
+    ///
+    /// Haskell: `encode (StateQuerying query) (MsgResult result) =
+    ///   encodeListLen 2 <> encodeWord 4 <> encodeResult query result`
+    #[test]
+    fn test_msg_result_outer_tag_is_4() {
+        let result = QueryResult::EpochNo(100);
+        let encoded = encode_query_result(&result);
+
+        let mut dec = Decoder::new(&encoded);
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 2, "MsgResult must be a 2-element array");
+
+        let tag = dec.u32().unwrap();
+        assert_eq!(
+            tag, 4,
+            "MsgResult tag must be 4 (not 6, which is MsgReAcquire)"
+        );
+    }
+
+    /// HFC EitherMismatch success wrapper for BlockQuery results: array(1)[result]
+    ///
+    /// Haskell `encodeEitherMismatch HardForkNodeToClientEnabled (Right a) =
+    ///   encodeListLen 1 <> enc a`
+    /// Discriminant is array LENGTH (1=success, 2=mismatch), NOT a leading integer tag.
+    #[test]
+    fn test_hfc_either_mismatch_success_is_array1() {
+        // Use a BlockQuery result (needs EitherMismatch wrapping)
+        let result = QueryResult::EpochNo(42);
+        let encoded = encode_query_result(&result);
+
+        let mut dec = Decoder::new(&encoded);
+        dec.array().unwrap(); // outer array(2)
+        dec.u32().unwrap(); // tag 4
+
+        // The HFC success wrapper must be array(1), not array(2) with a leading "1" tag
+        let wrapper_len = dec.array().unwrap().unwrap();
+        assert_eq!(
+            wrapper_len, 1,
+            "HFC EitherMismatch success wrapper must be array(1), not array(2) with tag"
+        );
+    }
+
+    /// Top-level queries (SystemStart, ChainBlockNo, ChainTip) must NOT have the
+    /// HFC EitherMismatch wrapper — Haskell encodes them as [4, result] directly.
+    #[test]
+    fn test_top_level_query_no_hfc_wrapper() {
+        let result = QueryResult::SystemStart("2022-04-01T00:00:00Z".to_string());
+        let encoded = encode_query_result(&result);
+
+        let mut dec = Decoder::new(&encoded);
+        dec.array().unwrap(); // outer array(2)
+        dec.u32().unwrap(); // tag 4
+
+        // For SystemStart, the payload must NOT start with array(1) — it starts
+        // directly with an array(3) [year, day_of_year, pico_of_day]
+        let inner_type = dec.datatype().unwrap();
+        assert_eq!(
+            inner_type,
+            minicbor::data::Type::Array,
+            "SystemStart result should be array(3) directly, no HFC wrapper"
+        );
+        let inner_len = dec.array().unwrap().unwrap();
+        assert_eq!(
+            inner_len, 3,
+            "SystemStart must be array(3)[year, day, pico]"
+        );
+    }
+
+    /// GetUTxOByAddress: empty UTxO set encodes as [4, [map(0)]]
+    ///
+    /// Verified against Haskell: empty map = CBOR a0.
+    /// Full wire bytes: 82 04 81 a0
+    ///   82 = array(2), 04 = MsgResult tag, 81 = array(1), a0 = map(0)
+    #[test]
+    fn test_utxo_empty_wire_format() {
+        let result = QueryResult::UtxoByAddress(vec![]);
+        let encoded = encode_query_result(&result);
+
+        // Verify exact bytes: 82 04 81 a0
+        assert_eq!(
+            encoded,
+            vec![0x82, 0x04, 0x81, 0xa0],
+            "Empty UTxO MsgResult must be exactly [0x82, 0x04, 0x81, 0xa0] = array(2)[4, array(1)[map(0)]]"
+        );
+    }
+
+    /// GetCurrentEpoch: epoch number 100 encodes as [4, [100]]
+    ///
+    /// Full wire bytes: 82 04 81 18 64
+    ///   82=array(2), 04=tag, 81=array(1), 18 64=uint(100)
+    #[test]
+    fn test_epoch_no_wire_format() {
+        let result = QueryResult::EpochNo(100);
+        let encoded = encode_query_result(&result);
+
+        assert_eq!(
+            encoded,
+            vec![0x82, 0x04, 0x81, 0x18, 0x64],
+            "EpochNo(100) MsgResult must be [0x82, 0x04, 0x81, 0x18, 0x64]"
+        );
+    }
+
+    /// Verify strip_wrappers helper correctly removes [4, []] envelope.
+    #[test]
+    fn test_strip_wrappers_correctness() {
+        // Build [4, [42]] — MsgResult with EpochNo(42) inner value
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(4).unwrap(); // MsgResult tag
+        enc.array(1).unwrap(); // HFC success wrapper
+        enc.u32(42).unwrap(); // inner value
+        let inner = strip_wrappers(&buf);
+
+        let mut dec = Decoder::new(&inner);
+        let val = dec.u32().unwrap();
+        assert_eq!(
+            val, 42,
+            "strip_wrappers must correctly expose inner payload"
+        );
+    }
+
+    /// QueryAnytime result (CurrentEra) must NOT be wrapped in HFC EitherMismatch.
+    /// Wire format: [4, era_word]
+    #[test]
+    fn test_current_era_no_hfc_wrapper() {
+        let result = QueryResult::CurrentEra(6); // 6 = Conway
+        let encoded = encode_query_result(&result);
+
+        let mut dec = Decoder::new(&encoded);
+        dec.array().unwrap(); // array(2)
+        dec.u32().unwrap(); // tag 4
+
+        // CurrentEra is a bare word (not wrapped in array(1))
+        let era = dec.u32().unwrap();
+        assert_eq!(
+            era, 6,
+            "CurrentEra must be a bare word(6) with no HFC wrapper"
+        );
+    }
 }
