@@ -5,7 +5,7 @@
 
 use minicbor::{Decoder, Encoder};
 
-use crate::error::ProtocolError;
+use crate::error::{MuxError, ProtocolError};
 use crate::mux::channel::MuxChannel;
 use crate::TxValidator;
 
@@ -46,7 +46,17 @@ impl LocalTxSubmissionServer {
         let mut stats = LocalTxSubmissionStats::default();
 
         loop {
-            let msg_bytes = channel.recv().await.map_err(ProtocolError::from)?;
+            let msg_bytes = match channel.recv().await {
+                Ok(b) => b,
+                // Client closed the connection without sending MsgDone — treat as
+                // a graceful disconnect and return the accumulated stats so that
+                // the node can update its metrics correctly.
+                Err(e) if matches!(e, MuxError::BearerClosed | MuxError::ChannelClosed) => {
+                    tracing::debug!(?stats, "local tx submission: client disconnected");
+                    return Ok(stats);
+                }
+                Err(e) => return Err(ProtocolError::from(e)),
+            };
             let mut dec = Decoder::new(&msg_bytes);
 
             let _arr_len = dec.array().map_err(|e| ProtocolError::CborDecode {
