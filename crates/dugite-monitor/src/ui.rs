@@ -569,13 +569,6 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let mut lines = vec![
         kv_aligned("Block", &block_num, theme.fg, theme, col_w),
         kv_aligned("Slot", &slot_num, theme.fg, theme, col_w),
-        kv_aligned(
-            "Slot/Epoch",
-            App::format_number(app.slot_in_epoch),
-            theme.muted,
-            theme,
-            col_w,
-        ),
         kv_line_custom_value(
             "Tip Diff",
             &tip_str,
@@ -644,6 +637,15 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             "UTxO Set",
             App::format_number(utxo_count),
             theme.info,
+            theme,
+            col_w,
+        ),
+        // Slot/Epoch is secondary info — placed last so it's the first dropped
+        // when the panel is too short to show all rows.
+        kv_aligned(
+            "Slot/Epoch",
+            App::format_number(app.slot_in_epoch),
+            theme.muted,
             theme,
             col_w,
         ),
