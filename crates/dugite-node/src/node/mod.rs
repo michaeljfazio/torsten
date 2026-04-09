@@ -2672,6 +2672,10 @@ impl Node {
                     match result {
                         Ok((addr, conn, rtt_ms)) => {
                             in_flight_connects.remove(&addr);
+                            // Clear the governor's in-flight tracking so it can
+                            // re-evaluate this peer on the next tick (e.g. if the
+                            // warm→hot promotion below fails and a reconnect is needed).
+                            governor.promotion_cold_completed(&addr);
                             if let Some(ref mut lifecycle) = self.connection_lifecycle {
                                 let mut pm = peer_manager.write().await;
                                 match lifecycle.register_warm_connection(
@@ -2701,6 +2705,9 @@ impl Node {
                         }
                         Err((addr, error)) => {
                             in_flight_connects.remove(&addr);
+                            // Clear the governor's in-flight tracking so it retries
+                            // the peer on the next tick rather than skipping it forever.
+                            governor.promotion_cold_completed(&addr);
                             debug!(%addr, "background cold->warm failed: {error}");
                             let mut pm = peer_manager.write().await;
                             pm.peer_failed(&addr);
