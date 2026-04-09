@@ -519,9 +519,18 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let block_num = App::format_number(app.metrics.get_u64("dugite_block_number"));
     let slot_num = App::format_number(app.metrics.get_u64("dugite_slot_number"));
     let tip_age = app.metrics.get_u64("dugite_tip_age_seconds");
-    let tx_received = app.metrics.get_u64("dugite_transactions_received_total");
-    let tx_validated = app.metrics.get_u64("dugite_transactions_validated_total");
-    let tx_rejected = app.metrics.get_u64("dugite_transactions_rejected_total");
+    // N2C (dugite-cli LocalTxSubmission) counters
+    let n2c_submitted = app.metrics.get_u64("dugite_n2c_txs_submitted_total");
+    let n2c_accepted = app.metrics.get_u64("dugite_n2c_txs_accepted_total");
+    let n2c_rejected = app.metrics.get_u64("dugite_n2c_txs_rejected_total");
+    // P2P (TxSubmission from network peers) counters
+    let p2p_received = app.metrics.get_u64("dugite_transactions_received_total");
+    let p2p_validated = app.metrics.get_u64("dugite_transactions_validated_total");
+    let p2p_rejected = app.metrics.get_u64("dugite_transactions_rejected_total");
+    // Combined totals for summary rows
+    let tx_received = n2c_submitted + p2p_received;
+    let tx_validated = n2c_accepted + p2p_validated;
+    let tx_rejected = n2c_rejected + p2p_rejected;
     let pending_tx = app.metrics.get_u64("dugite_mempool_tx_count");
     let utxo_count = app.metrics.get_u64("dugite_utxo_count");
     // Prefer the dedicated density gauge; fall back to block_number / slot_number
@@ -604,7 +613,7 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             col_w,
         ),
         kv_aligned(
-            "Tx Received",
+            "Tx Submitted",
             App::format_number(tx_received),
             if tx_received > 0 {
                 theme.success
@@ -615,7 +624,29 @@ fn render_chain_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             col_w,
         ),
         kv_aligned(
-            "Tx Validated",
+            "  N2C",
+            App::format_number(n2c_submitted),
+            if n2c_submitted > 0 {
+                theme.success
+            } else {
+                theme.muted
+            },
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "  P2P",
+            App::format_number(p2p_received),
+            if p2p_received > 0 {
+                theme.success
+            } else {
+                theme.muted
+            },
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Tx Accepted",
             App::format_number(tx_validated),
             if tx_validated > 0 {
                 theme.success
