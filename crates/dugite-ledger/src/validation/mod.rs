@@ -360,6 +360,13 @@ pub enum ValidationError {
     /// `cardano-ledger-conway:Cardano.Ledger.Conway.Rules.Gov`.
     #[error("Governance proposal rejected: malformed PParamsUpdate ({reason})")]
     MalformedProposal { reason: String },
+    /// Alonzo UTXOW rule: a redeemer in the witness set has no matching
+    /// script purpose (spending input, minting policy, withdrawal, cert, vote).
+    ///
+    /// Reference: Haskell `ExtraRedeemers` in
+    /// `cardano-ledger-alonzo:Cardano.Ledger.Alonzo.Rules.Utxow`.
+    #[error("Extra redeemer with no matching script purpose: tag={tag}, index={index}")]
+    ExtraRedeemer { tag: String, index: u32 },
     /// Conway rule: the total byte size of all reference scripts reachable
     /// from a single transaction's inputs and reference inputs must not exceed
     /// 200 KiB (`ppMaxRefScriptSizePerTxG`).
@@ -1270,6 +1277,11 @@ pub fn validate_transaction_with_pools(
         // policy must have a matching redeemer (Spend / Reward / Mint respectively).
         // Matches Haskell's `scriptsNeeded` check.
         collateral::check_script_redeemers(tx, utxo_set, &mut errors);
+
+        // Alonzo UTXOW: every redeemer in the witness set must map to a valid
+        // script purpose. Redeemers with no matching purpose are rejected.
+        // Matches Haskell's `hasExactSetOfRedeemers` / `ExtraRedeemers`.
+        collateral::check_extra_redeemers(tx, utxo_set, &mut errors);
 
         // Rule 12: script data hash (mkScriptIntegrity) — covers redeemers,
         // datums, cost models, and language versions.

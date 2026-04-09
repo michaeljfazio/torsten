@@ -502,6 +502,127 @@ pub(crate) fn check_script_redeemers(
     }
 }
 
+/// Check for extra redeemers (Haskell `hasExactSetOfRedeemers`).
+///
+/// Every redeemer in the witness set must correspond to a valid script
+/// purpose. Redeemers with no matching purpose are reported as extra.
+pub(crate) fn check_extra_redeemers(
+    tx: &Transaction,
+    utxo_set: &dyn UtxoLookup,
+    errors: &mut Vec<ValidationError>,
+) {
+    let body = &tx.body;
+
+    // Build the set of valid (tag_byte, index) pairs.
+    let mut valid_purposes: HashSet<(u8, u32)> = HashSet::new();
+
+    // Spend: script-locked inputs (sorted by TxIn)
+    let mut sorted_inputs: Vec<_> = body.inputs.iter().collect();
+    sorted_inputs.sort_by(|a, b| {
+        a.transaction_id
+            .cmp(&b.transaction_id)
+            .then(a.index.cmp(&b.index))
+    });
+    for (idx, input) in sorted_inputs.iter().enumerate() {
+        if let Some(utxo) = utxo_set.lookup(input) {
+            let is_script_locked = match &utxo.address {
+                dugite_primitives::address::Address::Base(b) => {
+                    matches!(b.payment, Credential::Script(_))
+                }
+                dugite_primitives::address::Address::Enterprise(e) => {
+                    matches!(e.payment, Credential::Script(_))
+                }
+                dugite_primitives::address::Address::Pointer(p) => {
+                    matches!(p.payment, Credential::Script(_))
+                }
+                _ => false,
+            };
+            if is_script_locked {
+                valid_purposes.insert((0, idx as u32));
+            }
+        }
+    }
+
+    // Mint: Plutus minting policies
+    let plutus_script_hashes: HashSet<Hash28> = collect_plutus_script_hashes(tx, utxo_set);
+    for (idx, policy_id) in body.mint.keys().enumerate() {
+        if plutus_script_hashes.contains(policy_id) {
+            valid_purposes.insert((1, idx as u32));
+        }
+    }
+
+    // Reward: script-locked withdrawals
+    for (idx, reward_addr) in body.withdrawals.keys().enumerate() {
+        if reward_addr.len() >= 29 && (reward_addr[0] & 0x10) != 0 {
+            valid_purposes.insert((2, idx as u32));
+        }
+    }
+
+    // Cert: script-credential certificates
+    for (idx, cert) in body.certificates.iter().enumerate() {
+        let script_cred: Option<&Credential> = match cert {
+            Certificate::StakeDeregistration(c) => Some(c),
+            Certificate::StakeDelegation { credential: c, .. } => Some(c),
+            Certificate::ConwayStakeDeregistration { credential: c, .. } => Some(c),
+            Certificate::VoteDelegation { credential: c, .. } => Some(c),
+            Certificate::StakeVoteDelegation { credential: c, .. } => Some(c),
+            Certificate::RegStakeDeleg { credential: c, .. } => Some(c),
+            Certificate::RegStakeVoteDeleg { credential: c, .. } => Some(c),
+            Certificate::VoteRegDeleg { credential: c, .. } => Some(c),
+            Certificate::CommitteeHotAuth {
+                cold_credential: c, ..
+            } => Some(c),
+            Certificate::CommitteeColdResign {
+                cold_credential: c, ..
+            } => Some(c),
+            Certificate::UnregDRep { credential: c, .. } => Some(c),
+            Certificate::UpdateDRep { credential: c, .. } => Some(c),
+            _ => None,
+        };
+        if let Some(Credential::Script(_)) = script_cred {
+            valid_purposes.insert((3, idx as u32));
+        }
+    }
+
+    // Vote: script-credential voters
+    for (idx, voter) in body.voting_procedures.keys().enumerate() {
+        let is_script_voter = match voter {
+            Voter::ConstitutionalCommittee(cred) | Voter::DRep(cred) => {
+                matches!(cred, Credential::Script(_))
+            }
+            Voter::StakePool(_) => false,
+        };
+        if is_script_voter {
+            valid_purposes.insert((4, idx as u32));
+        }
+    }
+
+    // Propose: proposals with policy_hash
+    for (idx, proposal) in body.proposal_procedures.iter().enumerate() {
+        if govaction_has_policy_hash(&proposal.gov_action) {
+            valid_purposes.insert((5, idx as u32));
+        }
+    }
+
+    // Check each redeemer against valid purposes
+    for redeemer in &tx.witness_set.redeemers {
+        let tag_byte = match redeemer.tag {
+            RedeemerTag::Spend => 0u8,
+            RedeemerTag::Mint => 1u8,
+            RedeemerTag::Reward => 2u8,
+            RedeemerTag::Cert => 3u8,
+            RedeemerTag::Vote => 4u8,
+            RedeemerTag::Propose => 5u8,
+        };
+        if !valid_purposes.contains(&(tag_byte, redeemer.index)) {
+            errors.push(ValidationError::ExtraRedeemer {
+                tag: format!("{:?}", redeemer.tag),
+                index: redeemer.index,
+            });
+        }
+    }
+}
+
 /// Return `true` if a governance action requires a constitutionality script
 /// witness (i.e. carries a non-None `policy_hash`).
 ///
@@ -1367,6 +1488,205 @@ mod tests {
                 } if tag == "Vote"
             )),
             "expected RedeemerIndexOutOfRange{{tag:Vote,index:3,max:3}}, got: {errors:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for check_extra_redeemers
+    // -----------------------------------------------------------------------
+
+    /// A Spend redeemer at index 99 with no corresponding script-locked input
+    /// at that index must produce an `ExtraRedeemer` error.
+    #[test]
+    fn test_extra_redeemer_spend_no_matching_input() {
+        use dugite_primitives::address::EnterpriseAddress;
+
+        use super::check_extra_redeemers;
+
+        // One script-locked input at sorted index 0.
+        let script_hash = Hash28::from_bytes([0xAB; 28]);
+        let inp = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x01; 32]),
+            index: 0,
+        };
+        let mut utxo_set = UtxoSet::new();
+        utxo_set.insert(
+            inp.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    payment: Credential::Script(script_hash),
+                    network: dugite_primitives::network::NetworkId::Mainnet,
+                }),
+                value: Value::lovelace(2_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Redeemer at index 99 — no script-locked input at that position.
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            era: Era::Conway,
+            body: TransactionBody {
+                inputs: vec![inp],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Spend,
+                    index: 99,
+                    data: PlutusData::Integer(0i128),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_extra_redeemers(&tx, &utxo_set, &mut errors);
+
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ValidationError::ExtraRedeemer { tag, index: 99 } if tag == "Spend"
+            )),
+            "expected ExtraRedeemer{{tag:Spend,index:99}}, got: {errors:?}"
+        );
+    }
+
+    /// A Spend redeemer at the correct index 0 for a script-locked input must
+    /// NOT produce an `ExtraRedeemer` error.
+    #[test]
+    fn test_extra_redeemer_spend_valid_index_no_error() {
+        use dugite_primitives::address::EnterpriseAddress;
+
+        use super::check_extra_redeemers;
+
+        // Script-locked input — the only input, so it sorts to index 0.
+        let script_hash = Hash28::from_bytes([0xCD; 28]);
+        let inp = TransactionInput {
+            transaction_id: Hash32::from_bytes([0x02; 32]),
+            index: 0,
+        };
+        let mut utxo_set = UtxoSet::new();
+        utxo_set.insert(
+            inp.clone(),
+            TransactionOutput {
+                address: Address::Enterprise(EnterpriseAddress {
+                    payment: Credential::Script(script_hash),
+                    network: dugite_primitives::network::NetworkId::Mainnet,
+                }),
+                value: Value::lovelace(5_000_000),
+                datum: OutputDatum::None,
+                script_ref: None,
+                is_legacy: false,
+                raw_cbor: None,
+            },
+        );
+
+        // Redeemer at index 0 — matches the single script-locked input.
+        let tx = Transaction {
+            hash: Hash32::ZERO,
+            era: Era::Conway,
+            body: TransactionBody {
+                inputs: vec![inp],
+                outputs: vec![],
+                fee: Lovelace(0),
+                ttl: None,
+                certificates: vec![],
+                withdrawals: BTreeMap::new(),
+                auxiliary_data_hash: None,
+                validity_interval_start: None,
+                mint: BTreeMap::new(),
+                script_data_hash: None,
+                collateral: vec![],
+                required_signers: vec![],
+                network_id: None,
+                collateral_return: None,
+                total_collateral: None,
+                reference_inputs: vec![],
+                update: None,
+                voting_procedures: BTreeMap::new(),
+                proposal_procedures: vec![],
+                treasury_value: None,
+                donation: None,
+            },
+            witness_set: TransactionWitnessSet {
+                vkey_witnesses: vec![],
+                native_scripts: vec![],
+                bootstrap_witnesses: vec![],
+                plutus_v1_scripts: vec![],
+                plutus_v2_scripts: vec![],
+                plutus_v3_scripts: vec![],
+                plutus_data: vec![],
+                redeemers: vec![Redeemer {
+                    tag: RedeemerTag::Spend,
+                    index: 0,
+                    data: PlutusData::Integer(0i128),
+                    ex_units: ExUnits {
+                        mem: 100,
+                        steps: 100,
+                    },
+                }],
+                raw_redeemers_cbor: None,
+                raw_plutus_data_cbor: None,
+                pallas_script_data_hash: None,
+            },
+            is_valid: true,
+            auxiliary_data: None,
+            raw_cbor: None,
+            raw_body_cbor: None,
+            raw_witness_cbor: None,
+        };
+
+        let mut errors: Vec<ValidationError> = Vec::new();
+        check_extra_redeemers(&tx, &utxo_set, &mut errors);
+
+        let extra_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, ValidationError::ExtraRedeemer { .. }))
+            .collect();
+        assert!(
+            extra_errors.is_empty(),
+            "expected no ExtraRedeemer errors, got: {extra_errors:?}"
         );
     }
 }
