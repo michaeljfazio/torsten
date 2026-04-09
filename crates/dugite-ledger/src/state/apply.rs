@@ -677,6 +677,11 @@ impl LedgerState {
                         .constitution
                         .as_ref()
                         .and_then(|c| c.script_hash);
+                    // Build the set of vote delegation credential hashes for the
+                    // ConwayWdrlNotDelegatedToDRep check (PV >= 10 only).
+                    let vote_delegation_keys: std::collections::HashSet<
+                        dugite_primitives::hash::Hash32,
+                    > = self.governance.vote_delegations.keys().copied().collect();
                     let result = validate_transaction_with_pools(
                         tx,
                         &self.utxo_set,
@@ -695,6 +700,7 @@ impl LedgerState {
                         Some(&committee_resigned_keys),
                         Some(&self.stake_key_deposits),
                         constitution_script_hash,
+                        Some(&vote_delegation_keys),
                     );
                     if let Err(errors) = result {
                         // Distinguish Phase-1 failures from Phase-2 (script) failures.

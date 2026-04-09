@@ -572,6 +572,12 @@ pub(crate) fn convert_validation_error(
                  (UnspendableUTxONoDatumHash)"
             ),
         },
+        VE::WdrlNotDelegatedToDRep { credential_hash } => TxValidationError::ScriptFailed {
+            reason: format!(
+                "Withdrawal rejected: KeyHash reward account {credential_hash} has no DRep \
+                 delegation (ConwayWdrlNotDelegatedToDRep)"
+            ),
+        },
     }
 }
 

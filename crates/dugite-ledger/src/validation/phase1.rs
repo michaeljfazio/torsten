@@ -1430,7 +1430,8 @@ mod tests {
             None,
             None,
             None,
-            None,
+            None, // constitution_script_hash
+            None, // vote_delegations
         )
         .unwrap_err();
         assert!(
@@ -1601,7 +1602,8 @@ mod tests {
             None,
             None,
             None,
-            None,
+            None, // constitution_script_hash
+            None, // vote_delegations
         )
         .unwrap_err();
         assert!(
