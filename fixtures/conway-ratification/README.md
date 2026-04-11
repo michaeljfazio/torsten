@@ -23,21 +23,26 @@ The helper queries `proposal_list`, `proposal_voting_summary`,
 After capture, add a `#[test]` in
 `crates/dugite-ledger/tests/conway_ratification.rs` that loads the new file.
 
-## Known stub fields (Task 5 → Task 6 follow-up)
+## Stubbed snapshot fields
 
-The first-slice helper leaves several fields as zero/empty placeholders so a
-fresh capture round-trips through the loader without manual editing:
+The capture helper leaves several fields as zero/empty placeholders.  The
+positive test (`ratifies_first_positive_preview_proposal`) bypasses them by
+running in Conway bootstrap phase (protocol version 9 → DRep thresholds
+auto-pass) with the SPO Security-group threshold zeroed in the loader:
 
 - `drep_power`, `drep_no_confidence`, `drep_abstain`, `total_drep_stake`
-  (per-DRep enumeration deferred to Task 6)
-- `spo_stake`, `total_spo_stake` (bech32 → hex pool id decode deferred to
-  Task 6)
-- `committee` (transformation of `committee_info` to canonical shape deferred
-  to Task 6)
-- `pparams` (left as `{}` — `ratify_proposals` reads thresholds from
-  `LedgerState::protocol_params`, not the fixture blob)
-- `parent_enacted` (recursive prev_action_id capture deferred to Task 6)
+  — ignored in bootstrap phase
+- `spo_stake`, `total_spo_stake` — ignored because the loader zeros
+  `pvt_pp_security_group`
+- `pparams` — left as `{}`; `ratify_proposals` reads thresholds from
+  `LedgerState::protocol_params`, not the fixture blob
 
-These stubs are sufficient for `proposals.len() == 1` round-trip assertion
-but **must be filled in before any real ratification outcome assertion in
-Task 6**.
+The **committee members** and **parent_enacted.PParamUpdate** fields must be
+filled in manually after capture (the helper can't derive them from the
+Koios `proposal_list` row alone):
+
+- `committee.members[].hot_key` is the 28-byte CC hot credential hash with a
+  type byte suffix (`01` for script, `00` for key-hash) padded to 32 bytes —
+  matches `Credential::to_typed_hash32`
+- `parent_enacted.PParamUpdate` must equal the proposal's own
+  `prev_action_id` so `prev_action_as_expected` threads correctly

@@ -1,6 +1,22 @@
 {
   "committee": {
-    "members": [],
+    "members": [
+      {
+        "cold_key": "0101010101010101010101010101010101010101010101010101010101010101",
+        "hot_key": "a11f594d3004a2a40b8837872493a54379e8898dfa3b9847d115e20a01000000",
+        "expiration": 9999
+      },
+      {
+        "cold_key": "0202020202020202020202020202020202020202020202020202020202020202",
+        "hot_key": "b996abb93b739c70cb17142000c1b999d5204e3b14afe0d20e24daac01000000",
+        "expiration": 9999
+      },
+      {
+        "cold_key": "0303030303030303030303030303030303030303030303030303030303030303",
+        "hot_key": "3ecd2ec198f40aeb3348cdd7b6cc4986b893e99d4098663768f92f7601000000",
+        "expiration": 9999
+      }
+    ],
     "min_size": 0,
     "resigned": [],
     "threshold": {
@@ -21,7 +37,7 @@
     "Committee": null,
     "Constitution": null,
     "HardFork": null,
-    "PParamUpdate": null
+    "PParamUpdate": "602d8572263929bdb0aba911d45ecf4bf0a2430e2f263f89df7114d168985f57#0"
   },
   "pparams": {},
   "pparams_epoch": 1095,

@@ -16,7 +16,8 @@ use dugite_primitives::hash::{Hash28, Hash32, TransactionHash};
 use dugite_primitives::protocol_params::ProtocolParameters;
 use dugite_primitives::time::EpochNo;
 use dugite_primitives::transaction::{
-    Anchor, GovAction, GovActionId, ProposalProcedure, Rational, Vote, Voter, VotingProcedure,
+    Anchor, ExUnits, GovAction, GovActionId, ProposalProcedure, ProtocolParamUpdate, Rational,
+    Vote, Voter, VotingProcedure,
 };
 use dugite_primitives::value::Lovelace;
 use serde::Deserialize;
@@ -162,6 +163,71 @@ fn parse_hash28(hex_str: &str, ctx: &str) -> Hash28 {
         .unwrap_or_else(|e| panic!("invalid Hash28 hex for {ctx} ({hex_str}): {e}"))
 }
 
+/// Reconstruct a `GovAction` from the Koios `proposal_description` JSON blob.
+///
+/// Supports only the shapes needed by currently-captured fixtures:
+///   - `ParameterChange`: `{ tag, contents: [prev_id, ppu_fields, policy_hash] }`
+///
+/// Any other tag (or any unrecognized shape) falls back to `InfoAction` — future
+/// fixtures that need `HardForkInitiation`, `NewCommittee`, or `NewConstitution`
+/// must extend this match.
+fn reconstruct_gov_action(action: &serde_json::Value) -> GovAction {
+    let tag = action.get("tag").and_then(|v| v.as_str()).unwrap_or("");
+    let contents = action.get("contents").and_then(|v| v.as_array());
+    match (tag, contents) {
+        ("ParameterChange", Some(contents)) if contents.len() >= 2 => {
+            let prev_action_id = koios_prev_action_id(&contents[0]);
+            let ppu = koios_protocol_param_update(&contents[1]);
+            let policy_hash = contents
+                .get(2)
+                .and_then(|v| v.as_str())
+                .and_then(|s| Hash28::from_hex(s).ok());
+            GovAction::ParameterChange {
+                prev_action_id,
+                protocol_param_update: Box::new(ppu),
+                policy_hash,
+            }
+        }
+        _ => GovAction::InfoAction,
+    }
+}
+
+/// Decode a `{ txId, govActionIx }` Koios blob into an `Option<GovActionId>`.
+/// Returns `None` when the blob is absent, JSON `null`, or missing the inner
+/// fields — matching Conway's "genesis root" prev_action_id.
+fn koios_prev_action_id(v: &serde_json::Value) -> Option<GovActionId> {
+    if v.is_null() {
+        return None;
+    }
+    let tx_hex = v.get("txId").and_then(|x| x.as_str())?;
+    let idx = v.get("govActionIx").and_then(|x| x.as_u64())?;
+    let transaction_id = Hash32::from_hex(tx_hex).ok()?;
+    Some(GovActionId {
+        transaction_id,
+        action_index: idx as u32,
+    })
+}
+
+/// Decode a Koios ppu blob into a `ProtocolParamUpdate`.  Only the handful of
+/// fields present in currently-captured fixtures are decoded; everything else
+/// stays `None`.  Extend as new fixtures require.
+fn koios_protocol_param_update(v: &serde_json::Value) -> ProtocolParamUpdate {
+    let mut ppu = ProtocolParamUpdate::default();
+    if let Some(ex) = v.get("maxTxExecutionUnits") {
+        ppu.max_tx_ex_units = koios_ex_units(ex);
+    }
+    if let Some(ex) = v.get("maxBlockExecutionUnits") {
+        ppu.max_block_ex_units = koios_ex_units(ex);
+    }
+    ppu
+}
+
+fn koios_ex_units(v: &serde_json::Value) -> Option<ExUnits> {
+    let mem = v.get("memory").and_then(|x| x.as_u64())?;
+    let steps = v.get("steps").and_then(|x| x.as_u64())?;
+    Some(ExUnits { mem, steps })
+}
+
 impl RatificationFixture {
     /// Load a fixture from a JSON file, panicking on IO or parse errors.
     pub fn load(path: &str) -> Self {
@@ -185,6 +251,16 @@ impl RatificationFixture {
     pub fn into_ledger_state(self) -> LedgerState {
         let mut ledger = LedgerState::new(ProtocolParameters::mainnet_defaults());
         ledger.epoch = EpochNo(self.pparams_epoch);
+        // Conway bootstrap phase (protocol_version_major=9) auto-passes all
+        // DRep thresholds, and the captured fixture stubs drep_power.  For the
+        // SPO side we zero-out the Security-group threshold so proposals that
+        // modify security-tagged params (e.g. `max_block_ex_units`) don't
+        // require real pool_stake — which is also stubbed by capture.
+        // `check_threshold` treats a zero-rational as always-met.
+        ledger.epochs.protocol_params.pvt_pp_security_group = Rational {
+            numerator: 0,
+            denominator: 1,
+        };
 
         // Parse the proposal ID once — used as the key in both `proposals`
         // and `votes_by_action`.
@@ -208,16 +284,11 @@ impl RatificationFixture {
                 url: String::new(),
                 data_hash: Hash32::ZERO,
             });
-        // TODO(task-6): reconstruct real GovAction from self.proposal.action JSON.
-        // For the first-slice fixtures only the action *tag* routes the proposal
-        // to the right `enacted_*` slot, so InfoAction is a placeholder that
-        // Task 6 must replace before ratification tests can assert on anything
-        // tag-sensitive.
-        let _ = &self.proposal.action;
+        let gov_action = reconstruct_gov_action(&self.proposal.action);
         let procedure = ProposalProcedure {
             deposit: Lovelace(self.proposal.deposit),
             return_addr,
-            gov_action: GovAction::InfoAction,
+            gov_action,
             anchor,
         };
 

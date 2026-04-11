@@ -5,16 +5,13 @@ mod common;
 
 use common::ratification_fixture::{assert_ratified, parse_gov_action_id, RatificationFixture};
 
-// Ignored: the captured fixture currently stubs `drep_power`, `spo_stake`,
-// `committee`, and `parent_enacted` (see fixtures/conway-ratification/README.md)
-// AND the loader replaces the captured `action` with an `InfoAction`
-// placeholder (see TODO(task-6) in tests/common/ratification_fixture.rs).
-// `ratify_proposals` therefore cannot route this proposal to
-// `enacted_pparam_update`.  Un-ignore once a follow-up populates the snapshot
-// fields and reconstructs a real `PParamUpdate` GovAction from
-// `proposal_description`.
+// The fixture is a real preview ParameterChange proposal routed through
+// `ratify_proposals()`.  `drep_power` / `spo_stake` remain stubbed (captured
+// thresholds are bypassed via bootstrap phase + zero SPO security threshold in
+// the loader), but the CC approval path uses real CC voter hot-key hashes
+// from the captured votes.  See fixtures/conway-ratification/README.md and
+// `reconstruct_gov_action` in tests/common/ratification_fixture.rs.
 #[test]
-#[ignore = "needs Task 6 follow-up: populate snapshot stubs + reconstruct PParamUpdate GovAction"]
 fn ratifies_first_positive_preview_proposal() {
     let path = format!(
         "{}/../../fixtures/conway-ratification/preview-pparam-1096.json",
