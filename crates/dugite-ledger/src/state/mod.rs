@@ -126,8 +126,9 @@ pub struct LedgerState {
     pub genesis_hash: Hash32,
     /// Genesis delegates: genesis_key_hash (28 bytes) -> (delegate_key_hash (28 bytes), vrf_key_hash (32 bytes)).
     ///
-    /// Loaded from the Shelley genesis file. Used for BFT overlay schedule
-    /// validation during early Shelley era (when d > 0). Not mutated after initialization.
+    /// Loaded from the Shelley genesis file and mutated by `Certificate::GenesisKeyDelegation`
+    /// (Shelley-era only; Conway removed the cert type). Used for BFT overlay
+    /// schedule validation during early Shelley era (when d > 0).
     pub genesis_delegates: HashMap<Hash28, (Hash28, Hash32)>,
     /// Quorum for pre-Conway protocol parameter updates (from Shelley genesis)
     pub update_quorum: u64,

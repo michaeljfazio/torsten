@@ -3,7 +3,7 @@ use crate::ledger_seq::{
     DelegationChange, GovernanceChange, LedgerDelta, PoolChange, RewardChange,
 };
 use dugite_primitives::credentials::{Credential, Pointer};
-use dugite_primitives::hash::Hash32;
+use dugite_primitives::hash::{Hash28, Hash32};
 use dugite_primitives::transaction::{Certificate, MIRSource, MIRTarget};
 use dugite_primitives::value::Lovelace;
 use std::sync::Arc;
@@ -489,10 +489,30 @@ impl LedgerState {
                 genesis_delegate_hash,
                 vrf_keyhash,
             } => {
-                // Genesis key delegation — update genesis delegate mapping
-                // These are rare (Shelley-era governance by genesis keys)
+                // Shelley-era genesis key delegation. Update the active gen-delegate
+                // mapping directly. Haskell models this as a two-phase queue
+                // (futureGenDelegs → genDelegs after 2 * stability_window); we apply
+                // immediately, which is observationally equivalent on preview/preprod/
+                // mainnet (Conway removed this cert type) and differs only during a
+                // Byron-genesis replay. If full-Byron replay correctness is ever
+                // required, promote to a queued model.
+                //
+                // The cert fields (genesis_hash, genesis_delegate_hash) are stored as
+                // Hash32 in our enum (zero-padded from the on-wire 28-byte hashes),
+                // while genesis_delegates uses Hash28 keys — truncate to first 28 bytes.
+                let gkey = Hash28::from_bytes({
+                    let mut buf = [0u8; 28];
+                    buf.copy_from_slice(&genesis_hash.as_bytes()[..28]);
+                    buf
+                });
+                let dkey = Hash28::from_bytes({
+                    let mut buf = [0u8; 28];
+                    buf.copy_from_slice(&genesis_delegate_hash.as_bytes()[..28]);
+                    buf
+                });
+                self.genesis_delegates.insert(gkey, (dkey, *vrf_keyhash));
                 debug!(
-                    "Genesis key delegation: {} -> delegate={}, vrf={}",
+                    "Genesis key delegation applied: {} -> delegate={}, vrf={}",
                     genesis_hash.to_hex(),
                     genesis_delegate_hash.to_hex(),
                     vrf_keyhash.to_hex()

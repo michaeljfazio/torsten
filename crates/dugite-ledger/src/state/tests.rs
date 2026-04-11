@@ -4126,6 +4126,33 @@ fn test_genesis_key_delegation() {
 }
 
 #[test]
+fn test_genesis_key_delegation_updates_genesis_delegates() {
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+    // The cert fields are Hash32, but genesis_delegates uses Hash28 keys (first 28 bytes).
+    let genesis_hash_32 = Hash32::from_bytes([0x11; 32]);
+    let delegate_hash_32 = Hash32::from_bytes([0x22; 32]);
+    let vrf_keyhash = Hash32::from_bytes([0x33; 32]);
+
+    state.process_certificate(&Certificate::GenesisKeyDelegation {
+        genesis_hash: genesis_hash_32,
+        genesis_delegate_hash: delegate_hash_32,
+        vrf_keyhash,
+    });
+
+    // genesis_delegates is keyed by Hash28 (first 28 bytes of the cert's Hash32 fields)
+    let expected_key = Hash28::from_bytes([0x11; 28]);
+    let expected_delegate = Hash28::from_bytes([0x22; 28]);
+
+    let entry = state
+        .genesis_delegates
+        .get(&expected_key)
+        .expect("genesis_delegates should contain the inserted entry");
+    assert_eq!(entry.0, expected_delegate, "delegate hash mismatch");
+    assert_eq!(entry.1, vrf_keyhash, "vrf keyhash mismatch");
+}
+
+#[test]
 fn test_pre_conway_pp_update_quorum_met() {
     let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
     state.update_quorum = 2; // Require 2 distinct proposers
