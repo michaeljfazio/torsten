@@ -4,8 +4,9 @@
 //! runtime behavior beyond deserialization + conversion into a `LedgerState`
 //! (see `into_ledger_state`).
 
-// Task 1 only exercises deserialization — most fields are read by the
-// `into_ledger_state` conversion that lands in Task 2.
+// Task 2 consumes most fields; `pparams`, `total_drep_stake`, `total_spo_stake`,
+// `expected_outcome.*`, and committee `min_size` remain dead until Task 6
+// wires up ratification assertions and real GovAction reconstruction.
 #![allow(dead_code)]
 #![allow(clippy::enum_variant_names)]
 
@@ -207,6 +208,12 @@ impl RatificationFixture {
                 url: String::new(),
                 data_hash: Hash32::ZERO,
             });
+        // TODO(task-6): reconstruct real GovAction from self.proposal.action JSON.
+        // For the first-slice fixtures only the action *tag* routes the proposal
+        // to the right `enacted_*` slot, so InfoAction is a placeholder that
+        // Task 6 must replace before ratification tests can assert on anything
+        // tag-sensitive.
+        let _ = &self.proposal.action;
         let procedure = ProposalProcedure {
             deposit: Lovelace(self.proposal.deposit),
             return_addr,
