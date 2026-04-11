@@ -135,7 +135,7 @@ fn decode_hex_bytes(hex_str: &str, ctx: &str) -> Vec<u8> {
 }
 
 /// Parse a `"<32-byte-hex>#<u32>"` action id string into a `GovActionId`.
-fn parse_gov_action_id(s: &str) -> GovActionId {
+pub fn parse_gov_action_id(s: &str) -> GovActionId {
     let (hash_hex, idx_str) = s
         .split_once('#')
         .unwrap_or_else(|| panic!("malformed gov_action_id (missing '#'): {s}"));
@@ -351,6 +351,37 @@ impl RatificationFixture {
         ledger.epochs.snapshots.set = Some(set_snapshot);
 
         ledger
+    }
+}
+
+pub fn assert_ratified(
+    ledger: &LedgerState,
+    expected_bucket: EnactedBucket,
+    expected_id: &GovActionId,
+) {
+    let gov = &ledger.gov.governance;
+    let actual = match expected_bucket {
+        EnactedBucket::PParamUpdate => gov.enacted_pparam_update.as_ref(),
+        EnactedBucket::HardFork => gov.enacted_hard_fork.as_ref(),
+        EnactedBucket::Committee => gov.enacted_committee.as_ref(),
+        EnactedBucket::Constitution => gov.enacted_constitution.as_ref(),
+    };
+    assert_eq!(
+        actual,
+        Some(expected_id),
+        "bucket {expected_bucket:?}: expected {expected_id:?}, got {actual:?}",
+    );
+}
+
+pub fn assert_not_ratified(ledger: &LedgerState, proposal_id: &GovActionId) {
+    let gov = &ledger.gov.governance;
+    for slot in [
+        &gov.enacted_pparam_update,
+        &gov.enacted_hard_fork,
+        &gov.enacted_committee,
+        &gov.enacted_constitution,
+    ] {
+        assert_ne!(slot.as_ref(), Some(proposal_id));
     }
 }
 

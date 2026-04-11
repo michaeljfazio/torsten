@@ -631,7 +631,7 @@ impl LedgerState {
     ///
     /// When `None` (genesis, or loading an old snapshot without this field), we fall
     /// back to live-state ratification (the pre-snapshot behavior).
-    pub(crate) fn ratify_proposals(&mut self) {
+    pub fn ratify_proposals(&mut self) {
         // Lazy forest reconstruction for backward compatibility with old snapshots
         // that lack proposal_roots / proposal_graph.  Runs once per node startup
         // from a pre-forest snapshot, then the forest is persisted in subsequent saves.
