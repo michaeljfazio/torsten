@@ -1,0 +1,74 @@
+{
+  "committee": {
+    "members": [],
+    "min_size": 0,
+    "resigned": [],
+    "threshold": {
+      "denominator": 3,
+      "numerator": 2
+    }
+  },
+  "drep_abstain": 0,
+  "drep_no_confidence": 0,
+  "drep_power": {},
+  "expected_outcome": {
+    "enacted_bucket": "PParamUpdate",
+    "enacted_epoch": 1216,
+    "enacted_id": null,
+    "ratified": false
+  },
+  "parent_enacted": {
+    "Committee": null,
+    "Constitution": null,
+    "HardFork": null,
+    "PParamUpdate": null
+  },
+  "pparams": {},
+  "pparams_epoch": 1216,
+  "proposal": {
+    "action": {
+      "contents": [
+        {
+          "govActionIx": 0,
+          "txId": "69c948cde90c6b9d7d61595e8534c106ec44132cb049ab2558399db1260c1f69"
+        },
+        {
+          "committeeMinSize": 5
+        },
+        "fa24fb305126805cf2164c161d852a0e7330cf988f1fe558cf7d4a64"
+      ],
+      "tag": "ParameterChange"
+    },
+    "anchor": null,
+    "deposit": 100000000000,
+    "expiration": 1215,
+    "gov_action_id": "c9294b4c56316f88bc5028d2f337a73f3eb73800f88188e930a2f6afad1013b4#0",
+    "return_addr_hex": "e0000000000000000000000000000000000000000000000000000000000000"
+  },
+  "proposed_epoch": 1184,
+  "spo_stake": {},
+  "total_drep_stake": 0,
+  "total_spo_stake": 0,
+  "votes": [
+    {
+      "vote": "No",
+      "voter_id": "81378d3ea89b68f0fc09944b1f93f2feb851318f196f98ba4029d8a8",
+      "voter_type": "DRepKeyHash"
+    },
+    {
+      "vote": "No",
+      "voter_id": "733a3d40cf7009b9875d064a313668a91074ca2d21ae447793fd66e9",
+      "voter_type": "DRepKeyHash"
+    },
+    {
+      "vote": "Yes",
+      "voter_id": "f76b85384f462e2ce31b6daab34f181a20edee58a5fa780b0b6de475",
+      "voter_type": "DRepKeyHash"
+    },
+    {
+      "vote": "Yes",
+      "voter_id": "071be9fe13616b7d930e3fdf03112d2cf75d5465e53071d2adf85e2a",
+      "voter_type": "DRepKeyHash"
+    }
+  ]
+}

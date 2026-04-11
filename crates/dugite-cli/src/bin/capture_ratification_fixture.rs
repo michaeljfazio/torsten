@@ -107,15 +107,21 @@ async fn main() {
     // Extract the ratification epoch.  Koios exposes this as `enacted_epoch`
     // for ratified proposals, or `dropped_epoch` for expired/dropped ones.
     // Power snapshots are taken at (ratification_epoch - 1).
-    let ratification_epoch: u64 = match proposal
+    // Koios returns these fields as `null` when inapplicable, so `.or_else`
+    // on `Option<&Value>` won't fall through — we need to check for a numeric
+    // value at each step and keep walking on `Value::Null`.
+    let ratification_epoch: u64 = ["ratified_epoch", "enacted_epoch", "dropped_epoch"]
+        .iter()
+        .find_map(|k| proposal.get(k).and_then(|v| v.as_u64()))
+        .unwrap_or_else(|| panic!("no ratification/dropped epoch in proposal row"));
+    let was_ratified = proposal
         .get("ratified_epoch")
-        .or_else(|| proposal.get("enacted_epoch"))
-        .or_else(|| proposal.get("dropped_epoch"))
         .and_then(|v| v.as_u64())
-    {
-        Some(e) => e,
-        None => panic!("no ratification/dropped epoch in proposal row"),
-    };
+        .is_some()
+        || proposal
+            .get("enacted_epoch")
+            .and_then(|v| v.as_u64())
+            .is_some();
     let snapshot_epoch = ratification_epoch.saturating_sub(1);
 
     // 4. drep_voting_power_history is a per-DRep RPC; capturing the full
@@ -257,11 +263,19 @@ async fn main() {
         // TODO(task-6): sum pool_voting_power_history rows at snapshot epoch.
         "total_spo_stake": 0u64,
         "expected_outcome": {
-            "ratified": proposal.get("ratified_epoch").is_some()
-                || proposal.get("enacted_epoch").is_some(),
+            // A proposal is ratified iff `ratified_epoch` or `enacted_epoch` is a
+            // non-null number.  `Value::Null.is_some()` is true, so we have to
+            // check `as_u64()`.  For dropped proposals, `enacted_id` is left
+            // `null` — the test asserts the ledger's `enacted_*` slot does
+            // *not* contain this proposal id.
+            "ratified": was_ratified,
             "enacted_bucket": enacted_bucket,
             "enacted_epoch": ratification_epoch,
-            "enacted_id": format!("{tx_hex}#{idx}"),
+            "enacted_id": if was_ratified {
+                serde_json::Value::String(format!("{tx_hex}#{idx}"))
+            } else {
+                serde_json::Value::Null
+            },
         },
         // TODO(task-6): seed each bucket from a recursive capture of
         // proposal.prev_action_id when present.
