@@ -94,15 +94,17 @@ Serialize to pretty JSON → commit to repo
 Test loads fixtures/conway-ratification/<id>.json
     ↓
 Build minimal LedgerState:
-    gov.governance.proposals           = { fixture.proposal }
-    gov.governance.votes               = fixture.votes (grouped by voter_type)
-    gov.governance.committee           = fixture.committee
-    gov.governance.constitution        = None (or from fixture if relevant)
-    gov.governance.cur_pparams         = fixture.pparams
-    epochs.snapshots.set.pool_stake    = fixture.spo_stake
-    gov.governance.drep_power_snapshot = fixture.drep_power
-    delegations.vote_delegations       = {} (forces snapshot path in build_drep_power_cache)
-    gov.governance.enacted_*           = fixture.parent_enacted (for prev_action_id chain)
+    gov.governance.proposals                  = { fixture.proposal }
+    gov.governance.votes_by_action            = fixture.votes (grouped by GovActionId)
+    gov.governance.committee_*                = fixture.committee (hot_keys / expiration / resigned / threshold)
+    gov.governance.constitution               = None (or from fixture if relevant)
+    gov.governance.cur_pparams                = fixture.pparams
+    epochs.snapshots.set.pool_stake           = fixture.spo_stake
+    gov.governance.drep_distribution_snapshot = fixture.drep_power
+    gov.governance.drep_snapshot_no_confidence = fixture.drep_no_confidence
+    gov.governance.drep_snapshot_abstain       = fixture.drep_abstain
+    gov.governance.vote_delegations            = {} (forces snapshot path in build_drep_power_cache)
+    gov.governance.enacted_*                   = fixture.parent_enacted (for prev_action_id chain)
     ↓
 Call ledger.ratify_proposals()
     ↓
