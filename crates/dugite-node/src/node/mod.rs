@@ -372,6 +372,9 @@ impl Node {
         // Load Conway genesis if configured (with hash validation)
         let mut conway_committee_threshold: Option<(u64, u64)> = None;
         let mut conway_committee_members: Vec<([u8; 32], u64)> = Vec::new();
+        let mut conway_constitution: Option<dugite_primitives::transaction::Constitution> = None;
+        let mut conway_initial_dreps: Vec<(dugite_primitives::hash::Hash28, u64)> = Vec::new();
+        let mut conway_drep_activity: u64 = 0;
         let mut conway_genesis_file_hash: Option<dugite_primitives::hash::Hash32> = None;
         if let Some(ref genesis_path) = args.config.conway_genesis_file {
             let genesis_path = config_dir.join(genesis_path);
@@ -386,6 +389,9 @@ impl Node {
                     conway_genesis_file_hash = Some(hash);
                     conway_committee_threshold = genesis.committee_threshold();
                     conway_committee_members = genesis.committee_members();
+                    conway_constitution = genesis.to_ledger_constitution();
+                    conway_initial_dreps = genesis.initial_dreps_as_entries();
+                    conway_drep_activity = genesis.d_rep_activity;
                     genesis.apply_to_protocol_params(&mut protocol_params);
                 }
                 Err(e) => {
@@ -734,6 +740,46 @@ impl Node {
                 "Seeded {} initial committee members from Conway genesis",
                 conway_committee_members.len()
             );
+        }
+
+        // Seed constitution from Conway genesis (CIP-1694 proposal guardrail).
+        // Only applied when the ledger has no constitution yet, so that chains
+        // recovered from a snapshot keep their on-chain value.
+        if let Some(constitution) = conway_constitution {
+            if ledger.gov.governance.constitution.is_none() {
+                std::sync::Arc::make_mut(&mut ledger.gov.governance).constitution =
+                    Some(constitution);
+                debug!("Seeded constitution from Conway genesis");
+            }
+        }
+
+        // Seed initial DReps from Conway genesis when the ledger DRep map is
+        // empty (fresh start). On a fresh node current_epoch is 0, so the
+        // last_active_epoch is set to `drep_activity`, matching the Haskell
+        // `addDefaultDRepsToState` behaviour.
+        if ledger.gov.governance.dreps.is_empty() && !conway_initial_dreps.is_empty() {
+            use dugite_ledger::state::DRepRegistration;
+            use dugite_primitives::credentials::Credential;
+            use dugite_primitives::value::Lovelace;
+            use dugite_primitives::EpochNo;
+            let count = conway_initial_dreps.len();
+            let gov = std::sync::Arc::make_mut(&mut ledger.gov.governance);
+            for (hash28, deposit) in &conway_initial_dreps {
+                let credential = Credential::VerificationKey(*hash28);
+                let cred_hash = credential.to_typed_hash32();
+                gov.dreps.insert(
+                    cred_hash,
+                    DRepRegistration {
+                        credential,
+                        deposit: Lovelace(*deposit),
+                        anchor: None,
+                        registered_epoch: EpochNo(0),
+                        last_active_epoch: EpochNo(conway_drep_activity),
+                        active: true,
+                    },
+                );
+            }
+            debug!("Seeded {} initial DReps from Conway genesis", count);
         }
 
         // Wire up on-disk UTxO store if LSM backend is configured
