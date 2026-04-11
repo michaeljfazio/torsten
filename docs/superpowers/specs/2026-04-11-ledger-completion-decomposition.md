@@ -8,6 +8,42 @@
 
 ---
 
+## Correction (2026-04-11, post-verification)
+
+The original 5-spec decomposition below was written off a `rg TODO` scan of `eras/*.rs`. Verification against the production code path showed that most of those TODOs are in the **era-rules trait path** (`EraRulesImpl::process_epoch_transition`, `ConwayRules::validate_block_body`, etc.) which is currently called only by unit tests. The **production** epoch-transition path is `LedgerState::process_epoch_transition` at `state/epoch.rs:34`, called from `apply.rs:181`, and it already implements:
+
+- RUPD wiring (`epoch.rs:89`) — sub-project 1's stated gap is cosmetic
+- Ratification, enactment, dormant-epoch tracking, DRep inactivity (`epoch.rs:583-649`) — sub-project 3's stated gaps are cosmetic
+- `ConwayRules::validate_block_body` at `eras/conway.rs:85-171` is actually complete (ExUnits budget + 1 MiB ref-script cap both wired); the TODO comment at lines 73-78 is stale
+
+The work therefore splits into two phases:
+
+### Phase A — real production gaps (this decomposition's actual scope)
+
+Four items verified against production:
+
+1. `state/apply.rs:193` — block body size **inequality** check (`>`) vs Haskell's **equality** check. Issue #377.
+2. `state/certificates.rs:487` — `Certificate::GenesisKeyDelegation` match arm only emits `debug!()`, no state mutation. Pre-Conway correctness gap that bites on full-sync-from-Byron or historical block serving.
+3. `crates/dugite-node/src/main.rs:425` — Conway genesis `constitution` and `initial_dreps` are loaded (`ConwayGenesis::_constitution`) but never applied to ledger state. Only `committee_threshold` and `committee_members` are wired.
+4. `eras/conway.rs:73-78` — stale TODO comment that misrepresents a fully-implemented function. Cosmetic cleanup.
+
+Phase A is covered by a single consolidated plan: `docs/superpowers/plans/2026-04-11-ledger-phase-a-production-gaps.md`.
+
+### Phase B — era-rules trait migration (deferred to separate brainstorming)
+
+The original 5 specs target TODOs in the era-rules trait path. Fixing those in-place would create a second parallel implementation of epoch transition and governance; the correct move is to finish the trait migration started in `2026-04-08-era-rules-trait-design.md`:
+
+- Move the body of `LedgerState::process_epoch_transition` into the trait path
+- Retire the monolithic method
+- Update `apply.rs:181` to dispatch through `EraRulesImpl`
+- Delete the duplicate TODO-laden code paths
+
+This is an architectural migration, not a bug-fix project, and needs its own brainstorming round. Specs 1, 2, 3 below are subsumed by that migration. Specs 4 and 5 contain items that fold into phase A (see above).
+
+**The 5-spec decomposition below is kept as historical context but is not the current plan of record.**
+
+---
+
 ## Why this is decomposed
 
 A single spec for "finish the ledger" would be ~2000 lines, span four independent subsystems, and take days to execute as one plan. Each sub-project below is a realistic single implementation plan: small enough to hold in context, large enough to leave the tree in a better state at completion, and bounded so Ralph-loop iterations fit.
