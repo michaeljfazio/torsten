@@ -1,0 +1,96 @@
+{
+  "committee": {
+    "members": [],
+    "min_size": 0,
+    "resigned": [],
+    "threshold": {
+      "denominator": 3,
+      "numerator": 2
+    }
+  },
+  "drep_abstain": 0,
+  "drep_no_confidence": 0,
+  "drep_power": {},
+  "expected_outcome": {
+    "enacted_bucket": "PParamUpdate",
+    "enacted_epoch": 1095,
+    "enacted_id": "69c948cde90c6b9d7d61595e8534c106ec44132cb049ab2558399db1260c1f69#0",
+    "ratified": true
+  },
+  "parent_enacted": {
+    "Committee": null,
+    "Constitution": null,
+    "HardFork": null,
+    "PParamUpdate": null
+  },
+  "pparams": {},
+  "pparams_epoch": 1095,
+  "proposal": {
+    "action": {
+      "contents": [
+        {
+          "govActionIx": 0,
+          "txId": "602d8572263929bdb0aba911d45ecf4bf0a2430e2f263f89df7114d168985f57"
+        },
+        {
+          "maxBlockExecutionUnits": {
+            "memory": 72000000,
+            "steps": 20000000000
+          },
+          "maxTxExecutionUnits": {
+            "memory": 16500000,
+            "steps": 10000000000
+          }
+        },
+        "fa24fb305126805cf2164c161d852a0e7330cf988f1fe558cf7d4a64"
+      ],
+      "tag": "ParameterChange"
+    },
+    "anchor": null,
+    "deposit": 100000000000,
+    "expiration": 1119,
+    "gov_action_id": "69c948cde90c6b9d7d61595e8534c106ec44132cb049ab2558399db1260c1f69#0",
+    "return_addr_hex": "e0000000000000000000000000000000000000000000000000000000000000"
+  },
+  "proposed_epoch": 1088,
+  "spo_stake": {},
+  "total_drep_stake": 0,
+  "total_spo_stake": 0,
+  "votes": [
+    {
+      "vote": "Yes",
+      "voter_id": "79b4b2ef99a7030c4441c8ba525055354752d003e08aa51261c06482",
+      "voter_type": "DRepKeyHash"
+    },
+    {
+      "vote": "Yes",
+      "voter_id": "5107766450180dfea7b74bd56ea8fdaf62032308b13f6e558092227a",
+      "voter_type": "StakePoolKeyHash"
+    },
+    {
+      "vote": "Yes",
+      "voter_id": "2afbef2f8a3a624f6f4492260fe2053f6daebd8c5ff13f6f14574417",
+      "voter_type": "StakePoolKeyHash"
+    },
+    {
+      "vote": "Yes",
+      "voter_id": "e283fd58d5263defcc9d0cd9925ac19c9fe4ef1e0b75a4f6af4b0d1b",
+      "voter_type": "StakePoolKeyHash"
+    },
+    {
+      "vote": "Yes",
+      "voter_id": "a11f594d3004a2a40b8837872493a54379e8898dfa3b9847d115e20a",
+      "voter_type": "ConstitutionalCommitteeHotScriptHash"
+    },
+    {
+      "vote": "Yes",
+      "voter_id": "b996abb93b739c70cb17142000c1b999d5204e3b14afe0d20e24daac",
+      "voter_type": "ConstitutionalCommitteeHotScriptHash"
+    },
+    {
+      "vote": "Yes",
+      "voter_id": "3ecd2ec198f40aeb3348cdd7b6cc4986b893e99d4098663768f92f76",
+      "voter_type": "ConstitutionalCommitteeHotScriptHash"
+    }
+  ]
+}

@@ -426,3 +426,18 @@ fn minimal_fixture_builds_ledger_state_with_one_proposal() {
     assert!(ledger.gov.governance.drep_distribution_snapshot.is_empty());
     assert_eq!(ledger.gov.governance.drep_snapshot_no_confidence, 0);
 }
+
+#[test]
+fn real_preview_fixture_loads() {
+    let path = format!(
+        "{}/../../fixtures/conway-ratification/preview-pparam-1096.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("skipping — fixture not captured yet: {path}");
+        return;
+    }
+    let fixture = RatificationFixture::load(&path);
+    let ledger = fixture.into_ledger_state();
+    assert_eq!(ledger.gov.governance.proposals.len(), 1);
+}
