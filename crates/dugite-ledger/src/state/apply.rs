@@ -182,34 +182,13 @@ impl LedgerState {
             }
         }
 
-        // Block body size check (BBODY rule) — only in ValidateAll mode (not during replay).
-        // During replay, max_block_body_size may differ from when the block was
-        // originally produced.
-        //
-        // The Haskell BBODY rule checks:
-        //   bBodySize protVer (blockBody block) == block.header.body_size
-        // i.e. actual serialized body size must equal the header-claimed size.
-        //
-        // TODO(#377): Implement the full equality check (actual == claimed) once
-        // we have infrastructure to extract or re-serialize just the block body
-        // bytes from `Block::raw_cbor`. For now, `raw_cbor` stores the full
-        // block (header + body), not the body alone, so we cannot cheaply compute
-        // the exact body byte length without a CBOR re-serialization pass.
-        //
-        // Pragmatic approximation: reject blocks whose header-claimed body_size
-        // exceeds the current protocol limit (max_block_body_size). This catches
-        // obviously invalid blocks and is a hard error rather than a warning,
-        // matching the spirit of WrongBlockBodySizeBBODY.
-        if mode == BlockValidationMode::ValidateAll
-            && block.header.body_size > 0
-            && self.epochs.protocol_params.max_block_body_size > 0
-            && block.header.body_size > self.epochs.protocol_params.max_block_body_size
-        {
-            return Err(LedgerError::WrongBlockBodySize {
-                actual: block.header.body_size,
-                claimed: self.epochs.protocol_params.max_block_body_size,
-            });
-        }
+        // Block body size check (BBODY rule): Haskell enforces
+        // `actual_body_bytes == header.body_size`. Pallas's CBOR decoder already
+        // rejects any header/body inconsistency at parse time, so the independent
+        // check here was a bogus approximation (it compared header.body_size against
+        // max_block_body_size, which is a chain-checks cap at the consensus layer,
+        // not part of BBODY). Issue #377 tracks a hardened-replay equality check
+        // using independently-computed body bytes.
 
         // Allocate a per-block diff to record all UTxO inserts and deletes.
         let mut block_diff = UtxoDiff::new();
@@ -1174,52 +1153,6 @@ mod tests {
         assert_eq!(state.epoch, EpochNo(3));
     }
 
-    // ── Test 7: body_size exceeds max — hard error in ValidateAll mode ───────
-    //
-    // The Haskell BBODY rule (WrongBlockBodySizeBBODY) requires the actual
-    // serialized body size to equal the header-claimed size.  As a pragmatic
-    // approximation until full CBOR re-serialization is available, we reject
-    // blocks whose header-claimed body_size exceeds max_block_body_size.
-    //
-    // In ValidateAll mode (new network blocks) this must be a hard error.
-    // In ApplyOnly mode (ImmutableDB replay) the check is skipped so that
-    // blocks already accepted by the network are replayed without rejection.
-
-    #[test]
-    fn test_apply_block_body_size_check_fires_in_validate_all_mode() {
-        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-        assert!(state.epochs.protocol_params.max_block_body_size > 0);
-
-        // body_size is strictly greater than the protocol limit.
-        let oversized = state.epochs.protocol_params.max_block_body_size + 1;
-        let block = make_test_block(Era::Conway, 1_000, 1, 9, oversized, vec![]);
-
-        // Must fail with WrongBlockBodySize in ValidateAll mode.
-        let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
-        assert!(
-            matches!(result, Err(LedgerError::WrongBlockBodySize { .. })),
-            "Oversized body_size must return WrongBlockBodySize in ValidateAll mode, got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_apply_block_body_size_check_skipped_in_apply_only_mode() {
-        let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
-        assert!(state.epochs.protocol_params.max_block_body_size > 0);
-
-        // body_size is strictly greater than the protocol limit.
-        let oversized = state.epochs.protocol_params.max_block_body_size + 1;
-        let block = make_test_block(Era::Conway, 1_000, 1, 9, oversized, vec![]);
-
-        // Must succeed in ApplyOnly mode — body_size check is skipped during replay.
-        state
-            .apply_block(&block, BlockValidationMode::ApplyOnly)
-            .expect("Oversized body_size must not be an error in ApplyOnly (replay) mode");
-
-        // The block was still applied: tip advanced.
-        assert_eq!(state.tip.block_number, BlockNo(1));
-    }
-
     // ── Test 8: Per-tx ref-script size limit (Conway ValidateAll) ─────────────
 
     #[test]
@@ -1574,6 +1507,33 @@ mod tests {
         assert!(
             reward_accounts.contains_key(&key2),
             "cred2 must be registered in reward_accounts"
+        );
+    }
+
+    // ── Regression: bogus body-size approximation must not exist ─────────────
+    //
+    // The old check compared header.body_size > max_block_body_size and rejected
+    // with WrongBlockBodySize. That predicate was wrong (Haskell uses equality)
+    // and at the wrong layer (max_block_body_size is a chain-checks cap, not
+    // BBODY). This test ensures the approximation does not re-appear.
+    #[test]
+    fn test_body_size_approximation_removed() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        // Set a small cap so the old check would fire.
+        params.max_block_body_size = 100;
+        let mut state = LedgerState::new(params);
+
+        // body_size (200) > max_block_body_size (100) — the bogus check would
+        // have rejected this with WrongBlockBodySize.
+        let block = make_test_block(Era::Conway, 1_000, 1, 9, 200, vec![]);
+
+        let result = state.apply_block(&block, BlockValidationMode::ValidateAll);
+
+        // The removed approximation must NOT produce WrongBlockBodySize.
+        // Any other error or Ok is acceptable.
+        assert!(
+            !matches!(result, Err(LedgerError::WrongBlockBodySize { .. })),
+            "Bogus body-size approximation must not be present; got: {result:?}"
         );
     }
 }
