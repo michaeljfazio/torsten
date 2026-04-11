@@ -9,8 +9,18 @@
 #![allow(dead_code)]
 #![allow(clippy::enum_variant_names)]
 
+use dugite_ledger::state::{GovernanceState, LedgerState, ProposalState, StakeSnapshot};
+use dugite_primitives::credentials::Credential;
+use dugite_primitives::hash::{Hash28, Hash32, TransactionHash};
+use dugite_primitives::protocol_params::ProtocolParameters;
+use dugite_primitives::time::EpochNo;
+use dugite_primitives::transaction::{
+    Anchor, GovAction, GovActionId, ProposalProcedure, Rational, Vote, Voter, VotingProcedure,
+};
+use dugite_primitives::value::Lovelace;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RatificationFixture {
@@ -109,6 +119,234 @@ pub enum EnactedBucket {
     // using them so the assertion match stays exhaustive.
 }
 
+/// Decode a hex string to raw bytes, panicking on error with context.
+fn decode_hex_bytes(hex_str: &str, ctx: &str) -> Vec<u8> {
+    if !hex_str.len().is_multiple_of(2) {
+        panic!("invalid hex for {ctx}: odd length ({hex_str})");
+    }
+    (0..hex_str.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex_str[i..i + 2], 16)
+                .unwrap_or_else(|e| panic!("invalid hex byte for {ctx} at {i}: {e}"))
+        })
+        .collect()
+}
+
+/// Parse a `"<32-byte-hex>#<u32>"` action id string into a `GovActionId`.
+fn parse_gov_action_id(s: &str) -> GovActionId {
+    let (hash_hex, idx_str) = s
+        .split_once('#')
+        .unwrap_or_else(|| panic!("malformed gov_action_id (missing '#'): {s}"));
+    let transaction_id: TransactionHash = Hash32::from_hex(hash_hex)
+        .unwrap_or_else(|e| panic!("invalid gov action tx hash hex {hash_hex}: {e}"));
+    let action_index: u32 = idx_str
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid gov action index {idx_str}: {e}"));
+    GovActionId {
+        transaction_id,
+        action_index,
+    }
+}
+
+/// Parse a 32-byte-hex string into a `Hash32`, panicking on error with context.
+fn parse_hash32(hex_str: &str, ctx: &str) -> Hash32 {
+    Hash32::from_hex(hex_str)
+        .unwrap_or_else(|e| panic!("invalid Hash32 hex for {ctx} ({hex_str}): {e}"))
+}
+
+/// Parse a 28-byte-hex string into a `Hash28`, panicking on error with context.
+fn parse_hash28(hex_str: &str, ctx: &str) -> Hash28 {
+    Hash28::from_hex(hex_str)
+        .unwrap_or_else(|e| panic!("invalid Hash28 hex for {ctx} ({hex_str}): {e}"))
+}
+
+impl RatificationFixture {
+    /// Load a fixture from a JSON file, panicking on IO or parse errors.
+    pub fn load(path: &str) -> Self {
+        let contents = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read fixture file {path}: {e}"));
+        serde_json::from_str(&contents)
+            .unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"))
+    }
+
+    /// Build a minimal `LedgerState` positioned at the fixture's `pparams_epoch`
+    /// with exactly the fields `ratify_proposals()` reads populated:
+    ///
+    /// * `gov.governance.proposals` + `votes_by_action`
+    /// * `gov.governance.committee_*` (hot keys, expiration, resigned, threshold)
+    /// * `gov.governance.drep_distribution_snapshot`, `drep_snapshot_no_confidence`, and `drep_snapshot_abstain` (so `build_drep_power_cache` takes the snapshot path rather than the live-state fallback)
+    /// * `epochs.snapshots.set.pool_stake` (SPO stake read by `ratify_proposals`)
+    /// * `gov.governance.enacted_*` roots from `parent_enacted`
+    ///
+    /// `ratification_snapshot` is intentionally left `None` so live state is used.
+    /// `vote_delegations` is left empty so the snapshot DRep path is taken.
+    pub fn into_ledger_state(self) -> LedgerState {
+        let mut ledger = LedgerState::new(ProtocolParameters::mainnet_defaults());
+        ledger.epoch = EpochNo(self.pparams_epoch);
+
+        // Parse the proposal ID once — used as the key in both `proposals`
+        // and `votes_by_action`.
+        let action_id = parse_gov_action_id(&self.proposal.gov_action_id);
+
+        // Build the proposal procedure. For first-slice fixtures we only need
+        // a tag-level-correct action; use `InfoAction` as a placeholder for any
+        // of the in-scope tags (PParamUpdate / HardFork / Committee /
+        // Constitution). Reconstructing the inner fields is deferred to a
+        // later task.
+        let return_addr = decode_hex_bytes(&self.proposal.return_addr_hex, "return_addr_hex");
+        let anchor = self
+            .proposal
+            .anchor
+            .as_ref()
+            .map(|a| Anchor {
+                url: a.url.clone(),
+                data_hash: parse_hash32(&a.data_hash, "proposal anchor data_hash"),
+            })
+            .unwrap_or_else(|| Anchor {
+                url: String::new(),
+                data_hash: Hash32::ZERO,
+            });
+        let procedure = ProposalProcedure {
+            deposit: Lovelace(self.proposal.deposit),
+            return_addr,
+            gov_action: GovAction::InfoAction,
+            anchor,
+        };
+
+        // Count votes by value into yes/no/abstain tallies (u64 counts — we
+        // don't have per-vote stake at this level, stake comes from the
+        // DRep/SPO snapshot maps).
+        let mut yes_votes: u64 = 0;
+        let mut no_votes: u64 = 0;
+        let mut abstain_votes: u64 = 0;
+        for v in &self.votes {
+            match v.vote {
+                FixtureVoteValue::Yes => yes_votes += 1,
+                FixtureVoteValue::No => no_votes += 1,
+                FixtureVoteValue::Abstain => abstain_votes += 1,
+            }
+        }
+
+        let proposal_state = ProposalState {
+            procedure,
+            proposed_epoch: EpochNo(self.proposed_epoch),
+            expires_epoch: EpochNo(self.proposal.expiration),
+            yes_votes,
+            no_votes,
+            abstain_votes,
+        };
+
+        // Build the (Voter, VotingProcedure) list for `votes_by_action`.
+        let votes_vec: Vec<(Voter, VotingProcedure)> = self
+            .votes
+            .iter()
+            .map(|fv| {
+                let voter = match fv.voter_type {
+                    FixtureVoterType::ConstitutionalCommitteeHotKeyHash => {
+                        Voter::ConstitutionalCommittee(Credential::VerificationKey(parse_hash28(
+                            &fv.voter_id,
+                            "cc hot key hash voter",
+                        )))
+                    }
+                    FixtureVoterType::ConstitutionalCommitteeHotScriptHash => {
+                        Voter::ConstitutionalCommittee(Credential::Script(parse_hash28(
+                            &fv.voter_id,
+                            "cc hot script hash voter",
+                        )))
+                    }
+                    FixtureVoterType::DRepKeyHash => Voter::DRep(Credential::VerificationKey(
+                        parse_hash28(&fv.voter_id, "drep key hash voter"),
+                    )),
+                    FixtureVoterType::DRepScriptHash => Voter::DRep(Credential::Script(
+                        parse_hash28(&fv.voter_id, "drep script hash voter"),
+                    )),
+                    FixtureVoterType::StakePoolKeyHash => Voter::StakePool(
+                        parse_hash28(&fv.voter_id, "stake pool key hash voter").to_hash32_padded(),
+                    ),
+                };
+                let vote = match fv.vote {
+                    FixtureVoteValue::Yes => Vote::Yes,
+                    FixtureVoteValue::No => Vote::No,
+                    FixtureVoteValue::Abstain => Vote::Abstain,
+                };
+                (voter, VotingProcedure { vote, anchor: None })
+            })
+            .collect();
+
+        // Mutate the inner GovernanceState (Arc-wrapped in GovSubState).
+        {
+            let gov: &mut GovernanceState = Arc::make_mut(&mut ledger.gov.governance);
+
+            gov.proposals.insert(action_id.clone(), proposal_state);
+            gov.votes_by_action.insert(action_id.clone(), votes_vec);
+
+            // Committee state
+            for member in &self.committee.members {
+                let cold = parse_hash32(&member.cold_key, "committee cold key");
+                gov.committee_expiration
+                    .insert(cold, EpochNo(member.expiration));
+                if let Some(hot_hex) = &member.hot_key {
+                    let hot = parse_hash32(hot_hex, "committee hot key");
+                    gov.committee_hot_keys.insert(cold, hot);
+                }
+            }
+            for resigned_hex in &self.committee.resigned {
+                let cold = parse_hash32(resigned_hex, "committee resigned cold key");
+                gov.committee_resigned.insert(cold, None);
+            }
+            gov.committee_threshold = Some(Rational {
+                numerator: self.committee.threshold.numerator,
+                denominator: self.committee.threshold.denominator,
+            });
+
+            // DRep power snapshot (keys are 32-byte typed credential hashes).
+            // Leaving `vote_delegations` empty ensures `build_drep_power_cache`
+            // uses the snapshot fields rather than the live-state fallback.
+            for (drep_hex, stake) in &self.drep_power {
+                let cred_hash = parse_hash32(drep_hex, "drep_power credential hash");
+                gov.drep_distribution_snapshot.insert(cred_hash, *stake);
+            }
+            gov.drep_snapshot_no_confidence = self.drep_no_confidence;
+            gov.drep_snapshot_abstain = self.drep_abstain;
+
+            // Enacted roots (parent_enacted) — each field is optional.
+            gov.enacted_pparam_update = self
+                .parent_enacted
+                .pparam_update
+                .as_deref()
+                .map(parse_gov_action_id);
+            gov.enacted_hard_fork = self
+                .parent_enacted
+                .hard_fork
+                .as_deref()
+                .map(parse_gov_action_id);
+            gov.enacted_committee = self
+                .parent_enacted
+                .committee
+                .as_deref()
+                .map(parse_gov_action_id);
+            gov.enacted_constitution = self
+                .parent_enacted
+                .constitution
+                .as_deref()
+                .map(parse_gov_action_id);
+        }
+
+        // SPO stake — `ratify_proposals()` reads `epochs.snapshots.set.pool_stake`.
+        // Build a minimal "set" snapshot at `pparams_epoch` containing just the
+        // pool_stake entries from the fixture; other snapshot fields stay empty.
+        let mut set_snapshot = StakeSnapshot::empty(EpochNo(self.pparams_epoch));
+        for (pool_hex, stake) in &self.spo_stake {
+            let pool_id = parse_hash28(pool_hex, "spo_stake pool id");
+            set_snapshot.pool_stake.insert(pool_id, Lovelace(*stake));
+        }
+        ledger.epochs.snapshots.set = Some(set_snapshot);
+
+        ledger
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ParentEnacted {
     #[serde(rename = "PParamUpdate")]
@@ -171,4 +409,13 @@ fn fixture_deserializes_minimal_json() {
         EnactedBucket::PParamUpdate
     );
     assert!(fixture.expected_outcome.ratified);
+}
+
+#[test]
+fn minimal_fixture_builds_ledger_state_with_one_proposal() {
+    let fixture: RatificationFixture = serde_json::from_str(MINIMAL_JSON).expect("parse");
+    let ledger = fixture.into_ledger_state();
+    assert_eq!(ledger.gov.governance.proposals.len(), 1);
+    assert!(ledger.gov.governance.drep_distribution_snapshot.is_empty());
+    assert_eq!(ledger.gov.governance.drep_snapshot_no_confidence, 0);
 }
