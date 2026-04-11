@@ -130,18 +130,26 @@ async fn main() {
     )
     .await;
 
+    // Stub fields below are placeholders to be filled in during Task 5
+    // (real fixture capture).  They are intentionally zero/null so that an
+    // unedited capture round-trips through the loader but obviously fails
+    // any meaningful ratification assertion — forcing the fixture author to
+    // populate them by hand from Koios responses.  Greppable as TODO(task-5).
     let fixture = serde_json::json!({
         "proposal": proposal,
-        "proposed_epoch": proposal.get("proposed_epoch").cloned().unwrap_or(serde_json::Value::Null),
         "votes": votes,
         "drep_power": drep_power,
+        // TODO(task-5): aggregate from drep_voting_power_history rows.
         "drep_no_confidence": 0u64,
+        // TODO(task-5): aggregate from drep_voting_power_history rows.
         "drep_abstain": 0u64,
         "spo_stake": pool_power,
         "committee": committee,
         "pparams_epoch": ratification_epoch,
         "pparams": pparams,
+        // TODO(task-5): sum drep_voting_power_history rows at snapshot epoch.
         "total_drep_stake": 0u64,
+        // TODO(task-5): sum pool_voting_power_history rows at snapshot epoch.
         "total_spo_stake": 0u64,
         "voting_summary": voting_summary,
         "expected_outcome": {
@@ -154,6 +162,8 @@ async fn main() {
             "enacted_epoch": ratification_epoch,
             "enacted_id": format!("{tx_hex}#{idx}"),
         },
+        // TODO(task-5): seed each bucket from a recursive capture of
+        // proposal.prev_action_id when present.
         "parent_enacted": {
             "PParamUpdate": null,
             "HardFork": null,
