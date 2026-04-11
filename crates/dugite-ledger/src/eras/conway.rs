@@ -70,12 +70,6 @@ impl ConwayRules {
 }
 
 impl EraRules for ConwayRules {
-    /// Conway block body validation.
-    ///
-    /// In a full implementation this would check the per-block reference script
-    /// size limit (max_ref_script_size_per_block). For now we return `Ok(())`
-    /// -- the detailed ref-script size check will be added when the orchestrator
-    /// is wired in and full block-level validation is implemented.
     /// Validate Conway block body constraints.
     ///
     /// Checks:
