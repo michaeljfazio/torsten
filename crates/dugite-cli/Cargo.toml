@@ -8,6 +8,10 @@ description = "CLI tool for Dugite Cardano node (cardano-cli compatible)"
 name = "dugite-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "capture-ratification-fixture"
+path = "src/bin/capture_ratification_fixture.rs"
+
 [dependencies]
 dugite-primitives = { workspace = true }
 dugite-crypto = { workspace = true }
@@ -25,3 +29,4 @@ bech32 = { workspace = true }
 minicbor = { workspace = true }
 rand = { workspace = true }
 blake2 = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
