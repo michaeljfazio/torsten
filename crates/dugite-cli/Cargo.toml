@@ -29,4 +29,4 @@ bech32 = { workspace = true }
 minicbor = { workspace = true }
 rand = { workspace = true }
 blake2 = { workspace = true }
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest = { workspace = true }

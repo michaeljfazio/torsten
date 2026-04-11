@@ -7,8 +7,14 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// Capture a Conway ratification fixture from Koios preview.
+///
+/// One-shot offline dev tool that writes a JSON fixture under
+/// `fixtures/conway-ratification/` for use by
+/// `crates/dugite-ledger/tests/conway_ratification.rs`.  Not a CI
+/// dependency.
 #[derive(Parser, Debug)]
-#[command(name = "capture-ratification-fixture")]
+#[command(name = "capture-ratification-fixture", version, about)]
 struct Args {
     /// Network (only "preview" is supported for this first slice).
     #[arg(long, default_value = "preview")]
@@ -23,12 +29,18 @@ struct Args {
     output: PathBuf,
 }
 
-fn main() {
+// Exit code convention (Task 4 should preserve or deliberately replace this):
+//   1 = todo / not yet implemented
+//   2 = bad arguments
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let args = Args::parse();
     if args.network != "preview" {
-        eprintln!("only --network=preview is supported");
+        // exit 2 = bad args
+        eprintln!("only --network=preview is supported (exit 2 = bad args)");
         std::process::exit(2);
     }
+    // exit 1 = not yet implemented (Task 4 replaces this body)
     eprintln!(
         "capture-ratification-fixture: TODO — fetch {} and write {}",
         args.proposal_id,
