@@ -208,7 +208,7 @@ pub enum GovernanceChange {
     DRepUpdate {
         credential_hash: Hash32,
         anchor: Option<Anchor>,
-        last_active_epoch: EpochNo,
+        drep_expiry: EpochNo,
     },
     DRepUnregister {
         credential_hash: Hash32,
@@ -855,11 +855,11 @@ fn apply_governance_change(state: &mut LedgerState, change: &GovernanceChange) {
         GovernanceChange::DRepUpdate {
             credential_hash,
             anchor,
-            last_active_epoch,
+            drep_expiry,
         } => {
             if let Some(drep) = gov.dreps.get_mut(credential_hash) {
                 drep.anchor = anchor.clone();
-                drep.last_active_epoch = *last_active_epoch;
+                drep.drep_expiry = *drep_expiry;
                 drep.active = true;
             }
         }

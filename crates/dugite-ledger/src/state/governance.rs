@@ -301,11 +301,12 @@ impl LedgerState {
         // Track DRep activity — voting counts as activity per CIP-1694
         if let Voter::DRep(cred) = voter {
             let drep_hash = credential_to_hash(cred);
+            let expiry = self.compute_drep_expiry();
             if let Some(drep) = Arc::make_mut(&mut self.gov.governance)
                 .dreps
                 .get_mut(&drep_hash)
             {
-                drep.last_active_epoch = self.epoch;
+                drep.drep_expiry = expiry;
             }
         }
 
@@ -576,11 +577,12 @@ impl LedgerState {
         // Track DRep activity — voting counts as activity per CIP-1694.
         if let Voter::DRep(cred) = voter {
             let drep_hash = credential_to_hash(cred);
+            let expiry = self.compute_drep_expiry();
             if let Some(drep) = Arc::make_mut(&mut self.gov.governance)
                 .dreps
                 .get_mut(&drep_hash)
             {
-                drep.last_active_epoch = self.epoch;
+                drep.drep_expiry = expiry;
             }
         }
 
@@ -653,6 +655,30 @@ impl LedgerState {
         let total_drep_stake = self.compute_total_drep_stake();
         // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
         let (drep_power_cache, no_confidence_stake, _abstain_stake) = self.build_drep_power_cache();
+
+        // Diagnostic: DRep distribution details for governance debugging
+        {
+            let cache_sum: u64 = drep_power_cache.values().sum();
+            let active_dreps = self
+                .gov
+                .governance
+                .dreps
+                .values()
+                .filter(|d| d.active)
+                .count();
+            let total_dreps = self.gov.governance.dreps.len();
+            debug!(
+                epoch = self.epoch.0,
+                drep_cache_size = drep_power_cache.len(),
+                drep_cache_sum = cache_sum,
+                no_confidence_stake,
+                _abstain_stake,
+                total_drep_stake,
+                active_dreps,
+                total_dreps,
+                "DRep distribution for ratification"
+            );
+        }
 
         // SPO voting power: use the **set** snapshot (= previous epoch's mark),
         // matching Haskell's `dpStakePoolDistr` in the DRep pulser.
@@ -2434,29 +2460,6 @@ pub(crate) fn check_cc_approval(
         }
     }
 
-    if action_id.transaction_id.to_hex().starts_with("35b81b42") {
-        debug!(
-            "check_cc_approval 35b81b42: active={} yes={} total_excl_abstain={} cc_votes={} hot_keys={} members={}",
-            active_size, yes_count, total_excluding_abstain, cc_votes.len(),
-            committee_hot_keys.len(), committee_expiration.len(),
-        );
-        for (cold, expiry) in committee_expiration {
-            let hot = committee_hot_keys.get(cold);
-            let resigned = committee_resigned.contains_key(cold);
-            let expired = current_epoch > *expiry;
-            let vote = hot.and_then(|h| cc_votes.get(h));
-            debug!(
-                "  member cold={} expiry={} hot={:?} resigned={} expired={} vote={:?}",
-                cold.to_hex(),
-                expiry.0,
-                hot.map(|h| h.to_hex()),
-                resigned,
-                expired,
-                vote,
-            );
-        }
-    }
-
     // Check committeeMinSize (skipped during bootstrap per Haskell spec)
     if !bootstrap && active_size < committee_min_size {
         return false;
@@ -2987,7 +2990,7 @@ mod tests {
                     deposit: Lovelace(500_000_000),
                     anchor: None,
                     registered_epoch: EpochNo(0),
-                    last_active_epoch: EpochNo(0),
+                    drep_expiry: EpochNo(0),
                     active: true,
                 },
             );

@@ -300,6 +300,7 @@ impl LedgerState {
                 anchor,
             } => {
                 let key = credential_to_hash(credential);
+                let expiry = self.compute_drep_expiry();
                 Arc::make_mut(&mut self.gov.governance).dreps.insert(
                     key,
                     DRepRegistration {
@@ -307,7 +308,7 @@ impl LedgerState {
                         deposit: *deposit,
                         anchor: anchor.clone(),
                         registered_epoch: self.epoch,
-                        last_active_epoch: self.epoch,
+                        drep_expiry: expiry,
                         active: true,
                     },
                 );
@@ -345,9 +346,10 @@ impl LedgerState {
             }
             Certificate::UpdateDRep { credential, anchor } => {
                 let key = credential_to_hash(credential);
+                let expiry = self.compute_drep_expiry();
                 if let Some(drep) = Arc::make_mut(&mut self.gov.governance).dreps.get_mut(&key) {
                     drep.anchor = anchor.clone();
-                    drep.last_active_epoch = self.epoch;
+                    drep.drep_expiry = expiry;
                     debug!("DRep updated: {}", key.to_hex());
                 }
             }
@@ -928,12 +930,13 @@ impl LedgerState {
             } => {
                 let key = credential_to_hash(credential);
                 let is_script = matches!(credential, Credential::Script(_));
+                let expiry = self.compute_drep_expiry();
                 let registration = DRepRegistration {
                     credential: credential.clone(),
                     deposit: *deposit,
                     anchor: anchor.clone(),
                     registered_epoch: self.epoch,
-                    last_active_epoch: self.epoch,
+                    drep_expiry: expiry,
                     active: true,
                 };
                 Arc::make_mut(&mut self.gov.governance)
@@ -980,15 +983,16 @@ impl LedgerState {
             }
             Certificate::UpdateDRep { credential, anchor } => {
                 let key = credential_to_hash(credential);
+                let expiry = self.compute_drep_expiry();
                 if let Some(drep) = Arc::make_mut(&mut self.gov.governance).dreps.get_mut(&key) {
                     drep.anchor = anchor.clone();
-                    drep.last_active_epoch = self.epoch;
+                    drep.drep_expiry = expiry;
                     debug!("DRep updated: {}", key.to_hex());
                 }
                 delta.governance_changes.push(GovernanceChange::DRepUpdate {
                     credential_hash: key,
                     anchor: anchor.clone(),
-                    last_active_epoch: self.epoch,
+                    drep_expiry: expiry,
                 });
             }
             Certificate::VoteDelegation { credential, drep } => {

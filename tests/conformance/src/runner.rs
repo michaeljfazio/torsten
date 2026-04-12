@@ -976,12 +976,11 @@ fn simulate_epoch_transition(
         .dreps
         .iter()
         .map(|d| {
-            let inactive =
-                new_epoch.saturating_sub(d.last_active_epoch) > env.protocol_params.drep_activity;
+            let expired = new_epoch > d.drep_expiry;
             crate::schema::EpochDRep {
                 credential_hash: d.credential_hash.clone(),
-                last_active_epoch: d.last_active_epoch,
-                active: !inactive,
+                drep_expiry: d.drep_expiry,
+                active: !expired,
             }
         })
         .collect();

@@ -227,7 +227,7 @@ impl EraRules for ConwayRules {
         // exactly match reward balances.
 
         // Step 5: Update DRep activity for voting DReps in this transaction.
-        update_drep_expiries_for_tx(tx, ctx.current_epoch, gov);
+        update_drep_expiries_for_tx(tx, ctx.current_epoch, gov, epochs);
 
         // Step 6: Drain withdrawal accounts.
         common::drain_withdrawal_accounts(tx, certs);
@@ -937,9 +937,19 @@ fn apply_conway_cert(
     current_epoch: EpochNo,
     certs: &mut CertSubState,
     gov: &mut GovSubState,
-    _epochs: &EpochSubState,
+    epochs: &EpochSubState,
 ) {
+    let drep_activity = epochs.protocol_params.drep_activity;
+    let pv_major = epochs.protocol_params.protocol_version_major;
     let governance = Arc::make_mut(&mut gov.governance);
+    let drep_expiry = {
+        let base = current_epoch.0 + drep_activity;
+        if pv_major >= 10 {
+            EpochNo(base.saturating_sub(governance.num_dormant_epochs))
+        } else {
+            EpochNo(base)
+        }
+    };
 
     match cert {
         // Conway stake registration with explicit deposit (cert tag 7).
@@ -994,7 +1004,7 @@ fn apply_conway_cert(
                     deposit: *deposit,
                     anchor: anchor.clone(),
                     registered_epoch: current_epoch,
-                    last_active_epoch: current_epoch,
+                    drep_expiry,
                     active: true,
                 },
             );
@@ -1019,7 +1029,7 @@ fn apply_conway_cert(
             let key = credential.to_typed_hash32();
             if let Some(drep) = governance.dreps.get_mut(&key) {
                 drep.anchor = anchor.clone();
-                drep.last_active_epoch = current_epoch;
+                drep.drep_expiry = drep_expiry;
                 drep.active = true;
                 debug!("DRep updated: {}", key.to_hex());
             }
@@ -1184,22 +1194,34 @@ fn apply_conway_cert(
     }
 }
 
-/// Update DRep last-active epoch for DReps that vote in this transaction.
+/// Update DRep expiry for DReps that vote in this transaction.
 ///
 /// Per CIP-1694, a DRep's activity timer resets whenever they cast a vote.
 /// This implements step 5 of the Conway LEDGER pipeline
 /// (updateVotingDRepExpiries).
-fn update_drep_expiries_for_tx(tx: &Transaction, current_epoch: EpochNo, gov: &mut GovSubState) {
+fn update_drep_expiries_for_tx(
+    tx: &Transaction,
+    current_epoch: EpochNo,
+    gov: &mut GovSubState,
+    epochs: &EpochSubState,
+) {
     if tx.body.voting_procedures.is_empty() {
         return;
     }
 
+    let activity = epochs.protocol_params.drep_activity;
+    let base = current_epoch.0 + activity;
     let governance = Arc::make_mut(&mut gov.governance);
+    let expiry = if epochs.protocol_params.protocol_version_major >= 10 {
+        EpochNo(base.saturating_sub(governance.num_dormant_epochs))
+    } else {
+        EpochNo(base)
+    };
     for voter in tx.body.voting_procedures.keys() {
         if let Voter::DRep(credential) = voter {
             let key = credential.to_typed_hash32();
             if let Some(drep) = governance.dreps.get_mut(&key) {
-                drep.last_active_epoch = current_epoch;
+                drep.drep_expiry = expiry;
                 drep.active = true;
             }
         }
@@ -2125,7 +2147,7 @@ mod tests {
                 deposit: Lovelace(500_000_000),
                 anchor: None,
                 registered_epoch: EpochNo(2),
-                last_active_epoch: EpochNo(2),
+                drep_expiry: EpochNo(22), // epoch 2 + drep_activity 20
                 active: true,
             },
         );
@@ -2157,9 +2179,9 @@ mod tests {
         );
         assert!(result.is_ok());
 
-        // DRep last_active_epoch should be updated to current epoch (5).
+        // DRep expiry should be updated: epoch 5 + drep_activity 20 = 25.
         let drep = &gov.governance.dreps[&key];
-        assert_eq!(drep.last_active_epoch, EpochNo(5));
+        assert_eq!(drep.drep_expiry, EpochNo(25));
     }
 
     /// Conway DRep deregistration removes the DRep.
@@ -2184,7 +2206,7 @@ mod tests {
                 deposit: Lovelace(500_000_000),
                 anchor: None,
                 registered_epoch: EpochNo(2),
-                last_active_epoch: EpochNo(2),
+                drep_expiry: EpochNo(22),
                 active: true,
             },
         );

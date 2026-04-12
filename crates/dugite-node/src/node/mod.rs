@@ -374,7 +374,6 @@ impl Node {
         let mut conway_committee_members: Vec<([u8; 32], u64)> = Vec::new();
         let mut conway_constitution: Option<dugite_primitives::transaction::Constitution> = None;
         let mut conway_initial_dreps: Vec<(dugite_primitives::hash::Hash28, u64)> = Vec::new();
-        let mut _conway_drep_activity: u64 = 0;
         let mut conway_genesis_file_hash: Option<dugite_primitives::hash::Hash32> = None;
         if let Some(ref genesis_path) = args.config.conway_genesis_file {
             let genesis_path = config_dir.join(genesis_path);
@@ -391,7 +390,6 @@ impl Node {
                     conway_committee_members = genesis.committee_members();
                     conway_constitution = genesis.to_ledger_constitution();
                     conway_initial_dreps = genesis.initial_dreps_as_entries();
-                    _conway_drep_activity = genesis.d_rep_activity;
                     genesis.apply_to_protocol_params(&mut protocol_params);
                 }
                 Err(e) => {
@@ -754,15 +752,15 @@ impl Node {
         }
 
         // Seed initial DReps from Conway genesis when the ledger DRep map is
-        // empty (fresh start). On a fresh node current_epoch is 0; Haskell's
-        // `addDefaultDRepsToState` sets expiry = 0 + drep_activity, so we set
-        // last_active_epoch = 0 (the elapsed-time check adds drep_activity).
+        // empty (fresh start). Haskell's `addDefaultDRepsToState` sets
+        // expiry = 0 + drep_activity (bootstrap phase, no dormant subtraction).
         if ledger.gov.governance.dreps.is_empty() && !conway_initial_dreps.is_empty() {
             use dugite_ledger::state::DRepRegistration;
             use dugite_primitives::credentials::Credential;
             use dugite_primitives::value::Lovelace;
             use dugite_primitives::EpochNo;
             let count = conway_initial_dreps.len();
+            let drep_activity = ledger.epochs.protocol_params.drep_activity;
             let gov = std::sync::Arc::make_mut(&mut ledger.gov.governance);
             for (hash28, deposit) in &conway_initial_dreps {
                 let credential = Credential::VerificationKey(*hash28);
@@ -774,7 +772,7 @@ impl Node {
                         deposit: Lovelace(*deposit),
                         anchor: None,
                         registered_epoch: EpochNo(0),
-                        last_active_epoch: EpochNo(0),
+                        drep_expiry: EpochNo(drep_activity),
                         active: true,
                     },
                 );

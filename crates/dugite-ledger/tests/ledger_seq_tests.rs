@@ -599,7 +599,7 @@ fn drep_registration_reflected_in_tip_state() {
         deposit: Lovelace(500_000_000),
         anchor: None,
         registered_epoch: EpochNo(10),
-        last_active_epoch: EpochNo(10),
+        drep_expiry: EpochNo(30),
         active: true,
     };
 
@@ -632,7 +632,7 @@ fn drep_unregistration_removes_from_dreps() {
         deposit: Lovelace(500_000_000),
         anchor: None,
         registered_epoch: EpochNo(10),
-        last_active_epoch: EpochNo(10),
+        drep_expiry: EpochNo(30),
         active: true,
     };
 

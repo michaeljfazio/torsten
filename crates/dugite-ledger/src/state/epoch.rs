@@ -574,67 +574,41 @@ impl LedgerState {
         self.ratify_proposals();
 
         // Update dormant epoch counter per Haskell Conway.Rules.Epoch `updateNumDormantEpochs`.
-        //
-        // An epoch is "dormant" when there were no active governance proposals during it
-        // (i.e. `proposals` is empty at the epoch boundary, AFTER ratification+expiry have
-        // run and possibly consumed all proposals).  Dormant epochs are not counted against
-        // DRep activity so that DReps are not incorrectly marked inactive during periods
-        // when there was nothing to vote on.
-        //
-        // Haskell's ordering: check proposals AFTER ratification/expiry (so a last-epoch
-        // proposal that just got ratified means this epoch was NOT dormant).
-        {
+        // Only applicable during Conway era (PV >= 9).
+        if self.epochs.protocol_params.protocol_version_major >= 9 {
             let gov = Arc::make_mut(&mut self.gov.governance);
             if gov.proposals.is_empty() {
                 gov.num_dormant_epochs = gov.num_dormant_epochs.saturating_add(1);
                 debug!(
                     epoch = new_epoch.0,
                     num_dormant = gov.num_dormant_epochs,
-                    "Governance: epoch is dormant (no active proposals) — incrementing dormant counter"
+                    "Governance: epoch is dormant (no active proposals)"
                 );
             }
-            // If there were active proposals this epoch, do NOT increment.
-            // The counter never resets — it accumulates across the node's lifetime.
         }
 
-        // Mark inactive DReps per CIP-1694
+        // Mark inactive DReps per CIP-1694.
         //
-        // A DRep is inactive when the number of non-dormant epochs since their last
-        // activity exceeds the drep_activity threshold:
-        //
-        //   elapsed = new_epoch - last_active_epoch
-        //   active_elapsed = elapsed - num_dormant_epochs_since_last_vote
-        //   inactive = active_elapsed > drep_activity
-        //
-        // Because num_dormant_epochs is a global cumulative counter, we compute
-        // active_elapsed as: (new_epoch - last_active_epoch) - num_dormant_epochs.
-        // This may overcorrect if many dormant epochs occurred BEFORE last_active_epoch,
-        // but matches Haskell's `vsNumDormantEpochs` semantics which is also global.
-        //
-        // DReps remain registered but are excluded from voting power calculations.
-        let drep_activity = self.epochs.protocol_params.drep_activity;
-        if drep_activity > 0 {
-            let num_dormant = self.gov.governance.num_dormant_epochs;
+        // Haskell stores drepExpiry = (activity_epoch + drep_activity) - num_dormant
+        // at registration/vote time, then checks: currentEpoch > drepExpiry.
+        // We store the same value in drep.drep_expiry, so the check is simple.
+        if self.epochs.protocol_params.protocol_version_major >= 9 {
             let mut newly_inactive = 0u64;
             let mut reactivated = 0u64;
             for drep in Arc::make_mut(&mut self.gov.governance).dreps.values_mut() {
-                // Compute epochs elapsed since last activity, discounting dormant epochs.
-                let elapsed = new_epoch.0.saturating_sub(drep.last_active_epoch.0);
-                let active_elapsed = elapsed.saturating_sub(num_dormant);
-                let inactive = active_elapsed > drep_activity;
-                if inactive && drep.active {
+                let expired = new_epoch.0 > drep.drep_expiry.0;
+                if expired && drep.active {
                     drep.active = false;
                     newly_inactive += 1;
-                } else if !inactive && !drep.active {
+                } else if !expired && !drep.active {
                     drep.active = true;
                     reactivated += 1;
                 }
             }
             if newly_inactive > 0 || reactivated > 0 {
                 debug!(
-                    "DRep activity update at epoch {}: {} newly inactive, {} reactivated \
-                     (threshold: {} epochs, dormant: {})",
-                    new_epoch.0, newly_inactive, reactivated, drep_activity, num_dormant
+                    "DRep activity update at epoch {}: {} newly inactive, {} reactivated",
+                    new_epoch.0, newly_inactive, reactivated
                 );
             }
         }
