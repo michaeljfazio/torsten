@@ -230,10 +230,27 @@ impl EraRules for ConwayRules {
         common::drain_withdrawal_accounts(tx, certs);
 
         // Step 7: Process certificates (Shelley + Conway governance certs).
-        // First, process Shelley-era certs (StakeReg, StakeDeReg, Delegation, Pool).
-        common::process_shelley_certs(tx, ctx.current_slot, ctx.tx_index, certs, epochs, gov);
-        // Then, process Conway-specific governance certs.
-        process_conway_certs(tx, ctx.current_epoch, certs, gov, epochs);
+        //
+        // Haskell processes certs in a single ordered pass per tx. Dugite
+        // previously split this into two passes (Shelley then Conway) which
+        // broke tx cert sequences that interleave the two cert families, for
+        // example `[ConwayStakeDeregistration, ConwayStakeRegistration,
+        // StakeDelegation]`: the Shelley pass inserted the delegation first,
+        // then the Conway pass's DEREG wiped it. Now we walk certs in order
+        // and dispatch each one to both handlers (non-matching cert variants
+        // are no-ops), preserving Haskell's sequential semantics.
+        for (cert_index, cert) in tx.body.certificates.iter().enumerate() {
+            common::apply_shelley_cert(
+                cert,
+                cert_index,
+                ctx.current_slot,
+                ctx.tx_index,
+                certs,
+                epochs,
+                gov,
+            );
+            apply_conway_cert(cert, ctx.current_epoch, certs, gov, epochs);
+        }
 
         // Step 8: Apply GOV rule (votes + proposals).
         process_governance_votes_and_proposals(tx, ctx, gov, epochs);
@@ -908,8 +925,12 @@ impl EraRules for ConwayRules {
 ///
 /// Shelley-era certificate types (StakeRegistration, StakeDeregistration, etc.)
 /// are handled by `common::process_shelley_certs` and are NOT processed here.
-fn process_conway_certs(
-    tx: &Transaction,
+/// Apply a single Conway-era certificate to the ledger state.
+///
+/// Non-Conway cert variants are ignored (no-op). Callers must invoke the
+/// Shelley-era handler separately for those.
+fn apply_conway_cert(
+    cert: &Certificate,
     current_epoch: EpochNo,
     certs: &mut CertSubState,
     gov: &mut GovSubState,
@@ -917,248 +938,246 @@ fn process_conway_certs(
 ) {
     let governance = Arc::make_mut(&mut gov.governance);
 
-    for cert in &tx.body.certificates {
-        match cert {
-            // Conway stake registration with explicit deposit (cert tag 7).
-            // Same effect as Shelley StakeRegistration but the deposit is in the cert.
-            Certificate::ConwayStakeRegistration {
-                credential,
-                deposit,
-            } => {
-                let key = credential.to_typed_hash32();
-                certs
-                    .stake_distribution
-                    .stake_map
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                Arc::make_mut(&mut certs.reward_accounts)
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                if matches!(credential, Credential::Script(_)) {
-                    certs.script_stake_credentials.insert(key);
-                }
-                certs.total_stake_key_deposits += deposit.0;
-                certs.stake_key_deposits.insert(key, deposit.0);
-                debug!("Conway stake key registered: {}", key.to_hex());
+    match cert {
+        // Conway stake registration with explicit deposit (cert tag 7).
+        // Same effect as Shelley StakeRegistration but the deposit is in the cert.
+        Certificate::ConwayStakeRegistration {
+            credential,
+            deposit,
+        } => {
+            let key = credential.to_typed_hash32();
+            certs
+                .stake_distribution
+                .stake_map
+                .entry(key)
+                .or_insert(Lovelace(0));
+            Arc::make_mut(&mut certs.reward_accounts)
+                .entry(key)
+                .or_insert(Lovelace(0));
+            if matches!(credential, Credential::Script(_)) {
+                certs.script_stake_credentials.insert(key);
             }
-
-            // Conway stake deregistration with explicit refund (cert tag 8).
-            Certificate::ConwayStakeDeregistration { credential, refund } => {
-                let key = credential.to_typed_hash32();
-                let stored_deposit = certs.stake_key_deposits.remove(&key).unwrap_or(refund.0);
-                certs.total_stake_key_deposits = certs
-                    .total_stake_key_deposits
-                    .saturating_sub(stored_deposit);
-                Arc::make_mut(&mut certs.delegations).remove(&key);
-                Arc::make_mut(&mut certs.reward_accounts).remove(&key);
-                governance.vote_delegations.remove(&key);
-                certs.script_stake_credentials.remove(&key);
-                certs.pointer_map.retain(|_, v| *v != key);
-                debug!("Conway stake key deregistered: {}", key.to_hex());
-            }
-
-            // DRep registration.
-            Certificate::RegDRep {
-                credential,
-                deposit,
-                anchor,
-            } => {
-                let key = credential.to_typed_hash32();
-                governance.dreps.insert(
-                    key,
-                    DRepRegistration {
-                        credential: credential.clone(),
-                        deposit: *deposit,
-                        anchor: anchor.clone(),
-                        registered_epoch: current_epoch,
-                        last_active_epoch: current_epoch,
-                        active: true,
-                    },
-                );
-                governance.drep_registration_count += 1;
-                debug!("DRep registered: {}", key.to_hex());
-            }
-
-            // DRep deregistration.
-            Certificate::UnregDRep {
-                credential,
-                refund: _,
-            } => {
-                let key = credential.to_typed_hash32();
-                governance.dreps.remove(&key);
-                debug!("DRep deregistered: {}", key.to_hex());
-            }
-
-            // DRep metadata update.
-            Certificate::UpdateDRep {
-                credential, anchor, ..
-            } => {
-                let key = credential.to_typed_hash32();
-                if let Some(drep) = governance.dreps.get_mut(&key) {
-                    drep.anchor = anchor.clone();
-                    drep.last_active_epoch = current_epoch;
-                    drep.active = true;
-                    debug!("DRep updated: {}", key.to_hex());
-                }
-            }
-
-            // Vote delegation: delegate stake credential's vote to a DRep.
-            Certificate::VoteDelegation { credential, drep } => {
-                let key = credential.to_typed_hash32();
-                governance.vote_delegations.insert(key, drep.clone());
-                debug!("Vote delegated to DRep: {}", key.to_hex());
-            }
-
-            // Combined: delegate stake to pool + vote to DRep.
-            Certificate::StakeVoteDelegation {
-                credential,
-                pool_hash,
-                drep,
-            } => {
-                let key = credential.to_typed_hash32();
-                Arc::make_mut(&mut certs.delegations).insert(key, *pool_hash);
-                governance.vote_delegations.insert(key, drep.clone());
-                debug!(
-                    "Stake+vote delegated: {} -> pool {} + DRep",
-                    key.to_hex(),
-                    pool_hash.to_hex()
-                );
-            }
-
-            // Combined: register stake + delegate to pool.
-            Certificate::RegStakeDeleg {
-                credential,
-                pool_hash,
-                deposit,
-            } => {
-                let key = credential.to_typed_hash32();
-                // Register stake.
-                certs
-                    .stake_distribution
-                    .stake_map
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                Arc::make_mut(&mut certs.reward_accounts)
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                if matches!(credential, Credential::Script(_)) {
-                    certs.script_stake_credentials.insert(key);
-                }
-                certs.total_stake_key_deposits += deposit.0;
-                certs.stake_key_deposits.insert(key, deposit.0);
-                // Delegate to pool.
-                Arc::make_mut(&mut certs.delegations).insert(key, *pool_hash);
-                debug!(
-                    "RegStakeDeleg: {} -> pool {}",
-                    key.to_hex(),
-                    pool_hash.to_hex()
-                );
-            }
-
-            // Combined: register stake + delegate to pool + delegate vote.
-            Certificate::RegStakeVoteDeleg {
-                credential,
-                pool_hash,
-                drep,
-                deposit,
-            } => {
-                let key = credential.to_typed_hash32();
-                // Register stake.
-                certs
-                    .stake_distribution
-                    .stake_map
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                Arc::make_mut(&mut certs.reward_accounts)
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                if matches!(credential, Credential::Script(_)) {
-                    certs.script_stake_credentials.insert(key);
-                }
-                certs.total_stake_key_deposits += deposit.0;
-                certs.stake_key_deposits.insert(key, deposit.0);
-                // Delegate to pool + DRep.
-                Arc::make_mut(&mut certs.delegations).insert(key, *pool_hash);
-                governance.vote_delegations.insert(key, drep.clone());
-                debug!(
-                    "RegStakeVoteDeleg: {} -> pool {} + DRep",
-                    key.to_hex(),
-                    pool_hash.to_hex()
-                );
-            }
-
-            // Combined: register stake + delegate vote.
-            Certificate::VoteRegDeleg {
-                credential,
-                drep,
-                deposit,
-            } => {
-                let key = credential.to_typed_hash32();
-                // Register stake.
-                certs
-                    .stake_distribution
-                    .stake_map
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                Arc::make_mut(&mut certs.reward_accounts)
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                if matches!(credential, Credential::Script(_)) {
-                    certs.script_stake_credentials.insert(key);
-                }
-                certs.total_stake_key_deposits += deposit.0;
-                certs.stake_key_deposits.insert(key, deposit.0);
-                // Delegate vote.
-                governance.vote_delegations.insert(key, drep.clone());
-                debug!("VoteRegDeleg: {} + DRep", key.to_hex());
-            }
-
-            // CC hot key authorization.
-            Certificate::CommitteeHotAuth {
-                cold_credential,
-                hot_credential,
-            } => {
-                let cold_key = cold_credential.to_typed_hash32();
-                let hot_key = hot_credential.to_typed_hash32();
-                governance.committee_hot_keys.insert(cold_key, hot_key);
-                // Track script credentials for N2C query type fields.
-                if matches!(cold_credential, Credential::Script(_)) {
-                    governance.script_committee_credentials.insert(cold_key);
-                }
-                if matches!(hot_credential, Credential::Script(_)) {
-                    governance.script_committee_hot_credentials.insert(cold_key);
-                } else {
-                    // Re-auth with key hot key: remove previous script tracking.
-                    governance
-                        .script_committee_hot_credentials
-                        .remove(&cold_key);
-                }
-                debug!(
-                    "CC hot key authorized: {} -> {}",
-                    cold_key.to_hex(),
-                    hot_key.to_hex()
-                );
-            }
-
-            // CC cold key resignation.
-            Certificate::CommitteeColdResign {
-                cold_credential,
-                anchor,
-            } => {
-                let cold_key = cold_credential.to_typed_hash32();
-                governance
-                    .committee_resigned
-                    .insert(cold_key, anchor.clone());
-                if matches!(cold_credential, Credential::Script(_)) {
-                    governance.script_committee_credentials.insert(cold_key);
-                }
-                debug!("CC member resigned: {}", cold_key.to_hex());
-            }
-
-            // Skip Shelley certs and any unrecognized variants -- handled by
-            // process_shelley_certs or not relevant.
-            _ => {}
+            certs.total_stake_key_deposits += deposit.0;
+            certs.stake_key_deposits.insert(key, deposit.0);
+            debug!("Conway stake key registered: {}", key.to_hex());
         }
+
+        // Conway stake deregistration with explicit refund (cert tag 8).
+        Certificate::ConwayStakeDeregistration { credential, refund } => {
+            let key = credential.to_typed_hash32();
+            let stored_deposit = certs.stake_key_deposits.remove(&key).unwrap_or(refund.0);
+            certs.total_stake_key_deposits = certs
+                .total_stake_key_deposits
+                .saturating_sub(stored_deposit);
+            Arc::make_mut(&mut certs.delegations).remove(&key);
+            Arc::make_mut(&mut certs.reward_accounts).remove(&key);
+            governance.vote_delegations.remove(&key);
+            certs.script_stake_credentials.remove(&key);
+            certs.pointer_map.retain(|_, v| *v != key);
+            debug!("Conway stake key deregistered: {}", key.to_hex());
+        }
+
+        // DRep registration.
+        Certificate::RegDRep {
+            credential,
+            deposit,
+            anchor,
+        } => {
+            let key = credential.to_typed_hash32();
+            governance.dreps.insert(
+                key,
+                DRepRegistration {
+                    credential: credential.clone(),
+                    deposit: *deposit,
+                    anchor: anchor.clone(),
+                    registered_epoch: current_epoch,
+                    last_active_epoch: current_epoch,
+                    active: true,
+                },
+            );
+            governance.drep_registration_count += 1;
+            debug!("DRep registered: {}", key.to_hex());
+        }
+
+        // DRep deregistration.
+        Certificate::UnregDRep {
+            credential,
+            refund: _,
+        } => {
+            let key = credential.to_typed_hash32();
+            governance.dreps.remove(&key);
+            debug!("DRep deregistered: {}", key.to_hex());
+        }
+
+        // DRep metadata update.
+        Certificate::UpdateDRep {
+            credential, anchor, ..
+        } => {
+            let key = credential.to_typed_hash32();
+            if let Some(drep) = governance.dreps.get_mut(&key) {
+                drep.anchor = anchor.clone();
+                drep.last_active_epoch = current_epoch;
+                drep.active = true;
+                debug!("DRep updated: {}", key.to_hex());
+            }
+        }
+
+        // Vote delegation: delegate stake credential's vote to a DRep.
+        Certificate::VoteDelegation { credential, drep } => {
+            let key = credential.to_typed_hash32();
+            governance.vote_delegations.insert(key, drep.clone());
+            debug!("Vote delegated to DRep: {}", key.to_hex());
+        }
+
+        // Combined: delegate stake to pool + vote to DRep.
+        Certificate::StakeVoteDelegation {
+            credential,
+            pool_hash,
+            drep,
+        } => {
+            let key = credential.to_typed_hash32();
+            Arc::make_mut(&mut certs.delegations).insert(key, *pool_hash);
+            governance.vote_delegations.insert(key, drep.clone());
+            debug!(
+                "Stake+vote delegated: {} -> pool {} + DRep",
+                key.to_hex(),
+                pool_hash.to_hex()
+            );
+        }
+
+        // Combined: register stake + delegate to pool.
+        Certificate::RegStakeDeleg {
+            credential,
+            pool_hash,
+            deposit,
+        } => {
+            let key = credential.to_typed_hash32();
+            // Register stake.
+            certs
+                .stake_distribution
+                .stake_map
+                .entry(key)
+                .or_insert(Lovelace(0));
+            Arc::make_mut(&mut certs.reward_accounts)
+                .entry(key)
+                .or_insert(Lovelace(0));
+            if matches!(credential, Credential::Script(_)) {
+                certs.script_stake_credentials.insert(key);
+            }
+            certs.total_stake_key_deposits += deposit.0;
+            certs.stake_key_deposits.insert(key, deposit.0);
+            // Delegate to pool.
+            Arc::make_mut(&mut certs.delegations).insert(key, *pool_hash);
+            debug!(
+                "RegStakeDeleg: {} -> pool {}",
+                key.to_hex(),
+                pool_hash.to_hex()
+            );
+        }
+
+        // Combined: register stake + delegate to pool + delegate vote.
+        Certificate::RegStakeVoteDeleg {
+            credential,
+            pool_hash,
+            drep,
+            deposit,
+        } => {
+            let key = credential.to_typed_hash32();
+            // Register stake.
+            certs
+                .stake_distribution
+                .stake_map
+                .entry(key)
+                .or_insert(Lovelace(0));
+            Arc::make_mut(&mut certs.reward_accounts)
+                .entry(key)
+                .or_insert(Lovelace(0));
+            if matches!(credential, Credential::Script(_)) {
+                certs.script_stake_credentials.insert(key);
+            }
+            certs.total_stake_key_deposits += deposit.0;
+            certs.stake_key_deposits.insert(key, deposit.0);
+            // Delegate to pool + DRep.
+            Arc::make_mut(&mut certs.delegations).insert(key, *pool_hash);
+            governance.vote_delegations.insert(key, drep.clone());
+            debug!(
+                "RegStakeVoteDeleg: {} -> pool {} + DRep",
+                key.to_hex(),
+                pool_hash.to_hex()
+            );
+        }
+
+        // Combined: register stake + delegate vote.
+        Certificate::VoteRegDeleg {
+            credential,
+            drep,
+            deposit,
+        } => {
+            let key = credential.to_typed_hash32();
+            // Register stake.
+            certs
+                .stake_distribution
+                .stake_map
+                .entry(key)
+                .or_insert(Lovelace(0));
+            Arc::make_mut(&mut certs.reward_accounts)
+                .entry(key)
+                .or_insert(Lovelace(0));
+            if matches!(credential, Credential::Script(_)) {
+                certs.script_stake_credentials.insert(key);
+            }
+            certs.total_stake_key_deposits += deposit.0;
+            certs.stake_key_deposits.insert(key, deposit.0);
+            // Delegate vote.
+            governance.vote_delegations.insert(key, drep.clone());
+            debug!("VoteRegDeleg: {} + DRep", key.to_hex());
+        }
+
+        // CC hot key authorization.
+        Certificate::CommitteeHotAuth {
+            cold_credential,
+            hot_credential,
+        } => {
+            let cold_key = cold_credential.to_typed_hash32();
+            let hot_key = hot_credential.to_typed_hash32();
+            governance.committee_hot_keys.insert(cold_key, hot_key);
+            // Track script credentials for N2C query type fields.
+            if matches!(cold_credential, Credential::Script(_)) {
+                governance.script_committee_credentials.insert(cold_key);
+            }
+            if matches!(hot_credential, Credential::Script(_)) {
+                governance.script_committee_hot_credentials.insert(cold_key);
+            } else {
+                // Re-auth with key hot key: remove previous script tracking.
+                governance
+                    .script_committee_hot_credentials
+                    .remove(&cold_key);
+            }
+            debug!(
+                "CC hot key authorized: {} -> {}",
+                cold_key.to_hex(),
+                hot_key.to_hex()
+            );
+        }
+
+        // CC cold key resignation.
+        Certificate::CommitteeColdResign {
+            cold_credential,
+            anchor,
+        } => {
+            let cold_key = cold_credential.to_typed_hash32();
+            governance
+                .committee_resigned
+                .insert(cold_key, anchor.clone());
+            if matches!(cold_credential, Credential::Script(_)) {
+                governance.script_committee_credentials.insert(cold_key);
+            }
+            debug!("CC member resigned: {}", cold_key.to_hex());
+        }
+
+        // Skip Shelley certs and any unrecognized variants -- handled by
+        // apply_shelley_cert or not relevant.
+        _ => {}
     }
 }
 
@@ -2171,5 +2190,117 @@ mod tests {
         );
         assert!(result.is_ok());
         assert!(!gov.governance.dreps.contains_key(&key));
+    }
+
+    /// Regression test for the cstreamer epoch-890 divergence: in Conway era,
+    /// a tx containing `[ConwayStakeDeregistration, ConwayStakeRegistration,
+    /// StakeDelegation]` (in that cert order) must end with the credential
+    /// still registered AND delegated to the pool.
+    ///
+    /// Previously the Conway era applied all Shelley certs in one pass then
+    /// all Conway certs in a second pass. That made the Shelley `StakeDelegation`
+    /// fire before the Conway `ConwayStakeDeregistration` even though the
+    /// on-chain cert order was the opposite, so the subsequent DEREG wiped
+    /// the just-inserted delegation. A script stake credential on preview
+    /// (`c6a4349e...`, 1.39 B lovelace) dropped out of `delegations` as a
+    /// result and never re-entered any mark snapshot, compounding into a
+    /// persistent activeStake/reserves divergence vs the Haskell reference.
+    #[test]
+    fn test_interleaved_dereg_reg_deleg_preserves_delegation() {
+        let rules = ConwayRules::new();
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_conway_ctx(&params);
+
+        let script_hash = Hash28::from_bytes([0xc6; 28]);
+        let cred = Credential::Script(script_hash);
+        let key = cred.to_typed_hash32();
+        let pool_id = Hash28::from_bytes([0x24; 28]);
+
+        let mut certs = make_cert_sub();
+        // Pre-state: credential is registered + delegated to the pool (as it
+        // would be at the start of the suspect tx on-chain).
+        Arc::make_mut(&mut certs.delegations).insert(key, pool_id);
+        Arc::make_mut(&mut certs.reward_accounts).insert(key, Lovelace(0));
+        certs.stake_key_deposits.insert(key, 2_000_000);
+        certs.total_stake_key_deposits = 2_000_000;
+        certs.script_stake_credentials.insert(key);
+        certs
+            .stake_distribution
+            .stake_map
+            .insert(key, Lovelace(1_731_936_015));
+        // Register the pool so it has a valid PoolRegistration entry -- the
+        // delegation map is otherwise ignored by pool_stake aggregation.
+        Arc::make_mut(&mut certs.pool_params).insert(
+            pool_id,
+            PoolRegistration {
+                pool_id,
+                vrf_keyhash: Hash32::ZERO,
+                pledge: Lovelace(0),
+                cost: Lovelace(0),
+                margin_numerator: 0,
+                margin_denominator: 1,
+                reward_account: vec![0u8; 29],
+                owners: vec![],
+                relays: vec![],
+                metadata_url: None,
+                metadata_hash: None,
+            },
+        );
+
+        let mut utxo = make_utxo_sub(vec![]);
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+
+        let mut tx = make_tx(0x94, vec![], vec![], 0);
+        tx.body.certificates = vec![
+            Certificate::ConwayStakeDeregistration {
+                credential: cred.clone(),
+                refund: Lovelace(2_000_000),
+            },
+            Certificate::ConwayStakeRegistration {
+                credential: cred.clone(),
+                deposit: Lovelace(2_000_000),
+            },
+            Certificate::StakeDelegation {
+                credential: cred.clone(),
+                pool_hash: pool_id,
+            },
+        ];
+
+        rules
+            .apply_valid_tx(
+                &tx,
+                BlockValidationMode::ApplyOnly,
+                &ctx,
+                &mut utxo,
+                &mut certs,
+                &mut gov,
+                &mut epochs,
+            )
+            .expect("valid cert sequence should apply");
+
+        assert_eq!(
+            certs.delegations.get(&key).copied(),
+            Some(pool_id),
+            "credential must remain delegated after [DEREG, REG, DELEG] sequence"
+        );
+        assert!(
+            certs.stake_distribution.stake_map.contains_key(&key),
+            "credential must retain its stake_map entry"
+        );
+        assert_eq!(
+            certs.stake_distribution.stake_map.get(&key).copied(),
+            Some(Lovelace(1_731_936_015)),
+            "stake_map value must be preserved through DEREG/REG cycle"
+        );
+        assert!(
+            certs.script_stake_credentials.contains(&key),
+            "script credential flag must be restored by the REG"
+        );
+        assert_eq!(
+            certs.stake_key_deposits.get(&key).copied(),
+            Some(2_000_000),
+            "re-registered deposit must be tracked"
+        );
     }
 }
