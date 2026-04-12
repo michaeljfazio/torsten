@@ -648,7 +648,6 @@ impl LedgerState {
             let gov = Arc::make_mut(&mut self.gov.governance);
             gov.proposal_roots = roots;
             gov.proposal_graph = graph;
-            debug!("Governance forest rebuilt from flat proposals map (backward compat)");
         }
 
         let total_drep_stake = self.compute_total_drep_stake();
@@ -817,17 +816,6 @@ impl LedgerState {
 
             // Check voting thresholds using snapshot data
             if let Some(state) = snap_proposals.get(action_id) {
-                // Compute vote counts for logging
-                let (_drep_yes, _drep_total, _spo_yes, _spo_abstain, _cc_yes, _cc_total) = self
-                    .count_votes_by_type(
-                        action_id,
-                        &state.procedure.gov_action,
-                        &drep_power_cache,
-                        no_confidence_stake,
-                        &snap_votes,
-                        ratify_pool_stake_ref,
-                        snap_vote_delegations_ref,
-                    );
                 let remaining_treasury = self
                     .epochs
                     .treasury
@@ -1109,6 +1097,7 @@ impl LedgerState {
         gov.last_ratified = ratified_with_state;
         gov.last_expired = expired_removed;
         gov.last_ratify_delayed = delayed;
+
     }
 
     /// Whether we are in the Conway bootstrap phase (protocol version 9).
@@ -2338,8 +2327,10 @@ pub(crate) fn check_threshold(yes: u64, total: u64, threshold: &Rational) -> boo
     if threshold.is_zero() {
         return true;
     }
+    // Haskell uses (%?) where 0 %? 0 = 1, meaning an empty eligible-voter
+    // set is treated as unanimous acceptance (ratio = 1, passes any threshold).
     if total == 0 {
-        return false;
+        return true;
     }
     // Exact integer comparison: yes/total >= numerator/denominator
     // ⟺ yes * denominator >= numerator * total (using u128 to avoid overflow)
@@ -2449,23 +2440,13 @@ pub(crate) fn check_cc_approval(
         return false;
     }
 
-    // If no committee members exist at all
-    if active_size == 0 {
-        return false;
-    }
-
-    // If all active members abstained, ratio is 0
+    // Haskell's committeeAcceptedRatio uses (%?) where 0 %? 0 = 1.
+    // When all active members abstain (unregistered or no vote entry with
+    // abstain), totalExcludingAbstain == 0 and the ratio is defined as 1,
+    // which passes any threshold. This also covers active_size == 0 when
+    // the committee exists but has no non-expired members and minSize == 0.
     if total_excluding_abstain == 0 {
-        debug!(
-            action = %action_id.transaction_id.to_hex(),
-            active_size, yes_count, total_excluding_abstain,
-            threshold = threshold.as_f64(),
-            cc_voters = cc_votes.len(),
-            committee_members = committee_expiration.len(),
-            hot_keys = committee_hot_keys.len(),
-            "CC approval check: all active members abstained"
-        );
-        return false;
+        return true;
     }
 
     // Exact comparison: yes_count / total_excluding_abstain >= threshold
@@ -2594,7 +2575,7 @@ enum DefaultVote {
 /// Returns `None` for both "prev_action_id = None" (genesis root) and actions
 /// without a prev_action_id field (TreasuryWithdrawals, InfoAction).
 /// Used for sibling matching where None == None (genesis root siblings).
-fn gov_action_raw_prev_id(action: &GovAction) -> Option<GovActionId> {
+pub(crate) fn gov_action_raw_prev_id(action: &GovAction) -> Option<GovActionId> {
     match action {
         GovAction::ParameterChange { prev_action_id, .. }
         | GovAction::HardForkInitiation { prev_action_id, .. }
@@ -2608,7 +2589,7 @@ fn gov_action_raw_prev_id(action: &GovAction) -> Option<GovActionId> {
 /// Return a purpose tag for grouping governance actions by their governance
 /// purpose tree. Actions with the same tag share the same enacted root chain.
 /// Returns None for TreasuryWithdrawals and InfoAction (no purpose tree).
-fn gov_action_purpose_tag(action: &GovAction) -> Option<u8> {
+pub(crate) fn gov_action_purpose_tag(action: &GovAction) -> Option<u8> {
     match action {
         GovAction::ParameterChange { .. } => Some(0),
         GovAction::HardForkInitiation { .. } => Some(1),
@@ -2659,8 +2640,22 @@ pub(crate) fn forest_add_proposal(
     if prev_action_id == root.root.as_ref() {
         // Direct child of the purpose root (last enacted action or genesis).
         root.children.insert(action_id.clone());
+        debug!(
+            "forest_add: {}#{} -> root child (tag={}, root={:?}, prev={:?})",
+            action_id.transaction_id.to_hex(), action_id.action_index,
+            purpose_tag,
+            root.root.as_ref().map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+            prev_action_id.map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+        );
     } else {
         // Deeper node — add as child of its parent in the graph.
+        debug!(
+            "forest_add: {}#{} -> graph node (tag={}, root={:?}, prev={:?})",
+            action_id.transaction_id.to_hex(), action_id.action_index,
+            purpose_tag,
+            root.root.as_ref().map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+            prev_action_id.map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+        );
         // Create PEdges for the new node.
         let edges = super::PEdges {
             parent: prev_action_id.cloned(),
@@ -3792,7 +3787,8 @@ mod tests {
             },
         );
 
-        // CC vote should fail — only member is resigned
+        // Only member is resigned → abstain → total_excluding_abstain = 0
+        // Haskell %?: 0 %? 0 = 1 → passes (committeeMinSize = 0 allows this)
         let result = check_cc_approval(
             &action_id,
             &state.gov.governance.votes_by_action,
@@ -3804,7 +3800,7 @@ mod tests {
             state.epochs.protocol_params.committee_min_size,
             false,
         );
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -4962,12 +4958,13 @@ mod tests {
     }
 
     #[test]
-    fn test_check_threshold_zero_total_fails() {
+    fn test_check_threshold_zero_total_passes() {
+        // Haskell %?: 0 %? 0 = 1, so ratio = 1 passes any threshold
         let threshold = Rational {
             numerator: 1,
             denominator: 2,
         };
-        assert!(!check_threshold(0, 0, &threshold));
+        assert!(check_threshold(0, 0, &threshold));
     }
 
     #[test]

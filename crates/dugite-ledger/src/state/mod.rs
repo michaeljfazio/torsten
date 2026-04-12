@@ -1,7 +1,7 @@
 mod apply;
 mod certificates;
 mod epoch;
-mod governance;
+pub(crate) mod governance;
 mod protocol_params;
 mod rewards;
 mod snapshot;

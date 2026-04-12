@@ -49,6 +49,7 @@ use tracing::debug;
 use super::common;
 use super::{EraRules, RuleContext};
 use crate::state::substates::*;
+use crate::state::governance::{forest_add_proposal, gov_action_purpose_tag, gov_action_raw_prev_id};
 use crate::state::{
     BlockValidationMode, DRepRegistration, LedgerError, ProposalState, StakeSnapshot,
 };
@@ -1242,8 +1243,19 @@ fn process_governance_votes_and_proposals(
             no_votes: 0,
             abstain_votes: 0,
         };
-        governance.proposals.insert(action_id, proposal_state);
+        governance.proposals.insert(action_id.clone(), proposal_state);
         governance.proposal_count += 1;
+
+        if let Some(tag) = gov_action_purpose_tag(&proposal.gov_action) {
+            let prev = gov_action_raw_prev_id(&proposal.gov_action);
+            forest_add_proposal(
+                &action_id,
+                prev.as_ref(),
+                tag,
+                &mut governance.proposal_roots,
+                &mut governance.proposal_graph,
+            );
+        }
     }
 }
 
