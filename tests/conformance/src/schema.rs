@@ -636,7 +636,7 @@ pub struct EpochState {
     /// Pending pool retirements: [{pool_hash, retirement_epoch}]
     #[serde(default)]
     pub pending_retirements: Vec<EpochRetirement>,
-    /// Registered DReps: [{credential_hash, last_active_epoch, active}]
+    /// Registered DReps: [{credential_hash, drep_expiry, active}]
     #[serde(default)]
     pub dreps: Vec<EpochDRep>,
     /// Reward accounts: [{credential_hash, balance}]
@@ -671,7 +671,8 @@ pub struct EpochRetirement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochDRep {
     pub credential_hash: String,
-    pub last_active_epoch: u64,
+    #[serde(alias = "last_active_epoch")]
+    pub drep_expiry: u64,
     pub active: bool,
 }
 

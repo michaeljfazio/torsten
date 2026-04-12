@@ -419,12 +419,16 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
 
     let mut conway_committee_threshold: Option<(u64, u64)> = None;
     let mut conway_committee_members: Vec<([u8; 32], u64)> = Vec::new();
+    let mut conway_constitution: Option<dugite_primitives::transaction::Constitution> = None;
+    let mut conway_initial_dreps: Vec<(dugite_primitives::hash::Hash28, u64)> = Vec::new();
     if let Some(ref genesis_path) = node_config.conway_genesis_file {
         let genesis_path = config_dir.join(genesis_path);
         if let Ok(genesis) = genesis::ConwayGenesis::load(&genesis_path) {
             genesis.apply_to_protocol_params(&mut protocol_params);
             conway_committee_threshold = genesis.committee_threshold();
             conway_committee_members = genesis.committee_members();
+            conway_constitution = genesis.to_ledger_constitution();
+            conway_initial_dreps = genesis.initial_dreps_as_entries();
             info!("Conway genesis loaded");
         }
     }
@@ -450,6 +454,43 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
                 .committee_expiration
                 .insert(cold_key, dugite_primitives::EpochNo(*expiration));
         }
+    }
+
+    // Seed constitution from Conway genesis (CIP-1694 proposal guardrail).
+    // Without this, any NewConstitution proposal sees `None` on-chain and
+    // UpdateConstitution proposals that reference a prior guardrail script
+    // cannot validate on a fresh node.
+    if let Some(constitution) = conway_constitution {
+        std::sync::Arc::make_mut(&mut ledger.gov.governance).constitution = Some(constitution);
+        info!("Conway genesis constitution seeded");
+    }
+
+    // Seed initial DReps from Conway genesis. Haskell's `addDefaultDRepsToState`
+    // sets expiry = 0 + drep_activity (bootstrap phase, no dormant subtraction).
+    if !conway_initial_dreps.is_empty() {
+        use dugite_ledger::state::DRepRegistration;
+        use dugite_primitives::credentials::Credential;
+        use dugite_primitives::value::Lovelace;
+        use dugite_primitives::EpochNo;
+        let count = conway_initial_dreps.len();
+        let drep_activity = ledger.epochs.protocol_params.drep_activity;
+        let gov = std::sync::Arc::make_mut(&mut ledger.gov.governance);
+        for (hash28, deposit) in conway_initial_dreps {
+            let credential = Credential::VerificationKey(hash28);
+            let cred_hash = credential.to_typed_hash32();
+            gov.dreps.insert(
+                cred_hash,
+                DRepRegistration {
+                    credential,
+                    deposit: Lovelace(deposit),
+                    anchor: None,
+                    registered_epoch: EpochNo(0),
+                    drep_expiry: EpochNo(drep_activity),
+                    active: true,
+                },
+            );
+        }
+        info!(count, "Seeded initial DReps from Conway genesis");
     }
 
     // Apply Shelley genesis configuration (epoch length, slot config, reserves)

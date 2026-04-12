@@ -32,12 +32,12 @@
     "dreps": [
       {
         "credential_hash": "dddd33333333333333333333333333333333333333333333333333dd",
-        "last_active_epoch": 30,
+        "drep_expiry": 45,
         "active": true
       },
       {
         "credential_hash": "eeee44444444444444444444444444444444444444444444444444ee",
-        "last_active_epoch": 48,
+        "drep_expiry": 63,
         "active": true
       }
     ],
@@ -69,12 +69,12 @@
       "dreps": [
         {
           "credential_hash": "dddd33333333333333333333333333333333333333333333333333dd",
-          "last_active_epoch": 30,
+          "drep_expiry": 45,
           "active": false
         },
         {
           "credential_hash": "eeee44444444444444444444444444444444444444444444444444ee",
-          "last_active_epoch": 48,
+          "drep_expiry": 63,
           "active": true
         }
       ],

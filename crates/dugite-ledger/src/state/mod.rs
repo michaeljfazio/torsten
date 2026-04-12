@@ -1,7 +1,7 @@
 mod apply;
 mod certificates;
 mod epoch;
-mod governance;
+pub(crate) mod governance;
 mod protocol_params;
 mod rewards;
 mod snapshot;
@@ -126,8 +126,9 @@ pub struct LedgerState {
     pub genesis_hash: Hash32,
     /// Genesis delegates: genesis_key_hash (28 bytes) -> (delegate_key_hash (28 bytes), vrf_key_hash (32 bytes)).
     ///
-    /// Loaded from the Shelley genesis file. Used for BFT overlay schedule
-    /// validation during early Shelley era (when d > 0). Not mutated after initialization.
+    /// Loaded from the Shelley genesis file and mutated by `Certificate::GenesisKeyDelegation`
+    /// (Shelley-era only; Conway removed the cert type). Used for BFT overlay
+    /// schedule validation during early Shelley era (when d > 0).
     pub genesis_delegates: HashMap<Hash28, (Hash28, Hash32)>,
     /// Quorum for pre-Conway protocol parameter updates (from Shelley genesis)
     pub update_quorum: u64,
@@ -342,13 +343,9 @@ pub struct GovernanceState {
     ///
     /// Per Haskell `vsNumDormantEpochs` (Conway.Rules.Epoch, `updateNumDormantEpochs`):
     /// an epoch is "dormant" if there were no active governance proposals at the epoch
-    /// boundary (i.e. `proposals` was empty during that epoch).  Dormant epochs do not
-    /// count against DRep activity — a DRep is considered inactive only when:
-    ///
-    ///   new_epoch - last_active_epoch - num_dormant_epochs > drep_activity_threshold
-    ///
-    /// This prevents DReps from being incorrectly marked inactive during quiescent
-    /// periods where there was nothing to vote on.
+    /// boundary (i.e. `proposals` was empty during that epoch).  The dormant count is
+    /// baked into `DRepRegistration::drep_expiry` at registration/vote time via
+    /// `compute_drep_expiry()`, so it is NOT subtracted again at activity-check time.
     ///
     /// `serde(default)` ensures backward compatibility with existing ledger snapshots.
     #[serde(default)]
@@ -435,8 +432,15 @@ pub struct DRepRegistration {
     pub deposit: Lovelace,
     pub anchor: Option<Anchor>,
     pub registered_epoch: EpochNo,
-    /// Last epoch in which this DRep voted or updated (for activity tracking per CIP-1694)
-    pub last_active_epoch: EpochNo,
+    /// Absolute expiry epoch for this DRep, matching Haskell's `drepExpiry`.
+    ///
+    /// Computed at registration/vote/update time as:
+    ///   PV >= 10: `(current_epoch + drep_activity) - num_dormant_epochs`
+    ///   PV <  10: `current_epoch + drep_activity` (bootstrap, dormant ignored)
+    ///
+    /// A DRep is expired (inactive) when `current_epoch > drep_expiry`.
+    #[serde(alias = "last_active_epoch")]
+    pub drep_expiry: EpochNo,
     /// Whether this DRep is currently active (per CIP-1694 activity tracking).
     /// Inactive DReps remain registered but are excluded from voting power calculations.
     #[serde(default = "default_drep_active")]
@@ -615,6 +619,21 @@ impl LedgerState {
     pub fn reset_to_origin(&mut self) {
         self.tip = Tip::origin();
         self.epoch = EpochNo(0);
+    }
+
+    /// Compute `drepExpiry` for a DRep whose last activity is the current epoch,
+    /// matching Haskell's `computeDRepExpiryVersioned` / `computeDRepExpiry`.
+    ///
+    /// PV >= 10: `(current_epoch + drep_activity) - num_dormant_epochs`
+    /// PV <  10: `current_epoch + drep_activity`  (bootstrap — dormant ignored)
+    pub fn compute_drep_expiry(&self) -> EpochNo {
+        let activity = self.epochs.protocol_params.drep_activity;
+        let base = self.epoch.0 + activity;
+        if self.epochs.protocol_params.protocol_version_major >= 10 {
+            EpochNo(base.saturating_sub(self.gov.governance.num_dormant_epochs))
+        } else {
+            EpochNo(base)
+        }
     }
 
     pub fn new(params: ProtocolParameters) -> Self {
@@ -833,8 +852,8 @@ impl LedgerState {
                     deposit: Lovelace(drep_state.deposit),
                     anchor,
                     registered_epoch: EpochNo(0), // Not tracked in Haskell snapshot
-                    last_active_epoch: drep_state.expiry,
-                    active: true, // DReps in the map are active
+                    drep_expiry: drep_state.expiry,
+                    active: hs.epoch.0 <= drep_state.expiry.0,
                 },
             );
         }

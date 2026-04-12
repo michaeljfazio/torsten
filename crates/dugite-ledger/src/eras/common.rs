@@ -385,109 +385,128 @@ pub(crate) fn process_shelley_certs(
     gov: &mut GovSubState,
 ) {
     for (cert_index, cert) in tx.body.certificates.iter().enumerate() {
-        // Populate pointer_map for registration certificates.
-        if let Certificate::StakeRegistration(credential) = cert {
-            let key = credential_to_hash(credential);
-            let pointer = Pointer {
-                slot,
-                tx_index,
-                cert_index: cert_index as u64,
-            };
-            certs.pointer_map.insert(pointer, key);
-        }
+        apply_shelley_cert(cert, cert_index, slot, tx_index, certs, epochs, gov);
+    }
+}
 
-        match cert {
-            Certificate::StakeRegistration(credential) => {
-                let key = credential_to_hash(credential);
-                certs
-                    .stake_distribution
-                    .stake_map
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                Arc::make_mut(&mut certs.reward_accounts)
-                    .entry(key)
-                    .or_insert(Lovelace(0));
-                if matches!(credential, Credential::Script(_)) {
-                    certs.script_stake_credentials.insert(key);
-                }
-                certs.total_stake_key_deposits += epochs.protocol_params.key_deposit.0;
-                certs
-                    .stake_key_deposits
-                    .insert(key, epochs.protocol_params.key_deposit.0);
-                debug!("Stake key registered: {}", key.to_hex());
+/// Apply a single Shelley-era certificate to the ledger state.
+///
+/// Extracted from `process_shelley_certs` so that Conway-era cert processing
+/// can interleave Shelley and Conway certs in a single ordered pass.
+///
+/// Non-Shelley cert variants are ignored (no-op). Callers must invoke the
+/// Conway-era handler separately for those.
+pub(crate) fn apply_shelley_cert(
+    cert: &Certificate,
+    cert_index: usize,
+    slot: u64,
+    tx_index: u64,
+    certs: &mut CertSubState,
+    epochs: &EpochSubState,
+    gov: &mut GovSubState,
+) {
+    // Populate pointer_map for registration certificates.
+    if let Certificate::StakeRegistration(credential) = cert {
+        let key = credential_to_hash(credential);
+        let pointer = Pointer {
+            slot,
+            tx_index,
+            cert_index: cert_index as u64,
+        };
+        certs.pointer_map.insert(pointer, key);
+    }
+
+    match cert {
+        Certificate::StakeRegistration(credential) => {
+            let key = credential_to_hash(credential);
+            certs
+                .stake_distribution
+                .stake_map
+                .entry(key)
+                .or_insert(Lovelace(0));
+            Arc::make_mut(&mut certs.reward_accounts)
+                .entry(key)
+                .or_insert(Lovelace(0));
+            if matches!(credential, Credential::Script(_)) {
+                certs.script_stake_credentials.insert(key);
             }
-            Certificate::StakeDeregistration(credential) => {
-                let key = credential_to_hash(credential);
-                let stored_deposit = certs
-                    .stake_key_deposits
-                    .remove(&key)
-                    .unwrap_or(epochs.protocol_params.key_deposit.0);
-                certs.total_stake_key_deposits = certs
-                    .total_stake_key_deposits
-                    .saturating_sub(stored_deposit);
-                Arc::make_mut(&mut certs.delegations).remove(&key);
-                Arc::make_mut(&mut certs.reward_accounts).remove(&key);
-                // Remove DRep delegation -- Haskell's unified map clears all credential
-                // data on deregistration, including vote delegations.
-                Arc::make_mut(&mut gov.governance)
-                    .vote_delegations
-                    .remove(&key);
-                certs.script_stake_credentials.remove(&key);
-                certs.pointer_map.retain(|_, v| *v != key);
-                debug!("Stake key deregistered: {}", key.to_hex());
-            }
-            Certificate::StakeDelegation {
-                credential,
-                pool_hash,
-            } => {
-                let key = credential_to_hash(credential);
-                Arc::make_mut(&mut certs.delegations).insert(key, *pool_hash);
-                debug!("Stake delegated to pool: {}", pool_hash.to_hex());
-            }
-            Certificate::PoolRegistration(params) => {
-                let pool_reg = PoolRegistration {
-                    pool_id: params.operator,
-                    vrf_keyhash: params.vrf_keyhash,
-                    pledge: params.pledge,
-                    cost: params.cost,
-                    margin_numerator: params.margin.numerator,
-                    margin_denominator: params.margin.denominator,
-                    reward_account: params.reward_account.clone(),
-                    owners: params.pool_owners.clone(),
-                    relays: params.relays.clone(),
-                    metadata_url: params.pool_metadata.as_ref().map(|m| m.url.clone()),
-                    metadata_hash: params.pool_metadata.as_ref().map(|m| m.hash),
-                };
-                // Re-registration: defer to future_pool_params and cancel pending retirement.
-                // First registration: apply immediately and record deposit.
-                if certs.pool_params.contains_key(&params.operator) {
-                    certs.pending_retirements.remove(&params.operator);
-                    certs.future_pool_params.insert(params.operator, pool_reg);
-                    debug!(
-                        "Pool re-registered (deferred, retirement cancelled): {}",
-                        params.operator.to_hex()
-                    );
-                } else {
-                    Arc::make_mut(&mut certs.pool_params).insert(params.operator, pool_reg);
-                    certs
-                        .pool_deposits
-                        .insert(params.operator, epochs.protocol_params.pool_deposit.0);
-                    debug!("Pool registered: {}", params.operator.to_hex());
-                }
-            }
-            Certificate::PoolRetirement { pool_hash, epoch } => {
-                debug!(
-                    "Pool retirement scheduled at epoch {}: {}",
-                    epoch,
-                    pool_hash.to_hex()
-                );
-                certs
-                    .pending_retirements
-                    .insert(*pool_hash, EpochNo(*epoch));
-            }
-            // Skip non-Shelley certificates -- they are handled by era-specific code.
-            _ => {}
+            certs.total_stake_key_deposits += epochs.protocol_params.key_deposit.0;
+            certs
+                .stake_key_deposits
+                .insert(key, epochs.protocol_params.key_deposit.0);
+            debug!("Stake key registered: {}", key.to_hex());
         }
+        Certificate::StakeDeregistration(credential) => {
+            let key = credential_to_hash(credential);
+            let stored_deposit = certs
+                .stake_key_deposits
+                .remove(&key)
+                .unwrap_or(epochs.protocol_params.key_deposit.0);
+            certs.total_stake_key_deposits = certs
+                .total_stake_key_deposits
+                .saturating_sub(stored_deposit);
+            Arc::make_mut(&mut certs.delegations).remove(&key);
+            Arc::make_mut(&mut certs.reward_accounts).remove(&key);
+            // Remove DRep delegation -- Haskell's unified map clears all credential
+            // data on deregistration, including vote delegations.
+            Arc::make_mut(&mut gov.governance)
+                .vote_delegations
+                .remove(&key);
+            certs.script_stake_credentials.remove(&key);
+            certs.pointer_map.retain(|_, v| *v != key);
+            debug!("Stake key deregistered: {}", key.to_hex());
+        }
+        Certificate::StakeDelegation {
+            credential,
+            pool_hash,
+        } => {
+            let key = credential_to_hash(credential);
+            Arc::make_mut(&mut certs.delegations).insert(key, *pool_hash);
+            debug!("Stake delegated to pool: {}", pool_hash.to_hex());
+        }
+        Certificate::PoolRegistration(params) => {
+            let pool_reg = PoolRegistration {
+                pool_id: params.operator,
+                vrf_keyhash: params.vrf_keyhash,
+                pledge: params.pledge,
+                cost: params.cost,
+                margin_numerator: params.margin.numerator,
+                margin_denominator: params.margin.denominator,
+                reward_account: params.reward_account.clone(),
+                owners: params.pool_owners.clone(),
+                relays: params.relays.clone(),
+                metadata_url: params.pool_metadata.as_ref().map(|m| m.url.clone()),
+                metadata_hash: params.pool_metadata.as_ref().map(|m| m.hash),
+            };
+            // Re-registration: defer to future_pool_params and cancel pending retirement.
+            // First registration: apply immediately and record deposit.
+            if certs.pool_params.contains_key(&params.operator) {
+                certs.pending_retirements.remove(&params.operator);
+                certs.future_pool_params.insert(params.operator, pool_reg);
+                debug!(
+                    "Pool re-registered (deferred, retirement cancelled): {}",
+                    params.operator.to_hex()
+                );
+            } else {
+                Arc::make_mut(&mut certs.pool_params).insert(params.operator, pool_reg);
+                certs
+                    .pool_deposits
+                    .insert(params.operator, epochs.protocol_params.pool_deposit.0);
+                debug!("Pool registered: {}", params.operator.to_hex());
+            }
+        }
+        Certificate::PoolRetirement { pool_hash, epoch } => {
+            debug!(
+                "Pool retirement scheduled at epoch {}: {}",
+                epoch,
+                pool_hash.to_hex()
+            );
+            certs
+                .pending_retirements
+                .insert(*pool_hash, EpochNo(*epoch));
+        }
+        // Skip non-Shelley certificates -- they are handled by era-specific code.
+        _ => {}
     }
 }
 

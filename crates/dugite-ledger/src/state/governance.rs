@@ -301,11 +301,12 @@ impl LedgerState {
         // Track DRep activity — voting counts as activity per CIP-1694
         if let Voter::DRep(cred) = voter {
             let drep_hash = credential_to_hash(cred);
+            let expiry = self.compute_drep_expiry();
             if let Some(drep) = Arc::make_mut(&mut self.gov.governance)
                 .dreps
                 .get_mut(&drep_hash)
             {
-                drep.last_active_epoch = self.epoch;
+                drep.drep_expiry = expiry;
             }
         }
 
@@ -576,11 +577,12 @@ impl LedgerState {
         // Track DRep activity — voting counts as activity per CIP-1694.
         if let Voter::DRep(cred) = voter {
             let drep_hash = credential_to_hash(cred);
+            let expiry = self.compute_drep_expiry();
             if let Some(drep) = Arc::make_mut(&mut self.gov.governance)
                 .dreps
                 .get_mut(&drep_hash)
             {
-                drep.last_active_epoch = self.epoch;
+                drep.drep_expiry = expiry;
             }
         }
 
@@ -631,7 +633,7 @@ impl LedgerState {
     ///
     /// When `None` (genesis, or loading an old snapshot without this field), we fall
     /// back to live-state ratification (the pre-snapshot behavior).
-    pub(crate) fn ratify_proposals(&mut self) {
+    pub fn ratify_proposals(&mut self) {
         // Lazy forest reconstruction for backward compatibility with old snapshots
         // that lack proposal_roots / proposal_graph.  Runs once per node startup
         // from a pre-forest snapshot, then the forest is persisted in subsequent saves.
@@ -648,12 +650,35 @@ impl LedgerState {
             let gov = Arc::make_mut(&mut self.gov.governance);
             gov.proposal_roots = roots;
             gov.proposal_graph = graph;
-            debug!("Governance forest rebuilt from flat proposals map (backward compat)");
         }
 
         let total_drep_stake = self.compute_total_drep_stake();
         // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
         let (drep_power_cache, no_confidence_stake, _abstain_stake) = self.build_drep_power_cache();
+
+        // Diagnostic: DRep distribution details for governance debugging
+        {
+            let cache_sum: u64 = drep_power_cache.values().sum();
+            let active_dreps = self
+                .gov
+                .governance
+                .dreps
+                .values()
+                .filter(|d| d.active)
+                .count();
+            let total_dreps = self.gov.governance.dreps.len();
+            debug!(
+                epoch = self.epoch.0,
+                drep_cache_size = drep_power_cache.len(),
+                drep_cache_sum = cache_sum,
+                no_confidence_stake,
+                _abstain_stake,
+                total_drep_stake,
+                active_dreps,
+                total_dreps,
+                "DRep distribution for ratification"
+            );
+        }
 
         // SPO voting power: use the **set** snapshot (= previous epoch's mark),
         // matching Haskell's `dpStakePoolDistr` in the DRep pulser.
@@ -817,17 +842,6 @@ impl LedgerState {
 
             // Check voting thresholds using snapshot data
             if let Some(state) = snap_proposals.get(action_id) {
-                // Compute vote counts for logging
-                let (_drep_yes, _drep_total, _spo_yes, _spo_abstain, _cc_yes, _cc_total) = self
-                    .count_votes_by_type(
-                        action_id,
-                        &state.procedure.gov_action,
-                        &drep_power_cache,
-                        no_confidence_stake,
-                        &snap_votes,
-                        ratify_pool_stake_ref,
-                        snap_vote_delegations_ref,
-                    );
                 let remaining_treasury = self
                     .epochs
                     .treasury
@@ -2338,6 +2352,8 @@ pub(crate) fn check_threshold(yes: u64, total: u64, threshold: &Rational) -> boo
     if threshold.is_zero() {
         return true;
     }
+    // Haskell's (%?) operator: _ %? 0 = 0, so zero denominator yields
+    // ratio 0 which fails any non-zero threshold.
     if total == 0 {
         return false;
     }
@@ -2449,22 +2465,9 @@ pub(crate) fn check_cc_approval(
         return false;
     }
 
-    // If no committee members exist at all
-    if active_size == 0 {
-        return false;
-    }
-
-    // If all active members abstained, ratio is 0
+    // Haskell's (%?) operator: _ %? 0 = 0, so when all active members
+    // abstain the ratio is 0, which fails any non-zero threshold.
     if total_excluding_abstain == 0 {
-        debug!(
-            action = %action_id.transaction_id.to_hex(),
-            active_size, yes_count, total_excluding_abstain,
-            threshold = threshold.as_f64(),
-            cc_voters = cc_votes.len(),
-            committee_members = committee_expiration.len(),
-            hot_keys = committee_hot_keys.len(),
-            "CC approval check: all active members abstained"
-        );
         return false;
     }
 
@@ -2594,7 +2597,7 @@ enum DefaultVote {
 /// Returns `None` for both "prev_action_id = None" (genesis root) and actions
 /// without a prev_action_id field (TreasuryWithdrawals, InfoAction).
 /// Used for sibling matching where None == None (genesis root siblings).
-fn gov_action_raw_prev_id(action: &GovAction) -> Option<GovActionId> {
+pub(crate) fn gov_action_raw_prev_id(action: &GovAction) -> Option<GovActionId> {
     match action {
         GovAction::ParameterChange { prev_action_id, .. }
         | GovAction::HardForkInitiation { prev_action_id, .. }
@@ -2608,7 +2611,7 @@ fn gov_action_raw_prev_id(action: &GovAction) -> Option<GovActionId> {
 /// Return a purpose tag for grouping governance actions by their governance
 /// purpose tree. Actions with the same tag share the same enacted root chain.
 /// Returns None for TreasuryWithdrawals and InfoAction (no purpose tree).
-fn gov_action_purpose_tag(action: &GovAction) -> Option<u8> {
+pub(crate) fn gov_action_purpose_tag(action: &GovAction) -> Option<u8> {
     match action {
         GovAction::ParameterChange { .. } => Some(0),
         GovAction::HardForkInitiation { .. } => Some(1),
@@ -2659,8 +2662,32 @@ pub(crate) fn forest_add_proposal(
     if prev_action_id == root.root.as_ref() {
         // Direct child of the purpose root (last enacted action or genesis).
         root.children.insert(action_id.clone());
+        debug!(
+            "forest_add: {}#{} -> root child (tag={}, root={:?}, prev={:?})",
+            action_id.transaction_id.to_hex(),
+            action_id.action_index,
+            purpose_tag,
+            root.root.as_ref().map(|id| format!(
+                "{}#{}",
+                id.transaction_id.to_hex(),
+                id.action_index
+            )),
+            prev_action_id.map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+        );
     } else {
         // Deeper node — add as child of its parent in the graph.
+        debug!(
+            "forest_add: {}#{} -> graph node (tag={}, root={:?}, prev={:?})",
+            action_id.transaction_id.to_hex(),
+            action_id.action_index,
+            purpose_tag,
+            root.root.as_ref().map(|id| format!(
+                "{}#{}",
+                id.transaction_id.to_hex(),
+                id.action_index
+            )),
+            prev_action_id.map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+        );
         // Create PEdges for the new node.
         let edges = super::PEdges {
             parent: prev_action_id.cloned(),
@@ -2963,7 +2990,7 @@ mod tests {
                     deposit: Lovelace(500_000_000),
                     anchor: None,
                     registered_epoch: EpochNo(0),
-                    last_active_epoch: EpochNo(0),
+                    drep_expiry: EpochNo(0),
                     active: true,
                 },
             );

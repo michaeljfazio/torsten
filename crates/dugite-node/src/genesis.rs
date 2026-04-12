@@ -703,6 +703,24 @@ fn parse_cost_model(value: &serde_json::Value) -> Option<Vec<i64>> {
 // Conway genesis
 // ──────────────────────────────────────────────────────────────────────────
 
+/// Constitution section of the Conway genesis file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConwayGenesisConstitution {
+    pub anchor: ConwayGenesisAnchor,
+    /// Hex-encoded guardrail script hash (optional).
+    #[serde(default)]
+    pub script: Option<String>,
+}
+
+/// Anchor embedded in the Conway genesis constitution section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConwayGenesisAnchor {
+    pub url: String,
+    #[serde(rename = "dataHash")]
+    pub data_hash: String,
+}
+
 /// Conway genesis configuration (compatible with cardano-node conway-genesis.json)
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -722,9 +740,13 @@ pub struct ConwayGenesis {
     pub min_fee_ref_script_cost_per_byte: Option<u64>,
     #[serde(default)]
     pub plutus_v3_cost_model: Option<Vec<i64>>,
-    // Deserialized from genesis JSON for completeness; not yet consumed in code
-    #[serde(default, rename = "constitution")]
-    _constitution: Option<serde_json::Value>,
+    #[serde(default)]
+    pub constitution: Option<ConwayGenesisConstitution>,
+    /// `initialDReps` is kept as a raw `serde_json::Value` because the schema
+    /// varies across networks; `initial_dreps_as_entries()` extracts typed
+    /// entries defensively.
+    #[serde(default, rename = "initialDReps")]
+    pub initial_dreps: serde_json::Value,
     #[serde(default)]
     pub committee: Option<serde_json::Value>,
 }
@@ -915,6 +937,47 @@ impl ConwayGenesis {
         }
         result
     }
+
+    /// Convert the parsed constitution into the ledger's [`Constitution`] type.
+    /// Returns `None` if no constitution is declared in genesis or the encoded
+    /// hashes fail to parse.
+    pub fn to_ledger_constitution(&self) -> Option<dugite_primitives::transaction::Constitution> {
+        use dugite_primitives::hash::{Hash28, Hash32};
+        use dugite_primitives::transaction::{Anchor, Constitution};
+        let cg = self.constitution.as_ref()?;
+        let data_hash = Hash32::from_hex(&cg.anchor.data_hash).ok()?;
+        let script_hash = cg.script.as_ref().and_then(|s| Hash28::from_hex(s).ok());
+        Some(Constitution {
+            anchor: Anchor {
+                url: cg.anchor.url.clone(),
+                data_hash,
+            },
+            script_hash,
+        })
+    }
+
+    /// Extract initial DReps as `(credential_hash28, deposit)` pairs.
+    ///
+    /// Returns an empty `Vec` if `initialDReps` is absent or schema-mismatched.
+    /// The `initialDReps` JSON is a map from hex-encoded credential hashes to
+    /// an object containing at least a `deposit` field. Anchor parsing is
+    /// omitted for now (preview/preprod genesis has no anchors on initial
+    /// DReps, so there is no verified schema to parse against).
+    pub fn initial_dreps_as_entries(&self) -> Vec<(dugite_primitives::hash::Hash28, u64)> {
+        use dugite_primitives::hash::Hash28;
+        let Some(obj) = self.initial_dreps.as_object() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (hex_cred, entry) in obj {
+            let Ok(cred) = Hash28::from_hex(hex_cred) else {
+                continue;
+            };
+            let deposit = entry.get("deposit").and_then(|v| v.as_u64()).unwrap_or(0);
+            out.push((cred, deposit));
+        }
+        out
+    }
 }
 
 /// Convert a float to a rational approximation
@@ -948,6 +1011,44 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_conway_genesis_parses_constitution() {
+        let json = r#"{
+            "poolVotingThresholds": {
+                "committeeNormal": 0.51, "committeeNoConfidence": 0.51,
+                "hardForkInitiation": 0.51, "motionNoConfidence": 0.51,
+                "ppSecurityGroup": 0.51
+            },
+            "dRepVotingThresholds": {
+                "motionNoConfidence": 0.67, "committeeNormal": 0.67,
+                "committeeNoConfidence": 0.6, "updateToConstitution": 0.75,
+                "hardForkInitiation": 0.6, "ppNetworkGroup": 0.67,
+                "ppEconomicGroup": 0.67, "ppTechnicalGroup": 0.67,
+                "ppGovGroup": 0.75, "treasuryWithdrawal": 0.67
+            },
+            "committeeMinSize": 0, "committeeMaxTermLength": 365,
+            "govActionLifetime": 6, "govActionDeposit": 1000000000,
+            "dRepDeposit": 500000000, "dRepActivity": 20,
+            "constitution": {
+                "anchor": {
+                    "url": "https://example.com/constitution.md",
+                    "dataHash": "ca41a91f399259bcefe57f9858e91f6d00e1a38d6d9c63d4052914ea7bd70cb2"
+                }
+            }
+        }"#;
+        let genesis: ConwayGenesis = serde_json::from_str(json).unwrap();
+        let ledger_const = genesis
+            .to_ledger_constitution()
+            .expect("constitution parsed");
+        assert_eq!(
+            ledger_const.anchor.url,
+            "https://example.com/constitution.md"
+        );
+        assert!(ledger_const.script_hash.is_none());
+        // initialDReps absent → empty
+        assert!(genesis.initial_dreps_as_entries().is_empty());
+    }
 
     #[test]
     fn test_float_to_rational() {

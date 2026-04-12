@@ -103,7 +103,7 @@ fn setup_dreps_with_stake(state: &mut LedgerState, count: usize, stake_per_drep:
                 deposit: Lovelace(500_000_000),
                 anchor: None,
                 registered_epoch: EpochNo(0),
-                last_active_epoch: EpochNo(0),
+                drep_expiry: EpochNo(20),
                 active: true,
             },
         );
@@ -1318,19 +1318,19 @@ fn test_drep_activity_tracking() {
         anchor: None,
     });
     assert_eq!(
-        state.gov.governance.dreps[&key].last_active_epoch,
-        EpochNo(0)
+        state.gov.governance.dreps[&key].drep_expiry,
+        EpochNo(5) // epoch 0 + drep_activity 5
     );
 
-    // Update at epoch 3 — should update last_active_epoch
+    // Update at epoch 3 — should update drep_expiry
     state.epoch = EpochNo(3);
     state.process_certificate(&Certificate::UpdateDRep {
         credential: cred,
         anchor: None,
     });
     assert_eq!(
-        state.gov.governance.dreps[&key].last_active_epoch,
-        EpochNo(3)
+        state.gov.governance.dreps[&key].drep_expiry,
+        EpochNo(8) // epoch 3 + drep_activity 5
     );
 
     // Epoch transition to epoch 7 — DRep last active at epoch 3, threshold is 5
@@ -1891,7 +1891,7 @@ fn test_governance_proposal_expiry() {
             deposit: Lovelace(500_000_000),
             anchor: None,
             registered_epoch: EpochNo(0),
-            last_active_epoch: EpochNo(0),
+            drep_expiry: EpochNo(20),
             active: true,
         },
     );
@@ -2193,7 +2193,7 @@ fn test_parameter_change_not_ratified_below_threshold() {
                 deposit: Lovelace(500_000_000),
                 anchor: None,
                 registered_epoch: EpochNo(0),
-                last_active_epoch: EpochNo(0),
+                drep_expiry: EpochNo(20),
                 active: true,
             },
         );
@@ -2979,7 +2979,7 @@ fn test_arc_cow_governance_isolation() {
             deposit: Lovelace(500_000_000),
             anchor: None,
             registered_epoch: EpochNo(0),
-            last_active_epoch: EpochNo(0),
+            drep_expiry: EpochNo(20),
             active: true,
         },
     );
@@ -4123,6 +4123,33 @@ fn test_genesis_key_delegation() {
         vrf_keyhash: Hash32::from_bytes([0x33; 32]),
     });
     // No state change expected — just ensures it doesn't crash
+}
+
+#[test]
+fn test_genesis_key_delegation_updates_genesis_delegates() {
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+
+    // The cert fields are Hash32, but genesis_delegates uses Hash28 keys (first 28 bytes).
+    let genesis_hash_32 = Hash32::from_bytes([0x11; 32]);
+    let delegate_hash_32 = Hash32::from_bytes([0x22; 32]);
+    let vrf_keyhash = Hash32::from_bytes([0x33; 32]);
+
+    state.process_certificate(&Certificate::GenesisKeyDelegation {
+        genesis_hash: genesis_hash_32,
+        genesis_delegate_hash: delegate_hash_32,
+        vrf_keyhash,
+    });
+
+    // genesis_delegates is keyed by Hash28 (first 28 bytes of the cert's Hash32 fields)
+    let expected_key = Hash28::from_bytes([0x11; 28]);
+    let expected_delegate = Hash28::from_bytes([0x22; 28]);
+
+    let entry = state
+        .genesis_delegates
+        .get(&expected_key)
+        .expect("genesis_delegates should contain the inserted entry");
+    assert_eq!(entry.0, expected_delegate, "delegate hash mismatch");
+    assert_eq!(entry.1, vrf_keyhash, "vrf keyhash mismatch");
 }
 
 #[test]
@@ -5276,7 +5303,7 @@ fn setup_governance_state(
                 deposit: Lovelace(500_000_000),
                 anchor: None,
                 registered_epoch: EpochNo(0),
-                last_active_epoch: EpochNo(0),
+                drep_expiry: EpochNo(20),
                 active: true,
             },
         );
@@ -6772,13 +6799,13 @@ fn test_drep_inactive_excluded_from_voting_power() {
         anchor: None,
     });
 
-    // Make the DRep inactive by setting last_active_epoch far in the past
+    // Make the DRep inactive by setting expiry in the past
     let drep_key = credential_to_hash(&drep_cred);
     if let Some(drep) = Arc::make_mut(&mut state.gov.governance)
         .dreps
         .get_mut(&drep_key)
     {
-        drep.last_active_epoch = EpochNo(5); // inactive: 10 - 5 = 5 > 2
+        drep.drep_expiry = EpochNo(5); // expired: 10 > 5
         drep.active = false;
     }
 
@@ -7690,7 +7717,7 @@ fn governance_test_state() -> LedgerState {
                 deposit: Lovelace(500_000_000),
                 anchor: None,
                 registered_epoch: EpochNo(0),
-                last_active_epoch: EpochNo(0),
+                drep_expiry: EpochNo(20),
                 active: true,
             },
         );
@@ -11978,7 +12005,7 @@ fn test_epoch_transition_marks_inactive_drep() {
 
     assert_eq!(state.gov.governance.active_drep_count(), 2);
 
-    // Advance 4 epochs: last_active_epoch=0, epoch 4, inactive gap = 4 > drep_activity=3
+    // Advance 4 epochs: drep_expiry=3 (epoch 0 + activity 3), epoch 4 > 3 → expired
     for e in 1u64..=4 {
         state.process_epoch_transition(dugite_primitives::time::EpochNo(e));
     }
