@@ -1097,7 +1097,6 @@ impl LedgerState {
         gov.last_ratified = ratified_with_state;
         gov.last_expired = expired_removed;
         gov.last_ratify_delayed = delayed;
-
     }
 
     /// Whether we are in the Conway bootstrap phase (protocol version 9).
@@ -2435,6 +2434,29 @@ pub(crate) fn check_cc_approval(
         }
     }
 
+    if action_id.transaction_id.to_hex().starts_with("35b81b42") {
+        debug!(
+            "check_cc_approval 35b81b42: active={} yes={} total_excl_abstain={} cc_votes={} hot_keys={} members={}",
+            active_size, yes_count, total_excluding_abstain, cc_votes.len(),
+            committee_hot_keys.len(), committee_expiration.len(),
+        );
+        for (cold, expiry) in committee_expiration {
+            let hot = committee_hot_keys.get(cold);
+            let resigned = committee_resigned.contains_key(cold);
+            let expired = current_epoch > *expiry;
+            let vote = hot.and_then(|h| cc_votes.get(h));
+            debug!(
+                "  member cold={} expiry={} hot={:?} resigned={} expired={} vote={:?}",
+                cold.to_hex(),
+                expiry.0,
+                hot.map(|h| h.to_hex()),
+                resigned,
+                expired,
+                vote,
+            );
+        }
+    }
+
     // Check committeeMinSize (skipped during bootstrap per Haskell spec)
     if !bootstrap && active_size < committee_min_size {
         return false;
@@ -2639,18 +2661,28 @@ pub(crate) fn forest_add_proposal(
         root.children.insert(action_id.clone());
         debug!(
             "forest_add: {}#{} -> root child (tag={}, root={:?}, prev={:?})",
-            action_id.transaction_id.to_hex(), action_id.action_index,
+            action_id.transaction_id.to_hex(),
+            action_id.action_index,
             purpose_tag,
-            root.root.as_ref().map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+            root.root.as_ref().map(|id| format!(
+                "{}#{}",
+                id.transaction_id.to_hex(),
+                id.action_index
+            )),
             prev_action_id.map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
         );
     } else {
         // Deeper node — add as child of its parent in the graph.
         debug!(
             "forest_add: {}#{} -> graph node (tag={}, root={:?}, prev={:?})",
-            action_id.transaction_id.to_hex(), action_id.action_index,
+            action_id.transaction_id.to_hex(),
+            action_id.action_index,
             purpose_tag,
-            root.root.as_ref().map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
+            root.root.as_ref().map(|id| format!(
+                "{}#{}",
+                id.transaction_id.to_hex(),
+                id.action_index
+            )),
             prev_action_id.map(|id| format!("{}#{}", id.transaction_id.to_hex(), id.action_index)),
         );
         // Create PEdges for the new node.
