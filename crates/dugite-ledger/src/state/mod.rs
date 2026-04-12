@@ -834,8 +834,17 @@ impl LedgerState {
                     deposit: Lovelace(drep_state.deposit),
                     anchor,
                     registered_epoch: EpochNo(0), // Not tracked in Haskell snapshot
-                    last_active_epoch: drep_state.expiry,
-                    active: true, // DReps in the map are active
+                    // Haskell's `drepExpiry` is the absolute deadline epoch
+                    // (last_activity + drep_activity).  Convert back to last-activity
+                    // epoch so our elapsed-time check stays correct.
+                    last_active_epoch: EpochNo(
+                        drep_state
+                            .expiry
+                            .0
+                            .saturating_sub(cur_pparams.drep_activity),
+                    ),
+                    // Haskell: expired when currentEpoch > drepExpiry
+                    active: hs.epoch.0 <= drep_state.expiry.0,
                 },
             );
         }
