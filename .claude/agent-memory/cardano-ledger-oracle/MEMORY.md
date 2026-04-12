@@ -7,3 +7,6 @@
 - [SnapShots new vs old format](snapshots-encoding.md) — array(2) new format, array(3) old, StakePoolSnapShot array(10)
 - [ConwayGovState encoding](conway-gov-state-encoding-detailed.md) — array(7), nested types
 - [Conway Accounts/ConwayAccountState encoding](conway-accounts-encoding.md) — per-account array(4) with nullable delegations
+
+## Governance / Epoch Boundary Corrections
+- [Conway proposal deposit epoch boundary — verified source facts](feedback_proposal_deposit_epoch_boundary.md) — returnProposalDeposits scope, expiry off-by-one, no silent drops, divergence diagnosis
