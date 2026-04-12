@@ -2492,7 +2492,7 @@ fn test_check_threshold_helper() {
     assert!(!check_threshold(6, 10, &r67)); // 60% < 67%
     assert!(check_threshold(1, 1, &r51)); // 100% >= 51%
     assert!(!check_threshold(0, 10, &r01)); // 0% < 1%
-    assert!(check_threshold(0, 0, &r50)); // Haskell %?: 0 %? 0 = 1 → passes
+    assert!(!check_threshold(0, 0, &r50)); // no votes = not met
 }
 
 /// Helper to create a CC-compatible hot key Hash32 from a Hash28 byte value.
@@ -3847,14 +3847,14 @@ fn test_per_group_governance_only_no_spo_security_required() {
 }
 
 #[test]
-fn test_per_group_zero_total_stake_passes() {
+fn test_per_group_zero_total_stake_fails() {
     let params = params_with_distinct_thresholds();
     let ppu = ProtocolParamUpdate {
         max_block_body_size: Some(65536),
         ..Default::default()
     };
-    // Haskell %?: 0 %? 0 = 1 → passes any threshold
-    assert!(pp_change_drep_all_groups_met(&ppu, &params, 0, 0));
+    // Zero total stake should fail (can't meet any threshold)
+    assert!(!pp_change_drep_all_groups_met(&ppu, &params, 0, 0));
 }
 
 #[test]
@@ -7176,14 +7176,14 @@ fn test_all_dreps_abstain() {
         "Denominator should be 0 when all vote abstain"
     );
 
-    // Haskell %?: 0 %? 0 = 1, so empty denominator passes any threshold
+    // check_threshold with total=0 returns false (no votes at all)
     let threshold = Rational {
         numerator: 1,
         denominator: 2,
     };
     assert!(
-        check_threshold(drep_yes, drep_total, &threshold),
-        "With total=0, threshold check should pass (Haskell %? semantics)"
+        !check_threshold(drep_yes, drep_total, &threshold),
+        "With total=0, threshold check should fail"
     );
 }
 

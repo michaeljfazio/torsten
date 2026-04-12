@@ -2327,10 +2327,10 @@ pub(crate) fn check_threshold(yes: u64, total: u64, threshold: &Rational) -> boo
     if threshold.is_zero() {
         return true;
     }
-    // Haskell uses (%?) where 0 %? 0 = 1, meaning an empty eligible-voter
-    // set is treated as unanimous acceptance (ratio = 1, passes any threshold).
+    // Haskell's (%?) operator: _ %? 0 = 0, so zero denominator yields
+    // ratio 0 which fails any non-zero threshold.
     if total == 0 {
-        return true;
+        return false;
     }
     // Exact integer comparison: yes/total >= numerator/denominator
     // ⟺ yes * denominator >= numerator * total (using u128 to avoid overflow)
@@ -2440,13 +2440,10 @@ pub(crate) fn check_cc_approval(
         return false;
     }
 
-    // Haskell's committeeAcceptedRatio uses (%?) where 0 %? 0 = 1.
-    // When all active members abstain (unregistered or no vote entry with
-    // abstain), totalExcludingAbstain == 0 and the ratio is defined as 1,
-    // which passes any threshold. This also covers active_size == 0 when
-    // the committee exists but has no non-expired members and minSize == 0.
+    // Haskell's (%?) operator: _ %? 0 = 0, so when all active members
+    // abstain the ratio is 0, which fails any non-zero threshold.
     if total_excluding_abstain == 0 {
-        return true;
+        return false;
     }
 
     // Exact comparison: yes_count / total_excluding_abstain >= threshold
@@ -3787,8 +3784,7 @@ mod tests {
             },
         );
 
-        // Only member is resigned → abstain → total_excluding_abstain = 0
-        // Haskell %?: 0 %? 0 = 1 → passes (committeeMinSize = 0 allows this)
+        // CC vote should fail — only member is resigned
         let result = check_cc_approval(
             &action_id,
             &state.gov.governance.votes_by_action,
@@ -3800,7 +3796,7 @@ mod tests {
             state.epochs.protocol_params.committee_min_size,
             false,
         );
-        assert!(result);
+        assert!(!result);
     }
 
     #[test]
@@ -4958,13 +4954,12 @@ mod tests {
     }
 
     #[test]
-    fn test_check_threshold_zero_total_passes() {
-        // Haskell %?: 0 %? 0 = 1, so ratio = 1 passes any threshold
+    fn test_check_threshold_zero_total_fails() {
         let threshold = Rational {
             numerator: 1,
             denominator: 2,
         };
-        assert!(check_threshold(0, 0, &threshold));
+        assert!(!check_threshold(0, 0, &threshold));
     }
 
     #[test]
