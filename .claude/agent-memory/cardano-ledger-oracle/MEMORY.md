@@ -10,3 +10,4 @@
 
 ## Governance / Epoch Boundary Corrections
 - [Conway proposal deposit epoch boundary — verified source facts](feedback_proposal_deposit_epoch_boundary.md) — returnProposalDeposits scope, expiry off-by-one, no silent drops, divergence diagnosis
+- [DRep expiry and vsNumDormantEpochs mechanics](drep-expiry-numDormantEpochs.md) — computeDRepExpiry formula, cumulative counter, delta-only correction, expiry check reCurrentEpoch > drepExpiry
