@@ -67,5 +67,12 @@ mithril-client = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
 
+# Enable `force-cross` on gmp-mpfr-sys (transitively pulled in via
+# mithril-client → mithril-stm → rug) so the release pipeline can build
+# `x86_64-apple-darwin` on GitHub's aarch64 macOS runners. Cargo features
+# unify across the dep graph, so declaring it here is enough.
+[target.'cfg(target_os = "macos")'.dependencies]
+gmp-mpfr-sys = { version = "1", features = ["force-cross"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }

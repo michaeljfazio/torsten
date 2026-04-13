@@ -1326,6 +1326,7 @@ dependencies = [
  "fs2",
  "futures",
  "futures-util",
+ "gmp-mpfr-sys",
  "hex",
  "indicatif",
  "libc",
