@@ -321,13 +321,8 @@ cp opcert-new.cert opcert.cert
 </ul>
 <h2 id="snapshot-recovery--block-forging-readiness"><a class="header" href="#snapshot-recovery--block-forging-readiness">Snapshot Recovery &amp; Block Forging Readiness</a></h2>
 <p>When a block producer starts up, several subsystems must be initialized before it can begin forging blocks. The path to readiness depends on how the node was bootstrapped.</p>
-<h3 id="epoch-nonce-establishment"><a class="header" href="#epoch-nonce-establishment">Epoch Nonce Establishment</a></h3>
-<p>The epoch nonce is critical for VRF leader election. It is derived from accumulated VRF contributions across epoch boundaries:</p>
-<ul>
-<li><strong>After Mithril import + full replay from genesis:</strong> The nonce is computed correctly during replay. If the replay crosses at least one epoch boundary, <code>nonce_established</code> is set to <code>true</code> immediately and forging is enabled once the node reaches the chain tip.</li>
-<li><strong>After loading a ledger snapshot:</strong> The serialized snapshot does not carry live nonce tracking state. The node must observe at least one live epoch transition before <code>nonce_established</code> becomes <code>true</code>. Until then, the node logs <code>Forge: skipping — epoch nonce not yet established</code> and will not attempt to forge.</li>
-</ul>
-<p>On preview testnet (epoch length 86,400 slots = 1 day), expect up to one day after snapshot load before forging is enabled.</p>
+<h3 id="epoch-nonce"><a class="header" href="#epoch-nonce">Epoch Nonce</a></h3>
+<p>The epoch nonce is critical for VRF leader election. It is serialized in the ledger snapshot alongside the consensus state (<code>epoch_nonce</code>, <code>evolving_nonce</code>, <code>candidate_nonce</code>, <code>last_epoch_block_nonce</code>), so it is immediately authoritative after a snapshot load or Mithril import — matching the Haskell cardano-node's treatment of <code>praosStateEpochNonce</code>. Forging is enabled as soon as the node catches up to the chain tip and its pool has non-zero stake in the "set" snapshot; no additional epoch boundary is required.</p>
 <h3 id="pool-stake-reconstruction"><a class="header" href="#pool-stake-reconstruction">Pool Stake Reconstruction</a></h3>
 <p>On startup, after loading a ledger snapshot, the node rebuilds the stake distribution from the UTxO store to ensure consistency:</p>
 <ol>
@@ -389,23 +384,16 @@ cp opcert-new.cert opcert.cert
 <li><strong>Snapshot too old:</strong> The "set" snapshot reflects stake from two epoch boundaries ago. A newly registered pool must wait 2 epoch transitions before appearing in the "set" snapshot.</li>
 <li><strong>UTxO store not attached:</strong> If the node started without a UTxO store, stake reconstruction is skipped. Check for the <code>Rebuilding stake distribution from UTxO store</code> log message.</li>
 </ul>
-<h3 id="forge-skipping--epoch-nonce-not-yet-established"><a class="header" href="#forge-skipping--epoch-nonce-not-yet-established">"Forge: skipping — epoch nonce not yet established"</a></h3>
-<pre><code>Forge: skipping — epoch nonce not yet established
-</code></pre>
-<p>This is expected after loading a ledger snapshot. The node must observe at least one live epoch transition to establish a reliable epoch nonce. On preview testnet, this takes up to 1 day (one epoch). On mainnet, up to 5 days.</p>
-<p><strong>No action required</strong> — the node will begin forging automatically after the next epoch boundary.</p>
 <h3 id="vrf-leader-eligibility-check-failed"><a class="header" href="#vrf-leader-eligibility-check-failed">"VRF leader eligibility check failed"</a></h3>
 <p>VRF leader check failures during the first few epochs after a full replay are non-fatal and expected. The mark/set/go snapshot rotation means the "set" snapshot needs up to 3 epoch transitions to stabilize with correct stake distributions derived from the replayed state. During this window:</p>
 <ul>
 <li>The node may compute incorrect leader eligibility for some slots.</li>
-<li>Block verification for incoming blocks from peers is relaxed (strict VRF verification is disabled until <code>nonce_established</code> is true).</li>
 <li>Your pool may miss some leader slots — this is temporary and self-correcting.</li>
 </ul>
 <h3 id="pool-registered-but-no-forge-attempts"><a class="header" href="#pool-registered-but-no-forge-attempts">Pool Registered but No Forge Attempts</a></h3>
 <p>If your pool is registered on-chain but the node never logs any forge attempts:</p>
 <ol>
 <li><strong>Check the "set" snapshot log:</strong> Look for the startup message <code>Block producer: pool stake in 'set' snapshot</code>. Verify that <code>pool_stake_lovelace</code> is greater than zero.</li>
-<li><strong>Check nonce establishment:</strong> Look for <code>Forge: skipping — epoch nonce not yet established</code>. If present, wait for the next epoch boundary.</li>
 <li><strong>Check the "set" snapshot availability:</strong> If you see <code>Block producer: no 'set' snapshot available — leader election disabled until epoch transition</code>, the node has not yet completed enough epoch transitions. Wait for at least 2 epoch boundaries.</li>
 <li><strong>Verify key files:</strong> Ensure <code>--shelley-kes-key</code>, <code>--shelley-vrf-key</code>, and <code>--shelley-operational-certificate</code> are all provided and point to valid files. Without all three, the node runs in relay-only mode.</li>
 <li><strong>Check KES period:</strong> If the KES key has expired (current KES period exceeds the operational certificate's start period plus <code>maxKESEvolutions</code>), rotate the KES key and issue a new operational certificate.</li>

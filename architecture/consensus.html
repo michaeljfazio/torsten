@@ -248,11 +248,8 @@
     B --&gt;|"frozen at&lt;br/&gt;stability window"| C["Candidate&lt;br/&gt;Nonce"]
     C --&gt;|"hash(candidate ∥ lab)"| D["Epoch Nonce&lt;br/&gt;(next epoch)"]
 </code></pre>
-<p><strong>Nonce establishment after startup:</strong></p>
-<ul>
-<li><strong>After snapshot load or Mithril import:</strong> The nonce is not immediately valid. At least one full epoch transition must occur during live operation for <code>nonce_established</code> to become true. The replay of blocks during the first partial epoch counts toward building the evolving nonce.</li>
-<li><strong>After full genesis replay:</strong> The nonce is immediately valid because all VRF contributions from every block have been accumulated during the replay.</li>
-</ul>
+<p><strong>Nonce availability after startup:</strong></p>
+<p>The epoch nonce and its accumulators (<code>evolving_nonce</code>, <code>candidate_nonce</code>, <code>last_epoch_block_nonce</code>) are serialized in the ledger snapshot and considered authoritative immediately after a snapshot load or Mithril import. This matches Haskell cardano-node's treatment of <code>praosStateEpochNonce</code>, which is read directly from the deserialized <code>PraosState</code> with no warm-up or "established" gate.</p>
 <h3 id="era-dependent-nonce-stabilisation-window"><a class="header" href="#era-dependent-nonce-stabilisation-window">Era-Dependent Nonce Stabilisation Window</a></h3>
 <p>The stability window determines how early in an epoch the candidate nonce is frozen. This varies by era:</p>
 <div class="table-wrapper"><table><thead><tr><th>Era</th><th>Protocol Version</th><th>Stability Window</th></tr></thead><tbody>

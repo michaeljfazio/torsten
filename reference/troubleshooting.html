@@ -346,8 +346,8 @@ kill -HUP $(pidof dugite-node)
 <p><strong>Fix:</strong> Automatic correction on load — the epoch is recalculated from the tip slot using genesis parameters.</p>
 <p><strong>Log message:</strong> <code>"Snapshot epoch differs from computed epoch — correcting"</code></p>
 <h3 id="vrf-verification-failures-after-restart"><a class="header" href="#vrf-verification-failures-after-restart">VRF verification failures after restart</a></h3>
-<p><strong>Cause:</strong> Epoch nonce in snapshot may be stale if saved with wrong epoch boundaries.</p>
-<p><strong>Fix:</strong> VRF verification is non-fatal (<code>nonce_established=false</code>) until at least one epoch transition is observed. The node will sync normally; forging is enabled once the nonce is established.</p>
+<p><strong>Cause:</strong> Epoch nonce in snapshot may be stale if saved with wrong epoch boundaries, or the node is replaying blocks in non-strict mode.</p>
+<p><strong>Fix:</strong> VRF verification is non-fatal during non-strict (initial sync / replay) mode. Once the node reaches the chain tip it enables strict verification and the serialized <code>epoch_nonce</code> from the snapshot is used directly — matching Haskell's behavior.</p>
 <h2 id="getting-help"><a class="header" href="#getting-help">Getting Help</a></h2>
 <p>If you encounter an issue not covered here:</p>
 <ol>
