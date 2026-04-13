@@ -63,16 +63,17 @@ libc.workspace = true
 num-bigint = { workspace = true }
 tokio-util = { workspace = true }
 mithril-client = { workspace = true }
+# Enable `force-cross` on gmp-mpfr-sys (transitively pulled in via
+# mithril-client → mithril-stm → rug) so the release pipeline can build
+# every cross-compilation target (Linux x86_64 → aarch64, macOS aarch64
+# → x86_64) on GitHub runners. Cargo features unify across the dep graph,
+# so declaring it here applies to every workspace consumer. The feature
+# only disables a host=target sanity check; it's a no-op for native
+# builds and safe to leave on unconditionally.
+gmp-mpfr-sys = { version = "1", features = ["force-cross"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
-
-# Enable `force-cross` on gmp-mpfr-sys (transitively pulled in via
-# mithril-client → mithril-stm → rug) so the release pipeline can build
-# `x86_64-apple-darwin` on GitHub's aarch64 macOS runners. Cargo features
-# unify across the dep graph, so declaring it here is enough.
-[target.'cfg(target_os = "macos")'.dependencies]
-gmp-mpfr-sys = { version = "1", features = ["force-cross"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
