@@ -55,8 +55,12 @@ pub const PANEL_CONNECTIONS_H: u16 = 8;
 pub const PANEL_RESOURCES_H: u16 = 7;
 /// Peers panel: RTT bar + 2 band rows + Low/Avg/High = 4 content rows + 2 borders = 6
 pub const PANEL_PEERS_H: u16 = 6;
-/// Governance panel: DReps + Pools + Proposals + Treasury + Delegations = 5 content rows + 2 borders = 7
-pub const PANEL_GOVERNANCE_H: u16 = 7;
+/// Governance panel content rows:
+///   DReps reg/act, Pools, Proposals, Committee, Dormant,
+///   Treasury, Reserves, Delegations, Vote Delegs,
+///   separator, drepDeposit, drepActivity, govActionDeposit, govActionLifetime
+/// = 14 content rows + 2 borders = 16.
+pub const PANEL_GOVERNANCE_H: u16 = 16;
 /// Header area height: 1 line (status pill + key metrics only; epoch bar is in Chain panel).
 pub const HEADER_H: u16 = 1;
 

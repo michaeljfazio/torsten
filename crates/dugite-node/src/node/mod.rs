@@ -53,7 +53,48 @@ use dugite_storage::{ChainDB, ChainSelHandle};
 
 use crate::config::NodeConfig;
 use crate::genesis::{AlonzoGenesis, ByronGenesis, ConwayGenesis, ShelleyGenesis};
+use crate::metrics::GovernanceSnapshot;
 use crate::topology::Topology;
+
+/// Flatten a `LedgerState` into the primitive [`GovernanceSnapshot`] consumed
+/// by [`crate::metrics::NodeMetrics::set_governance_snapshot`].
+///
+/// Called from node startup and the sync loop's metric-refresh path so the
+/// governance gauges always reflect the ledger/pparam state together.
+fn governance_snapshot_from_ledger(ls: &LedgerState) -> GovernanceSnapshot {
+    let gov = &ls.gov.governance;
+    let pp = &ls.epochs.protocol_params;
+    let threshold_bps = gov
+        .committee_threshold
+        .as_ref()
+        .filter(|t| t.denominator != 0)
+        .map(|t| ((t.numerator as u128 * 10_000) / t.denominator as u128) as u64)
+        .unwrap_or(0);
+    GovernanceSnapshot {
+        delegation_count: ls.certs.delegations.len() as u64,
+        treasury_lovelace: ls.epochs.treasury.0,
+        reserves_lovelace: ls.epochs.reserves.0,
+        pool_count: ls.certs.pool_params.len() as u64,
+        drep_total: gov.dreps.len() as u64,
+        drep_active: gov.active_drep_count() as u64,
+        drep_registrations_total: gov.drep_registration_count,
+        vote_delegation_count: gov.vote_delegations.len() as u64,
+        proposal_count: gov.proposals.len() as u64,
+        committee_hot_count: gov.committee_hot_keys.len() as u64,
+        committee_total_count: gov.committee_expiration.len() as u64,
+        committee_resigned_count: gov.committee_resigned.len() as u64,
+        committee_no_confidence: gov.no_confidence,
+        committee_threshold_bps: threshold_bps,
+        gov_dormant_epochs: gov.num_dormant_epochs,
+        constitution_present: gov.constitution.is_some(),
+        pparam_drep_deposit_lovelace: pp.drep_deposit.0,
+        pparam_drep_activity_epochs: pp.drep_activity,
+        pparam_gov_action_deposit_lovelace: pp.gov_action_deposit.0,
+        pparam_gov_action_lifetime_epochs: pp.gov_action_lifetime,
+        pparam_committee_min_size: pp.committee_min_size,
+        pparam_committee_max_term_length: pp.committee_max_term_length,
+    }
+}
 
 // ─── NodeArgs ────────────────────────────────────────────────────────────────
 
@@ -1412,25 +1453,8 @@ impl Node {
             self.metrics.set_utxo_count(ls.utxo.utxo_set.len() as u64);
             self.metrics.set_mempool_count(self.mempool.len() as u64);
             self.metrics.set_mempool_max(self.mempool.capacity() as u64);
-            self.metrics.delegation_count.store(
-                ls.certs.delegations.len() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
             self.metrics
-                .treasury_lovelace
-                .store(ls.epochs.treasury.0, std::sync::atomic::Ordering::Relaxed);
-            self.metrics.pool_count.store(
-                ls.certs.pool_params.len() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            self.metrics.drep_count.store(
-                ls.gov.governance.active_drep_count() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            self.metrics.proposal_count.store(
-                ls.gov.governance.proposals.len() as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+                .set_governance_snapshot(&governance_snapshot_from_ledger(&ls));
             // Set slot/block from tip and compute sync progress
             if let Some(slot) = tip.point.slot() {
                 self.metrics.set_slot(slot.0);

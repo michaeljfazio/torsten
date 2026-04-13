@@ -377,9 +377,50 @@ pub struct NodeMetrics {
     pub blocks_forged: AtomicU64,
     pub delegation_count: AtomicU64,
     pub treasury_lovelace: AtomicU64,
+    pub reserves_lovelace: AtomicU64,
+    /// Total currently-registered DReps (matches `cardano-cli conway query drep-state`
+    /// length, i.e. the size of the `vsDReps` map).  Includes DReps whose activity
+    /// window has expired — they remain registered until explicitly deregistered.
     pub drep_count: AtomicU64,
+    /// Subset of `drep_count` still within their activity window (`active` flag is
+    /// true).  Only active DReps contribute voting power during ratification.
+    pub drep_active: AtomicU64,
+    /// Monotonic counter of all `RegDRep` certificates ever observed.
+    pub drep_registrations_total: AtomicU64,
+    /// Number of stake credentials currently delegated to a DRep (any variant,
+    /// including `AlwaysAbstain` / `AlwaysNoConfidence`).
+    pub vote_delegation_count: AtomicU64,
+    /// Active governance proposals (size of `proposals` BTreeMap).
     pub proposal_count: AtomicU64,
     pub pool_count: AtomicU64,
+    /// Committee hot-key authorizations (cold → hot).  A hot-authorized cold key
+    /// is considered an "active" constitutional committee member in Haskell.
+    pub committee_hot_count: AtomicU64,
+    /// Total committee members with a known expiration epoch (includes both
+    /// hot-authorized and not-yet-authorized cold keys).
+    pub committee_total_count: AtomicU64,
+    /// Committee members that have resigned (still in `committee_resigned` map
+    /// until the next UpdateCommittee action).
+    pub committee_resigned_count: AtomicU64,
+    /// 1 when the committee is in a no-confidence state (dissolved by a
+    /// ratified `NoConfidence` action), 0 otherwise.
+    pub committee_no_confidence: AtomicU64,
+    /// Committee quorum threshold as basis points (0–10000).  0 when unset.
+    pub committee_threshold_bps: AtomicU64,
+    /// Cumulative dormant-epoch counter since Conway genesis.  A dormant epoch
+    /// is one where the `proposals` map was empty at the epoch boundary.
+    /// Inflated values directly reduce every future `drep_expiry` computed at
+    /// registration/vote time, so this is useful as a divergence signal.
+    pub gov_dormant_epochs: AtomicU64,
+    /// 1 when a constitution is set in the governance state, 0 otherwise.
+    pub constitution_present: AtomicU64,
+    // Conway governance protocol parameters (surfaced from ProtocolParameters).
+    pub pparam_drep_deposit_lovelace: AtomicU64,
+    pub pparam_drep_activity_epochs: AtomicU64,
+    pub pparam_gov_action_deposit_lovelace: AtomicU64,
+    pub pparam_gov_action_lifetime_epochs: AtomicU64,
+    pub pparam_committee_min_size: AtomicU64,
+    pub pparam_committee_max_term_length: AtomicU64,
     pub disk_total_bytes: AtomicU64,
     pub disk_used_bytes: AtomicU64,
     pub disk_available_bytes: AtomicU64,
@@ -456,6 +497,38 @@ pub struct NodeMetrics {
     pub peer_sharing_enabled: AtomicU64,
 }
 
+/// Plain-data view of the governance-related ledger state and Conway
+/// protocol parameters, passed to [`NodeMetrics::set_governance_snapshot`].
+///
+/// Kept as a primitive struct so `metrics.rs` stays free of `dugite-ledger`
+/// type dependencies — the caller is responsible for flattening
+/// `LedgerState` into these fields.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GovernanceSnapshot {
+    pub delegation_count: u64,
+    pub treasury_lovelace: u64,
+    pub reserves_lovelace: u64,
+    pub pool_count: u64,
+    pub drep_total: u64,
+    pub drep_active: u64,
+    pub drep_registrations_total: u64,
+    pub vote_delegation_count: u64,
+    pub proposal_count: u64,
+    pub committee_hot_count: u64,
+    pub committee_total_count: u64,
+    pub committee_resigned_count: u64,
+    pub committee_no_confidence: bool,
+    pub committee_threshold_bps: u64,
+    pub gov_dormant_epochs: u64,
+    pub constitution_present: bool,
+    pub pparam_drep_deposit_lovelace: u64,
+    pub pparam_drep_activity_epochs: u64,
+    pub pparam_gov_action_deposit_lovelace: u64,
+    pub pparam_gov_action_lifetime_epochs: u64,
+    pub pparam_committee_min_size: u64,
+    pub pparam_committee_max_term_length: u64,
+}
+
 impl NodeMetrics {
     pub fn new() -> Self {
         NodeMetrics {
@@ -489,9 +562,26 @@ impl NodeMetrics {
             blocks_forged: AtomicU64::new(0),
             delegation_count: AtomicU64::new(0),
             treasury_lovelace: AtomicU64::new(0),
+            reserves_lovelace: AtomicU64::new(0),
             drep_count: AtomicU64::new(0),
+            drep_active: AtomicU64::new(0),
+            drep_registrations_total: AtomicU64::new(0),
+            vote_delegation_count: AtomicU64::new(0),
             proposal_count: AtomicU64::new(0),
             pool_count: AtomicU64::new(0),
+            committee_hot_count: AtomicU64::new(0),
+            committee_total_count: AtomicU64::new(0),
+            committee_resigned_count: AtomicU64::new(0),
+            committee_no_confidence: AtomicU64::new(0),
+            committee_threshold_bps: AtomicU64::new(0),
+            gov_dormant_epochs: AtomicU64::new(0),
+            constitution_present: AtomicU64::new(0),
+            pparam_drep_deposit_lovelace: AtomicU64::new(0),
+            pparam_drep_activity_epochs: AtomicU64::new(0),
+            pparam_gov_action_deposit_lovelace: AtomicU64::new(0),
+            pparam_gov_action_lifetime_epochs: AtomicU64::new(0),
+            pparam_committee_min_size: AtomicU64::new(0),
+            pparam_committee_max_term_length: AtomicU64::new(0),
             disk_total_bytes: AtomicU64::new(0),
             disk_used_bytes: AtomicU64::new(0),
             disk_available_bytes: AtomicU64::new(0),
@@ -757,6 +847,55 @@ impl NodeMetrics {
             .store(u64::from(peer_sharing), Ordering::Relaxed);
     }
 
+    /// Update every governance-related gauge from a flattened snapshot.
+    ///
+    /// Called from the node's startup init path (`run`) and the sync loop's
+    /// periodic metric-refresh site.  Single code path means the three
+    /// previously-duplicated store sites cannot drift.
+    pub fn set_governance_snapshot(&self, s: &GovernanceSnapshot) {
+        self.delegation_count
+            .store(s.delegation_count, Ordering::Relaxed);
+        self.treasury_lovelace
+            .store(s.treasury_lovelace, Ordering::Relaxed);
+        self.reserves_lovelace
+            .store(s.reserves_lovelace, Ordering::Relaxed);
+        self.pool_count.store(s.pool_count, Ordering::Relaxed);
+        self.drep_count.store(s.drep_total, Ordering::Relaxed);
+        self.drep_active.store(s.drep_active, Ordering::Relaxed);
+        self.drep_registrations_total
+            .store(s.drep_registrations_total, Ordering::Relaxed);
+        self.vote_delegation_count
+            .store(s.vote_delegation_count, Ordering::Relaxed);
+        self.proposal_count
+            .store(s.proposal_count, Ordering::Relaxed);
+        self.committee_hot_count
+            .store(s.committee_hot_count, Ordering::Relaxed);
+        self.committee_total_count
+            .store(s.committee_total_count, Ordering::Relaxed);
+        self.committee_resigned_count
+            .store(s.committee_resigned_count, Ordering::Relaxed);
+        self.committee_no_confidence
+            .store(u64::from(s.committee_no_confidence), Ordering::Relaxed);
+        self.committee_threshold_bps
+            .store(s.committee_threshold_bps, Ordering::Relaxed);
+        self.gov_dormant_epochs
+            .store(s.gov_dormant_epochs, Ordering::Relaxed);
+        self.constitution_present
+            .store(u64::from(s.constitution_present), Ordering::Relaxed);
+        self.pparam_drep_deposit_lovelace
+            .store(s.pparam_drep_deposit_lovelace, Ordering::Relaxed);
+        self.pparam_drep_activity_epochs
+            .store(s.pparam_drep_activity_epochs, Ordering::Relaxed);
+        self.pparam_gov_action_deposit_lovelace
+            .store(s.pparam_gov_action_deposit_lovelace, Ordering::Relaxed);
+        self.pparam_gov_action_lifetime_epochs
+            .store(s.pparam_gov_action_lifetime_epochs, Ordering::Relaxed);
+        self.pparam_committee_min_size
+            .store(s.pparam_committee_min_size, Ordering::Relaxed);
+        self.pparam_committee_max_term_length
+            .store(s.pparam_committee_max_term_length, Ordering::Relaxed);
+    }
+
     /// Record block producer mode.
     ///
     /// Call once during node startup when forge credentials are loaded.
@@ -995,9 +1134,29 @@ impl NodeMetrics {
                 &self.treasury_lovelace,
             ),
             (
+                "dugite_reserves_lovelace",
+                "Total lovelace remaining in the reserves pot",
+                &self.reserves_lovelace,
+            ),
+            (
                 "dugite_drep_count",
-                "Number of registered DReps",
+                "Total currently-registered DReps (matches cardano-cli drep-state)",
                 &self.drep_count,
+            ),
+            (
+                "dugite_drep_active",
+                "DReps still within their activity window (voting-eligible subset of dugite_drep_count)",
+                &self.drep_active,
+            ),
+            (
+                "dugite_drep_registrations_total",
+                "Monotonic counter of RegDRep certificates observed since node start",
+                &self.drep_registrations_total,
+            ),
+            (
+                "dugite_vote_delegation_count",
+                "Stake credentials currently delegated to a DRep (any variant)",
+                &self.vote_delegation_count,
             ),
             (
                 "dugite_proposal_count",
@@ -1008,6 +1167,71 @@ impl NodeMetrics {
                 "dugite_pool_count",
                 "Number of registered stake pools",
                 &self.pool_count,
+            ),
+            (
+                "dugite_committee_hot_count",
+                "Committee members with a hot-key authorization",
+                &self.committee_hot_count,
+            ),
+            (
+                "dugite_committee_total_count",
+                "Committee members with an expiration epoch (active + unauthorized cold keys)",
+                &self.committee_total_count,
+            ),
+            (
+                "dugite_committee_resigned_count",
+                "Committee members that have resigned",
+                &self.committee_resigned_count,
+            ),
+            (
+                "dugite_committee_no_confidence",
+                "1 when the committee is in a no-confidence (dissolved) state",
+                &self.committee_no_confidence,
+            ),
+            (
+                "dugite_committee_threshold_bps",
+                "Committee quorum threshold in basis points (0-10000)",
+                &self.committee_threshold_bps,
+            ),
+            (
+                "dugite_gov_dormant_epochs",
+                "Cumulative dormant-epoch counter since Conway genesis",
+                &self.gov_dormant_epochs,
+            ),
+            (
+                "dugite_constitution_present",
+                "1 when a constitution is set in the governance state",
+                &self.constitution_present,
+            ),
+            (
+                "dugite_pparam_drep_deposit_lovelace",
+                "Deposit required to register a DRep (drepDeposit)",
+                &self.pparam_drep_deposit_lovelace,
+            ),
+            (
+                "dugite_pparam_drep_activity_epochs",
+                "DRep activity window in epochs (drepActivity)",
+                &self.pparam_drep_activity_epochs,
+            ),
+            (
+                "dugite_pparam_gov_action_deposit_lovelace",
+                "Deposit required to submit a governance action (govActionDeposit)",
+                &self.pparam_gov_action_deposit_lovelace,
+            ),
+            (
+                "dugite_pparam_gov_action_lifetime_epochs",
+                "Maximum governance action lifetime in epochs (govActionLifetime)",
+                &self.pparam_gov_action_lifetime_epochs,
+            ),
+            (
+                "dugite_pparam_committee_min_size",
+                "Minimum constitutional committee size",
+                &self.pparam_committee_min_size,
+            ),
+            (
+                "dugite_pparam_committee_max_term_length",
+                "Maximum committee term length in epochs",
+                &self.pparam_committee_max_term_length,
             ),
             (
                 "dugite_disk_total_bytes",

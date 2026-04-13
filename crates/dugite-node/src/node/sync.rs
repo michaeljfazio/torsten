@@ -1766,29 +1766,8 @@ impl Node {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                self.metrics.delegation_count.store(
-                    ls.certs.delegations.len() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
                 self.metrics
-                    .treasury_lovelace
-                    .store(ls.epochs.treasury.0, std::sync::atomic::Ordering::Relaxed);
-                // Report only active DReps (active=true) to match what external
-                // tools like Koios expose.  Inactive DReps remain registered in
-                // `self.dreps` (they can reactivate) but are excluded from voting
-                // power and from the count that operators care about.
-                self.metrics.drep_count.store(
-                    ls.gov.governance.active_drep_count() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                self.metrics.proposal_count.store(
-                    ls.gov.governance.proposals.len() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                self.metrics.pool_count.store(
-                    ls.certs.pool_params.len() as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                    .set_governance_snapshot(&super::governance_snapshot_from_ledger(&ls));
                 // Store tip slot time for dynamic tip_age computation
                 let sc = &ls.slot_config;
                 let slot_time_ms =
@@ -2098,25 +2077,8 @@ impl Node {
                     metrics.set_block_number(ls.tip.block_number.0);
                     metrics.set_epoch(ls.epoch.0);
                     metrics.set_utxo_count(ls.utxo.utxo_set.len() as u64);
-                    metrics.delegation_count.store(
-                        ls.certs.delegations.len() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
                     metrics
-                        .treasury_lovelace
-                        .store(ls.epochs.treasury.0, std::sync::atomic::Ordering::Relaxed);
-                    metrics.pool_count.store(
-                        ls.certs.pool_params.len() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    metrics.drep_count.store(
-                        ls.gov.governance.active_drep_count() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    metrics.proposal_count.store(
-                        ls.gov.governance.proposals.len() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+                        .set_governance_snapshot(&super::governance_snapshot_from_ledger(&ls));
                 }
                 Err(e) => {
                     // "shutdown requested" is not an error — it's a normal

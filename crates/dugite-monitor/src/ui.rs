@@ -1199,11 +1199,17 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 // Panel: Governance
 // ---------------------------------------------------------------------------
 
-/// Governance panel: DReps, stake pools, active proposals, treasury balance, delegations.
+/// Governance panel: on-chain governance state + Conway protocol parameters.
 ///
-/// Displays a concise summary of on-chain governance state sourced from the
-/// Prometheus metrics endpoint.  All values are read-only; the panel never
-/// modifies node state.
+/// Shows two subsections:
+///   1. Live ledger state — DRep registry (total/active), pools, proposals,
+///      committee membership, cumulative dormant-epoch counter, ADA pots,
+///      delegation counts.
+///   2. Conway protocol parameters — drepDeposit, drepActivity, govAction
+///      deposit + lifetime.  These change via ratification so they are real
+///      live gauges, not static config.
+///
+/// All values are read-only; the panel never modifies node state.
 fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let block = panel_block("Governance", theme);
     let inner = block.inner(area);
@@ -1213,30 +1219,75 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
         return;
     }
 
-    let drep_count = app.metrics.get_u64("dugite_drep_count");
+    // Live state
+    let drep_total = app.metrics.get_u64("dugite_drep_count");
+    let drep_active = app.metrics.get_u64("dugite_drep_active");
     let pool_count = app.metrics.get_u64("dugite_pool_count");
     let proposal_count = app.metrics.get_u64("dugite_proposal_count");
     let delegation_count = app.metrics.get_u64("dugite_delegation_count");
-    // Treasury is stored in lovelace; convert to ADA for display.
-    // The formatted value includes " ADA" suffix and thousands separators, e.g.
-    // "14,074,169 ADA" (14 chars) — wider than the default VALUE_W of 12, so
-    // we use a wider value column (16) to avoid truncation on a typical panel width.
+    let vote_deleg_count = app.metrics.get_u64("dugite_vote_delegation_count");
+    let committee_hot = app.metrics.get_u64("dugite_committee_hot_count");
+    let committee_total = app.metrics.get_u64("dugite_committee_total_count");
+    let committee_nc = app.metrics.get_u64("dugite_committee_no_confidence");
+    let dormant = app.metrics.get_u64("dugite_gov_dormant_epochs");
     let treasury_lovelace = app.metrics.get_u64("dugite_treasury_lovelace");
-    let treasury_ada = treasury_lovelace / 1_000_000;
-    let treasury_str = format!("{} ADA", App::format_number(treasury_ada));
+    let reserves_lovelace = app.metrics.get_u64("dugite_reserves_lovelace");
+
+    // Protocol parameters
+    let drep_deposit = app.metrics.get_u64("dugite_pparam_drep_deposit_lovelace");
+    let drep_activity = app.metrics.get_u64("dugite_pparam_drep_activity_epochs");
+    let gov_action_deposit = app
+        .metrics
+        .get_u64("dugite_pparam_gov_action_deposit_lovelace");
+    let gov_action_lifetime = app
+        .metrics
+        .get_u64("dugite_pparam_gov_action_lifetime_epochs");
+
+    let ada_str = |lovelace: u64| format!("{} ADA", App::format_number(lovelace / 1_000_000));
 
     let col_w = inner.width.saturating_sub(2) as usize;
-    // Treasury value can be long (e.g. "14,074,169 ADA" = 14 chars + spaces).
-    // Use a wider value column (16 chars) so the number is never clipped.
-    const TREASURY_VALUE_W: usize = 22;
-    let treasury_label_w = col_w.saturating_sub(TREASURY_VALUE_W).max(LABEL_W);
-    let treasury_value_w = col_w.saturating_sub(treasury_label_w).max(1);
+    // Treasury/Reserves values can be long (e.g. "14,074,169 ADA" = 14 chars).
+    // Use a wider value column so the number is never clipped.
+    const ADA_VALUE_W: usize = 22;
+    let ada_label_w = col_w.saturating_sub(ADA_VALUE_W).max(LABEL_W);
+    let ada_value_w = col_w.saturating_sub(ada_label_w).max(1);
+
+    let ada_row = |label: &str, lovelace: u64| -> Line<'static> {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<label_w$}", label, label_w = ada_label_w),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                format!("{:>value_w$}", ada_str(lovelace), value_w = ada_value_w),
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    };
+
+    let drep_value = format!(
+        "{} / {}",
+        App::format_number(drep_active),
+        App::format_number(drep_total)
+    );
+    let committee_value = if committee_nc > 0 {
+        "NO-CONF".to_string()
+    } else {
+        format!(
+            "{} / {}",
+            App::format_number(committee_hot),
+            App::format_number(committee_total)
+        )
+    };
 
     let mut lines = vec![
         kv_aligned(
-            "DReps",
-            App::format_number(drep_count),
-            if drep_count > 0 {
+            "DReps act/tot",
+            drep_value,
+            if drep_active > 0 {
                 theme.info
             } else {
                 theme.muted
@@ -1266,24 +1317,69 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
             theme,
             col_w,
         ),
-        // Treasury uses a dedicated wider value column to avoid truncation of
-        // large ADA values (e.g. "14,074,169 ADA").
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                format!("{:<label_w$}", "Treasury", label_w = treasury_label_w),
-                Style::default().fg(theme.muted),
-            ),
-            Span::styled(
-                format!("{:>value_w$}", treasury_str, value_w = treasury_value_w),
-                Style::default()
-                    .fg(theme.success)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        kv_aligned(
+            "Committee",
+            committee_value,
+            if committee_nc > 0 {
+                theme.error
+            } else if committee_hot > 0 {
+                theme.info
+            } else {
+                theme.muted
+            },
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Dormant ep",
+            App::format_number(dormant),
+            if dormant > 0 {
+                theme.warning
+            } else {
+                theme.muted
+            },
+            theme,
+            col_w,
+        ),
+        ada_row("Treasury", treasury_lovelace),
+        ada_row("Reserves", reserves_lovelace),
         kv_aligned(
             "Delegations",
             App::format_number(delegation_count),
+            theme.fg,
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Vote delegs",
+            App::format_number(vote_deleg_count),
+            theme.fg,
+            theme,
+            col_w,
+        ),
+        // Visual separator between live state and protocol parameters.
+        Line::from(Span::styled(
+            "─".repeat(inner.width as usize),
+            Style::default().fg(theme.border),
+        )),
+        kv_aligned("drepDeposit", ada_str(drep_deposit), theme.fg, theme, col_w),
+        kv_aligned(
+            "drepActivity",
+            format!("{} ep", App::format_number(drep_activity)),
+            theme.fg,
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "govActDeposit",
+            ada_str(gov_action_deposit),
+            theme.fg,
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "govActLife",
+            format!("{} ep", App::format_number(gov_action_lifetime)),
             theme.fg,
             theme,
             col_w,
