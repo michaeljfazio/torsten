@@ -221,9 +221,9 @@ See [Fork Recovery & ImmutableDB Contamination](../architecture/storage.md#fork-
 
 ### VRF verification failures after restart
 
-**Cause:** Epoch nonce in snapshot may be stale if saved with wrong epoch boundaries.
+**Cause:** Epoch nonce in snapshot may be stale if saved with wrong epoch boundaries, or the node is replaying blocks in non-strict mode.
 
-**Fix:** VRF verification is non-fatal (`nonce_established=false`) until at least one epoch transition is observed. The node will sync normally; forging is enabled once the nonce is established.
+**Fix:** VRF verification is non-fatal during non-strict (initial sync / replay) mode. Once the node reaches the chain tip it enables strict verification and the serialized `epoch_nonce` from the snapshot is used directly — matching Haskell's behavior.
 
 ## Getting Help
 

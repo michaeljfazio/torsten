@@ -185,14 +185,9 @@ KES keys must be rotated before they expire. The rotation process:
 
 When a block producer starts up, several subsystems must be initialized before it can begin forging blocks. The path to readiness depends on how the node was bootstrapped.
 
-### Epoch Nonce Establishment
+### Epoch Nonce
 
-The epoch nonce is critical for VRF leader election. It is derived from accumulated VRF contributions across epoch boundaries:
-
-- **After Mithril import + full replay from genesis:** The nonce is computed correctly during replay. If the replay crosses at least one epoch boundary, `nonce_established` is set to `true` immediately and forging is enabled once the node reaches the chain tip.
-- **After loading a ledger snapshot:** The serialized snapshot does not carry live nonce tracking state. The node must observe at least one live epoch transition before `nonce_established` becomes `true`. Until then, the node logs `Forge: skipping — epoch nonce not yet established` and will not attempt to forge.
-
-On preview testnet (epoch length 86,400 slots = 1 day), expect up to one day after snapshot load before forging is enabled.
+The epoch nonce is critical for VRF leader election. It is serialized in the ledger snapshot alongside the consensus state (`epoch_nonce`, `evolving_nonce`, `candidate_nonce`, `last_epoch_block_nonce`), so it is immediately authoritative after a snapshot load or Mithril import — matching the Haskell cardano-node's treatment of `praosStateEpochNonce`. Forging is enabled as soon as the node catches up to the chain tip and its pool has non-zero stake in the "set" snapshot; no additional epoch boundary is required.
 
 ### Pool Stake Reconstruction
 
@@ -275,22 +270,11 @@ This warning appears at startup when the "set" snapshot contains no stake for yo
 - **Snapshot too old:** The "set" snapshot reflects stake from two epoch boundaries ago. A newly registered pool must wait 2 epoch transitions before appearing in the "set" snapshot.
 - **UTxO store not attached:** If the node started without a UTxO store, stake reconstruction is skipped. Check for the `Rebuilding stake distribution from UTxO store` log message.
 
-### "Forge: skipping — epoch nonce not yet established"
-
-```
-Forge: skipping — epoch nonce not yet established
-```
-
-This is expected after loading a ledger snapshot. The node must observe at least one live epoch transition to establish a reliable epoch nonce. On preview testnet, this takes up to 1 day (one epoch). On mainnet, up to 5 days.
-
-**No action required** — the node will begin forging automatically after the next epoch boundary.
-
 ### "VRF leader eligibility check failed"
 
 VRF leader check failures during the first few epochs after a full replay are non-fatal and expected. The mark/set/go snapshot rotation means the "set" snapshot needs up to 3 epoch transitions to stabilize with correct stake distributions derived from the replayed state. During this window:
 
 - The node may compute incorrect leader eligibility for some slots.
-- Block verification for incoming blocks from peers is relaxed (strict VRF verification is disabled until `nonce_established` is true).
 - Your pool may miss some leader slots — this is temporary and self-correcting.
 
 ### Pool Registered but No Forge Attempts
@@ -298,10 +282,9 @@ VRF leader check failures during the first few epochs after a full replay are no
 If your pool is registered on-chain but the node never logs any forge attempts:
 
 1. **Check the "set" snapshot log:** Look for the startup message `Block producer: pool stake in 'set' snapshot`. Verify that `pool_stake_lovelace` is greater than zero.
-2. **Check nonce establishment:** Look for `Forge: skipping — epoch nonce not yet established`. If present, wait for the next epoch boundary.
-3. **Check the "set" snapshot availability:** If you see `Block producer: no 'set' snapshot available — leader election disabled until epoch transition`, the node has not yet completed enough epoch transitions. Wait for at least 2 epoch boundaries.
-4. **Verify key files:** Ensure `--shelley-kes-key`, `--shelley-vrf-key`, and `--shelley-operational-certificate` are all provided and point to valid files. Without all three, the node runs in relay-only mode.
-5. **Check KES period:** If the KES key has expired (current KES period exceeds the operational certificate's start period plus `maxKESEvolutions`), rotate the KES key and issue a new operational certificate.
+2. **Check the "set" snapshot availability:** If you see `Block producer: no 'set' snapshot available — leader election disabled until epoch transition`, the node has not yet completed enough epoch transitions. Wait for at least 2 epoch boundaries.
+3. **Verify key files:** Ensure `--shelley-kes-key`, `--shelley-vrf-key`, and `--shelley-operational-certificate` are all provided and point to valid files. Without all three, the node runs in relay-only mode.
+4. **Check KES period:** If the KES key has expired (current KES period exceeds the operational certificate's start period plus `maxKESEvolutions`), rotate the KES key and issue a new operational certificate.
 
 ## Complete Deployment
 

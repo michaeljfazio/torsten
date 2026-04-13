@@ -826,7 +826,7 @@ impl Node {
                 // mutating any state.  This fixes the "stale nonce after restart"
                 // VRF failure that permanently blocked epoch transitions:
                 //
-                //   1. Node restarts, replays immutable blocks → nonce_established=true
+                //   1. Node restarts, replays immutable blocks → strict verification on
                 //   2. First live block is the first block of epoch E+1
                 //   3. Old code used epoch E nonce → VRF failure → batch rejected
                 //   4. Ledger never advanced → epoch E+1 nonce never computed → stuck
@@ -1563,22 +1563,8 @@ impl Node {
                     crossed = epochs_crossed,
                     "Epoch transition",
                 );
-                self.epoch_transitions_observed = self
-                    .epoch_transitions_observed
-                    .saturating_add(epochs_crossed);
                 self.live_epoch_transitions =
                     self.live_epoch_transitions.saturating_add(epochs_crossed);
-
-                // Mark epoch nonce as established once we've accumulated at least
-                // one epoch transition. This enables correct VRF leader checks
-                // for block forging.
-                if self.epoch_transitions_observed >= 1 && !self.consensus.nonce_established {
-                    self.consensus.nonce_established = true;
-                    info!(
-                        epoch_transitions_observed = self.epoch_transitions_observed,
-                        "Epoch nonce established — VRF nonce is reliable for leader checks"
-                    );
-                }
 
                 // Finalize immutable chunk at epoch boundary and persist.
                 // Pass the new epoch's parameters for Haskell-compatible
@@ -1901,20 +1887,6 @@ impl Node {
                     "Replaying ledger from chunk files",
                 );
                 self.replay_from_chunk_files(dir, shutdown_rx.clone()).await;
-                // After replay the ledger's epoch is the authoritative count of
-                // transitions that have been processed (snapshot + any new blocks
-                // replayed here).  Assign directly rather than accumulating so
-                // that if epoch_transitions_observed was primed from a snapshot
-                // epoch we don't double-count.
-                let replay_epoch = self.ledger_state.read().await.epoch.0;
-                if replay_epoch > 0 {
-                    self.epoch_transitions_observed = replay_epoch as u32;
-                    info!(
-                        epoch = replay_epoch,
-                        epoch_transitions_observed = self.epoch_transitions_observed,
-                        "Replay epoch transitions counted"
-                    );
-                }
                 // Don't return — fall through to LSM replay check below.
                 // Chunk files from Mithril may not cover blocks that were
                 // previously synced by Dugite and flushed to ImmutableDB.
@@ -1965,19 +1937,6 @@ impl Node {
             db_tip_slot, blocks_behind, "Replaying ledger from ChainDB (LSM mode)",
         );
         self.replay_from_lsm(db_tip, shutdown_rx).await;
-        // After replay the ledger's epoch is the authoritative count of transitions
-        // processed (snapshot + any new blocks replayed here).  Assign directly
-        // rather than accumulating to avoid double-counting with the snapshot epoch
-        // that was already primed into epoch_transitions_observed in Node::new().
-        let replay_epoch = self.ledger_state.read().await.epoch.0;
-        if replay_epoch > 0 {
-            self.epoch_transitions_observed = replay_epoch as u32;
-            info!(
-                epoch = replay_epoch,
-                epoch_transitions_observed = self.epoch_transitions_observed,
-                "LSM replay epoch transitions counted"
-            );
-        }
     }
 
     /// Fast replay: read blocks sequentially from chunk files.

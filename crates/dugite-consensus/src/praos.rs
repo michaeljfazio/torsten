@@ -150,7 +150,6 @@ pub enum ValidationMode {
 #[derive(Debug, Clone)]
 pub struct CryptoVerificationParams {
     pub strict_verification: bool,
-    pub nonce_established: bool,
     pub slots_per_kes_period: u64,
     pub max_kes_evolutions: u64,
 }
@@ -184,11 +183,6 @@ pub struct OuroborosPraos {
     /// When false (during initial sync), VRF/KES/opcert failures are non-fatal.
     /// When true (caught up to chain tip), verification failures reject blocks.
     pub strict_verification: bool,
-    /// Whether the epoch nonce has been correctly established.
-    /// After Mithril import, the epoch nonce is wrong until 2 full epoch transitions
-    /// have accumulated correct VRF nonce contributions. When false, VRF proof
-    /// verification is skipped even in strict mode.
-    pub nonce_established: bool,
     /// Whether stake snapshots have been correctly established.
     /// After snapshot load, the mark/set/go snapshots may have drifted pool_stake
     /// values. It takes 3 epoch transitions for all snapshots to be rebuilt with
@@ -221,7 +215,6 @@ impl OuroborosPraos {
             max_kes_evolutions: MAX_KES_EVOLUTIONS,
             tip: Tip::origin(),
             strict_verification: false,
-            nonce_established: false,
             snapshots_established: false,
             checkpoints: HashMap::new(),
             max_major_prot_ver: crate::NODE_PROTOCOL_VERSION.0,
@@ -245,7 +238,6 @@ impl OuroborosPraos {
             max_kes_evolutions: MAX_KES_EVOLUTIONS,
             tip: Tip::origin(),
             strict_verification: false,
-            nonce_established: false,
             snapshots_established: false,
             checkpoints: HashMap::new(),
             max_major_prot_ver,
@@ -271,7 +263,6 @@ impl OuroborosPraos {
             max_kes_evolutions,
             tip: Tip::origin(),
             strict_verification: false,
-            nonce_established: false,
             snapshots_established: false,
             checkpoints: HashMap::new(),
             max_major_prot_ver,
@@ -303,7 +294,6 @@ impl OuroborosPraos {
     pub fn crypto_params(&self) -> CryptoVerificationParams {
         CryptoVerificationParams {
             strict_verification: self.strict_verification,
-            nonce_established: self.nonce_established,
             slots_per_kes_period: self.slots_per_kes_period,
             max_kes_evolutions: self.max_kes_evolutions,
         }
@@ -975,14 +965,11 @@ impl OuroborosPraos {
     ///
     /// Verify the VRF proof in the block header.
     ///
-    /// In strict mode with an established nonce, VRF proof failure is fatal.
-    /// Otherwise, failures are logged as warnings because the epoch nonce may
-    /// not be correctly established yet (e.g., after Mithril import — needs
-    /// 2 full epoch transitions for nonce to stabilize).
+    /// In strict mode, VRF proof failure is fatal. In non-strict mode (during
+    /// initial sync), failures are logged as warnings and allowed through so
+    /// replay can make progress.
     fn verify_vrf_proof(&self, header: &BlockHeader) -> Result<(), ConsensusError> {
-        // VRF proof verification requires a correct epoch nonce.
-        // After Mithril import, the nonce is wrong until 2 full epoch transitions.
-        let vrf_is_fatal = self.strict_verification && self.nonce_established;
+        let vrf_is_fatal = self.strict_verification;
 
         // Construct the VRF seed:
         // TPraos (Shelley–Alonzo, proto < 7): domain-separated seed with TAG_L XOR.
@@ -1000,7 +987,6 @@ impl OuroborosPraos {
             vrf_proof_len = header.vrf_result.proof.len(),
             vrf_output_len = header.vrf_result.output.len(),
             seed_len = seed.len(),
-            nonce_established = self.nonce_established,
             "Praos: VRF verification inputs"
         );
 
@@ -1038,20 +1024,11 @@ impl OuroborosPraos {
                     );
                     return Err(ConsensusError::VrfVerification(format!("{e}")));
                 }
-                // Use debug level when nonce isn't established (expected after Mithril import)
-                if self.nonce_established {
-                    warn!(
-                        slot = header.slot.0,
-                        error = %e,
-                        "Praos: VRF proof verification failed"
-                    );
-                } else {
-                    debug!(
-                        slot = header.slot.0,
-                        error = %e,
-                        "Praos: VRF proof verification deferred (epoch nonce not established)"
-                    );
-                }
+                warn!(
+                    slot = header.slot.0,
+                    error = %e,
+                    "Praos: VRF proof verification failed"
+                );
                 Ok(())
             }
         }
@@ -1072,7 +1049,7 @@ impl OuroborosPraos {
             return Ok(());
         }
 
-        let vrf_is_fatal = self.strict_verification && self.nonce_established;
+        let vrf_is_fatal = self.strict_verification;
 
         // TPraos nonce VRF seed: Blake2b-256(slot_BE || epoch_nonce) XOR TAG_ETA
         let seed = crate::slot_leader::tpraos_nonce_vrf_input(&header.epoch_nonce, header.slot);
@@ -1116,19 +1093,11 @@ impl OuroborosPraos {
                     );
                     return Err(ConsensusError::VrfVerification(format!("nonce VRF: {e}")));
                 }
-                if self.nonce_established {
-                    warn!(
-                        slot = header.slot.0,
-                        error = %e,
-                        "TPraos: nonce VRF proof verification failed"
-                    );
-                } else {
-                    debug!(
-                        slot = header.slot.0,
-                        error = %e,
-                        "TPraos: nonce VRF proof verification deferred (epoch nonce not established)"
-                    );
-                }
+                warn!(
+                    slot = header.slot.0,
+                    error = %e,
+                    "TPraos: nonce VRF proof verification failed"
+                );
                 Ok(())
             }
         }
@@ -1414,7 +1383,7 @@ impl OuroborosPraos {
         params: &CryptoVerificationParams,
         header: &BlockHeader,
     ) -> Result<(), ConsensusError> {
-        let vrf_is_fatal = params.strict_verification && params.nonce_established;
+        let vrf_is_fatal = params.strict_verification;
 
         let seed = crate::slot_leader::vrf_input(&header.epoch_nonce, header.slot);
 
@@ -3144,15 +3113,12 @@ mod tests {
             OuroborosPraos::with_genesis_params(0.05, 2160, EpochLength(432000), 129600, 62, 10);
         let params = praos.crypto_params();
         assert!(!params.strict_verification);
-        assert!(!params.nonce_established);
         assert_eq!(params.slots_per_kes_period, 129600);
         assert_eq!(params.max_kes_evolutions, 62);
 
         praos.set_strict_verification(true);
-        praos.nonce_established = true;
         let params = praos.crypto_params();
         assert!(params.strict_verification);
-        assert!(params.nonce_established);
     }
 
     #[test]
@@ -3183,7 +3149,6 @@ mod tests {
         // In non-strict mode, crypto failures are non-fatal
         let params = CryptoVerificationParams {
             strict_verification: false,
-            nonce_established: false,
             slots_per_kes_period: KES_PERIOD_SLOTS,
             max_kes_evolutions: MAX_KES_EVOLUTIONS,
         };
@@ -3197,32 +3162,13 @@ mod tests {
     fn test_verify_header_crypto_strict_vrf_fails() {
         let params = CryptoVerificationParams {
             strict_verification: true,
-            nonce_established: true,
             slots_per_kes_period: KES_PERIOD_SLOTS,
             max_kes_evolutions: MAX_KES_EVOLUTIONS,
         };
         let header = make_valid_header(100);
-        // With strict mode and nonce established, dummy VRF should fail
+        // In strict mode, dummy VRF proof should fail fatally
         let result = OuroborosPraos::verify_header_crypto(&params, &header);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_verify_header_crypto_strict_nonce_not_established() {
-        // Strict but nonce not established → VRF skipped
-        let params = CryptoVerificationParams {
-            strict_verification: true,
-            nonce_established: false,
-            slots_per_kes_period: KES_PERIOD_SLOTS,
-            max_kes_evolutions: MAX_KES_EVOLUTIONS,
-        };
-        let header = make_valid_header(100);
-        // VRF check skipped; opcert check with dummy data is non-fatal
-        let result = OuroborosPraos::verify_header_crypto(&params, &header);
-        // Even strict, VRF is skipped when nonce isn't established,
-        // but opcert may fail depending on data
-        // The test verifies the function doesn't panic
-        let _ = result;
     }
 
     #[test]
@@ -3274,7 +3220,6 @@ mod tests {
     fn test_vrf_strict_mode_with_invalid_proof() {
         let mut praos = OuroborosPraos::new();
         praos.set_strict_verification(true);
-        praos.nonce_established = true;
 
         let mut header = make_valid_header(100);
         // Set VRF key/proof to valid sizes but garbage data
@@ -3285,7 +3230,7 @@ mod tests {
         let result = praos.validate_header(&header, SlotNo(200), ValidationMode::Full, Some(9));
         assert!(
             matches!(result, Err(ConsensusError::VrfVerification(_))),
-            "Expected VrfVerification error for invalid proof in strict mode with nonce established, got: {result:?}"
+            "Expected VrfVerification error for invalid proof in strict mode, got: {result:?}"
         );
     }
 
@@ -3856,7 +3801,6 @@ mod tests {
 
         let mut praos = OuroborosPraos::new();
         praos.strict_verification = true;
-        praos.nonce_established = true;
 
         assert!(
             praos.verify_nonce_vrf_proof(&header).is_ok(),
@@ -3873,7 +3817,6 @@ mod tests {
 
         let mut praos = OuroborosPraos::new();
         praos.strict_verification = true;
-        praos.nonce_established = true;
 
         let result = praos.verify_nonce_vrf_proof(&header);
         assert!(
@@ -3892,7 +3835,6 @@ mod tests {
 
         let mut praos = OuroborosPraos::new();
         praos.strict_verification = true;
-        praos.nonce_established = true;
 
         assert!(
             praos.verify_nonce_vrf_proof(&header).is_ok(),
@@ -3900,20 +3842,19 @@ mod tests {
         );
     }
 
-    /// Invalid nonce VRF proof is non-fatal when nonce is not established.
+    /// Invalid nonce VRF proof is non-fatal in non-strict mode (initial sync).
     #[test]
-    fn test_tpraos_nonce_vrf_non_fatal_when_nonce_not_established() {
+    fn test_tpraos_nonce_vrf_non_fatal_when_not_strict() {
         let mut header = make_tpraos_header();
         header.nonce_vrf_proof = vec![0xFFu8; 80];
         header.nonce_vrf_output = vec![0u8; 64];
 
         let mut praos = OuroborosPraos::new();
-        praos.strict_verification = true;
-        praos.nonce_established = false;
+        praos.strict_verification = false;
 
         assert!(
             praos.verify_nonce_vrf_proof(&header).is_ok(),
-            "Non-fatal when nonce not established"
+            "Non-fatal in non-strict mode"
         );
     }
 }

@@ -85,10 +85,9 @@ flowchart LR
     C -->|"hash(candidate ∥ lab)"| D["Epoch Nonce<br/>(next epoch)"]
 ```
 
-**Nonce establishment after startup:**
+**Nonce availability after startup:**
 
-- **After snapshot load or Mithril import:** The nonce is not immediately valid. At least one full epoch transition must occur during live operation for `nonce_established` to become true. The replay of blocks during the first partial epoch counts toward building the evolving nonce.
-- **After full genesis replay:** The nonce is immediately valid because all VRF contributions from every block have been accumulated during the replay.
+The epoch nonce and its accumulators (`evolving_nonce`, `candidate_nonce`, `last_epoch_block_nonce`) are serialized in the ledger snapshot and considered authoritative immediately after a snapshot load or Mithril import. This matches Haskell cardano-node's treatment of `praosStateEpochNonce`, which is read directly from the deserialized `PraosState` with no warm-up or "established" gate.
 
 ### Era-Dependent Nonce Stabilisation Window
 

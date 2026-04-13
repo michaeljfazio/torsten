@@ -408,12 +408,10 @@ fn test_opcert_counter_tracking() {
     let current_slot = SlotNo(1_000_000);
 
     // Build a praos engine in strict mode.
-    // nonce_established = true: VRF nonce errors are fatal.
     // snapshots_established = false: VRF leader eligibility is non-fatal
     // (we don't have real stake snapshots — only the counter matters here).
     let mut praos = OuroborosPraos::new();
     praos.set_strict_verification(true);
-    praos.nonce_established = true;
     praos.snapshots_established = false; // keeps leader eligibility non-fatal
 
     // Helper: call validate_header_full in Replay mode with pool info supplied.

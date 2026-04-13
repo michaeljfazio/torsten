@@ -1113,8 +1113,8 @@ impl LedgerState {
     /// ahead, the next-epoch nonce is computed from `candidate_nonce` and
     /// `last_epoch_block_nonce`.  For blocks more than one epoch ahead (which
     /// should not occur at tip), `self.epoch_nonce` is returned as a fallback
-    /// (VRF verification will fail non-fatally if `nonce_established` is false,
-    /// or produce an informative error if strict).
+    /// (VRF verification will fail non-fatally in non-strict mode, or produce
+    /// an informative error in strict mode).
     pub fn epoch_nonce_for_slot(&self, slot: u64) -> Hash32 {
         let block_epoch = self.epoch_of_slot(slot);
         if block_epoch <= self.epoch.0 {
