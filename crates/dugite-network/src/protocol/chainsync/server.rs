@@ -292,40 +292,27 @@ impl ChainSyncServer {
             }
         }
 
-        // Try to find the next block after our cursor.
-        //
-        // When cursor_at_origin is true, we use the inclusive `>=` lookup so
-        // that blocks at slot 0 (e.g. Byron genesis EBB) are not skipped.
-        // The strict `>` lookup would miss them since cursor_slot is 0.
-        let next_block = if self.cursor_at_origin {
-            block_provider.get_block_at_or_after_slot(0)
-        } else {
-            block_provider.get_next_block_after_slot(self.cursor_slot)
-        };
+        // ── Drain buffered block announcements ──────────────────────────────
+        // Block announcements are broadcast as dugite forges blocks, and are
+        // buffered in the receiver.  The direct `next_block` lookup below is
+        // authoritative — dugite commits each block to ChainDB before
+        // broadcasting the announcement, so any block we need to serve is
+        // already reachable via the block provider.  Drain all buffered
+        // announcements here so that the MsgAwaitReply loop only wakes on
+        // genuinely fresh post-drain forging events; otherwise a stale
+        // announcement for an already-served block would be re-served and
+        // rejected by the downstream peer with `UnexpectedBlockNo`.
+        loop {
+            match announcement_rx.try_recv() {
+                Ok(_) => continue,
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
 
-        if let Some((slot, hash, block_cbor)) = next_block {
-            // Extract the block header and encode it as the HFC-wrapped header
-            // payload expected by N2N ChainSync: [era_id, #6.24(bstr(header_cbor))].
-            let hfc_header = extract_header_for_chainsync(&block_cbor).map_err(|reason| {
-                ProtocolError::CborDecode {
-                    protocol: "ChainSync",
-                    reason: format!("header extraction failed for block at slot {slot}: {reason}"),
-                }
-            })?;
-
-            let tip = block_provider.get_tip();
-            let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                header: hfc_header,
-                tip_slot: tip.slot,
-                tip_hash: tip.hash,
-                tip_block_number: tip.block_number,
-            });
-            channel.send(response).await.map_err(ProtocolError::from)?;
-
-            // Advance cursor to the block we just served.
-            self.cursor_slot = slot;
-            self.cursor_hash = hash;
-            self.cursor_at_origin = false;
+        // Try to find and serve the next block after our cursor.
+        if self.try_serve_next_block(channel, block_provider).await? {
             return Ok(());
         }
 
@@ -375,6 +362,7 @@ impl ChainSyncServer {
                                 channel.send(response).await.map_err(ProtocolError::from)?;
                                 self.cursor_slot = tip.slot;
                                 self.cursor_hash = tip.hash;
+                                self.cursor_at_origin = false;
                             }
                             Ok(())
                         }
@@ -393,29 +381,18 @@ impl ChainSyncServer {
             }
             announcement = announcement_rx.recv() => {
                 match announcement {
-                    Ok(ann) => {
-                        // New block announced — fetch and serve its header.
-                        if let Some(block_cbor) = block_provider.get_block(&ann.hash) {
-                            let hfc_header = extract_header_for_chainsync(&block_cbor)
-                                .map_err(|reason| ProtocolError::CborDecode {
-                                    protocol: "ChainSync",
-                                    reason: format!(
-                                        "header extraction failed for announced block \
-                                         at slot {}: {reason}",
-                                        ann.slot
-                                    ),
-                                })?;
-                            let tip = block_provider.get_tip();
-                            let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                                header: hfc_header,
-                                tip_slot: tip.slot,
-                                tip_hash: tip.hash,
-                                tip_block_number: tip.block_number,
-                            });
-                            channel.send(response).await.map_err(ProtocolError::from)?;
-                            self.cursor_slot = ann.slot;
-                            self.cursor_hash = ann.hash;
-                        }
+                    Ok(_ann) => {
+                        // The announcement is used only as a wake signal — the
+                        // block_provider is authoritative, and we MUST re-use
+                        // the same cursor-aware lookup as the direct-serve path
+                        // so that (a) slot-0 blocks at Origin are handled via
+                        // the inclusive `>=` lookup and (b) `cursor_at_origin`
+                        // is reliably cleared after the first serve.  Trusting
+                        // `ann.hash`/`ann.slot` directly skips the `cursor_at_origin
+                        // = false` transition and causes the next
+                        // MsgRequestNext to re-serve the first block, which
+                        // Haskell rejects with `UnexpectedBlockNo`.
+                        self.try_serve_next_block(channel, block_provider).await?;
                         Ok(())
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -444,6 +421,7 @@ impl ChainSyncServer {
                             channel.send(response).await.map_err(ProtocolError::from)?;
                             self.cursor_slot = tip.slot;
                             self.cursor_hash = tip.hash;
+                            self.cursor_at_origin = false;
                         }
                         Ok(())
                     }
@@ -454,34 +432,69 @@ impl ChainSyncServer {
                 }
             }
             _ = tokio::time::sleep(timeout) => {
-                // Timeout — check whether a new block has arrived while we waited.
-                if let Some((slot, hash, block_cbor)) =
-                    block_provider.get_next_block_after_slot(self.cursor_slot)
-                {
-                    let hfc_header =
-                        extract_header_for_chainsync(&block_cbor).map_err(|reason| {
-                            ProtocolError::CborDecode {
-                                protocol: "ChainSync",
-                                reason: format!(
-                                    "header extraction failed for timeout-polled block \
-                                     at slot {slot}: {reason}"
-                                ),
-                            }
-                        })?;
-                    let tip = block_provider.get_tip();
-                    let response = encode_message(&ChainSyncMessage::MsgRollForward {
-                        header: hfc_header,
-                        tip_slot: tip.slot,
-                        tip_hash: tip.hash,
-                        tip_block_number: tip.block_number,
-                    });
-                    channel.send(response).await.map_err(ProtocolError::from)?;
-                    self.cursor_slot = slot;
-                    self.cursor_hash = hash;
-                }
+                // Timeout — poll whether a new block has arrived while we
+                // waited.  Re-uses the same cursor-aware helper as the
+                // announcement path so `cursor_at_origin` stays consistent.
+                self.try_serve_next_block(channel, block_provider).await?;
                 Ok(())
             }
         }
+    }
+
+    /// Look up the next block after the cursor and send it as `MsgRollForward`.
+    ///
+    /// This is the single authoritative serve path used by every wake-up site
+    /// in `handle_request_next` (direct path, announcement wake-up, timeout
+    /// poll). It respects `cursor_at_origin` by using the inclusive `>=`
+    /// lookup so a block at slot 0 (e.g. Byron genesis EBB) is not skipped,
+    /// and it unconditionally clears `cursor_at_origin` after a successful
+    /// serve.
+    ///
+    /// Returns `Ok(true)` if a block was sent and the cursor advanced,
+    /// `Ok(false)` if there is no next block (caller should continue waiting).
+    async fn try_serve_next_block<B: BlockProvider>(
+        &mut self,
+        channel: &mut MuxChannel,
+        block_provider: &B,
+    ) -> Result<bool, ProtocolError> {
+        // When cursor_at_origin is true, use the inclusive `>=` lookup so that
+        // a block at slot 0 is not skipped.  The strict `>` lookup would miss
+        // it since cursor_slot is 0.
+        let next_block = if self.cursor_at_origin {
+            block_provider.get_block_at_or_after_slot(0)
+        } else {
+            block_provider.get_next_block_after_slot(self.cursor_slot)
+        };
+
+        let Some((slot, hash, block_cbor)) = next_block else {
+            return Ok(false);
+        };
+
+        // Extract the block header and encode it as the HFC-wrapped header
+        // payload expected by N2N ChainSync: [era_id, #6.24(bstr(header_cbor))].
+        let hfc_header = extract_header_for_chainsync(&block_cbor).map_err(|reason| {
+            ProtocolError::CborDecode {
+                protocol: "ChainSync",
+                reason: format!("header extraction failed for block at slot {slot}: {reason}"),
+            }
+        })?;
+
+        let tip = block_provider.get_tip();
+        let response = encode_message(&ChainSyncMessage::MsgRollForward {
+            header: hfc_header,
+            tip_slot: tip.slot,
+            tip_hash: tip.hash,
+            tip_block_number: tip.block_number,
+        });
+        channel.send(response).await.map_err(ProtocolError::from)?;
+
+        // Advance cursor and — critically — clear cursor_at_origin so the
+        // next MsgRequestNext uses the strict `>` lookup and does not
+        // re-serve the same block.
+        self.cursor_slot = slot;
+        self.cursor_hash = hash;
+        self.cursor_at_origin = false;
+        Ok(true)
     }
 
     /// Drain any pending rollback announcements, returning the most recent one.
@@ -1186,6 +1199,184 @@ mod tests {
             matches!(msg, ChainSyncMessage::MsgRollForward { .. }),
             "cursor behind rollback point should not trigger MsgRollBackward, got {msg:?}"
         );
+
+        // Clean up.
+        let done = encode_message(&ChainSyncMessage::MsgDone);
+        ingress_tx.send(Bytes::from(done)).await.unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    // ─── first-block-from-origin regression tests ────────────────────────────
+
+    /// Regression test for a bug where the ChainSync server re-served the
+    /// very first block on every subsequent `MsgRequestNext`, causing the
+    /// Haskell peer to reject it with `UnexpectedBlockNo`.
+    ///
+    /// Scenario:
+    /// 1. Provider starts empty.
+    /// 2. Client sends `MsgFindIntersect(Origin)` → server sets
+    ///    `cursor_at_origin = true`.
+    /// 3. Client sends `MsgRequestNext` → no block yet, server replies
+    ///    `MsgAwaitReply` and waits on the announcement channel.
+    /// 4. Producer forges block 0 (slot 1), the block is added to the
+    ///    provider, and a `BlockAnnouncement` is broadcast.
+    /// 5. Server wakes, serves block 0 via `MsgRollForward`, **must** clear
+    ///    `cursor_at_origin`.
+    /// 6. Client sends another `MsgRequestNext`.
+    ///    EXPECTED: `MsgAwaitReply` (no more blocks).
+    ///    BUG (pre-fix): `MsgRollForward` re-serving block 0, because
+    ///    `cursor_at_origin` was never cleared in the announcement-wakeup
+    ///    path, so `get_block_at_or_after_slot(0)` returned block 0 again.
+    #[tokio::test]
+    async fn first_block_not_served_twice_when_forged_mid_await() {
+        let provider = MutableMockBlockProvider::new(vec![]);
+
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+        let (ann_tx, _) = broadcast::channel::<BlockAnnouncement>(16);
+        let (rb_tx, _) = broadcast::channel::<RollbackAnnouncement>(16);
+        let ann_rx = ann_tx.subscribe();
+        let rb_rx = rb_tx.subscribe();
+
+        let blocks_ref = provider.blocks.clone();
+        let mut server = ChainSyncServer::new();
+
+        let handle =
+            tokio::spawn(async move { server.run(&mut channel, &provider, ann_rx, rb_rx).await });
+
+        // Step 1 — find intersect at Origin.
+        let find = encode_message(&ChainSyncMessage::MsgFindIntersect(vec![Point::Origin]));
+        ingress_tx.send(Bytes::from(find)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        assert!(matches!(
+            decode_message(&resp).unwrap(),
+            ChainSyncMessage::MsgIntersectFound { .. }
+        ));
+
+        // Step 2 — request next, no block yet → expect MsgAwaitReply.
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        assert!(
+            matches!(
+                decode_message(&resp).unwrap(),
+                ChainSyncMessage::MsgAwaitReply
+            ),
+            "first MsgRequestNext with empty provider must produce MsgAwaitReply"
+        );
+
+        // Step 3 — forger produces block 0 at slot 1; commit to provider,
+        // then broadcast the announcement (matches node/mod.rs ordering).
+        let block0_cbor = make_hfc_block(7, &[0xB0]);
+        {
+            let mut blocks = blocks_ref.lock().unwrap();
+            blocks.push((1, [0xB0; 32], block0_cbor));
+        }
+        ann_tx
+            .send(BlockAnnouncement {
+                slot: 1,
+                hash: [0xB0; 32],
+                block_number: 0,
+            })
+            .unwrap();
+
+        // Step 4 — the server should wake and send MsgRollForward for block 0.
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        let msg = decode_message(&resp).unwrap();
+        assert!(
+            matches!(msg, ChainSyncMessage::MsgRollForward { .. }),
+            "expected MsgRollForward after announcement, got {msg:?}"
+        );
+
+        // Step 5 — second MsgRequestNext must NOT re-serve block 0.
+        // Pre-fix bug: cursor_at_origin stayed true, so the direct-serve
+        // path called get_block_at_or_after_slot(0) and served block 0
+        // again, producing the Haskell error:
+        //   HeaderError ... UnexpectedBlockNo (BlockNo 1) (BlockNo 0)
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        let msg = decode_message(&resp).unwrap();
+        assert!(
+            matches!(msg, ChainSyncMessage::MsgAwaitReply),
+            "REGRESSION: second MsgRequestNext re-served the first block \
+             instead of MsgAwaitReply; got {msg:?}"
+        );
+
+        // Server is now parked in MsgAwaitReply (in a 135-second select).
+        // Aborting is the cheapest clean-up for this test; a graceful MsgDone
+        // handshake would have to wait out the tip-wait timeout.
+        handle.abort();
+    }
+
+    /// Regression test for stale-announcement draining at the top of
+    /// `handle_request_next`.
+    ///
+    /// Scenario: the producer has already forged and stored block 0, but the
+    /// broadcast is queued in `announcement_rx` because the server was in the
+    /// middle of handling a previous message. On the next `MsgRequestNext`:
+    /// 1. The server must drain the buffered announcement.
+    /// 2. Serve block 0 via the direct path (using the authoritative
+    ///    `BlockProvider` lookup).
+    /// 3. On the subsequent `MsgRequestNext`, the server must serve block 1
+    ///    (NOT re-serve block 0 from a stale queued announcement).
+    #[tokio::test]
+    async fn pre_queued_announcement_does_not_cause_duplicate_first_block() {
+        let block0 = make_hfc_block(7, &[0xB0]);
+        let block1 = make_hfc_block(7, &[0xB1]);
+        let provider =
+            MutableMockBlockProvider::new(vec![(1, [0xB0; 32], block0), (2, [0xB1; 32], block1)]);
+
+        let (mut channel, mut egress_rx, ingress_tx) = make_test_channel();
+        let (ann_tx, _) = broadcast::channel::<BlockAnnouncement>(16);
+        let (rb_tx, _) = broadcast::channel::<RollbackAnnouncement>(16);
+        let ann_rx = ann_tx.subscribe();
+        let rb_rx = rb_tx.subscribe();
+
+        // Queue a stale announcement for block 0 before the server starts —
+        // this simulates a forge event that happened while the server was
+        // still setting up.
+        ann_tx
+            .send(BlockAnnouncement {
+                slot: 1,
+                hash: [0xB0; 32],
+                block_number: 0,
+            })
+            .unwrap();
+
+        let mut server = ChainSyncServer::new();
+        let handle =
+            tokio::spawn(async move { server.run(&mut channel, &provider, ann_rx, rb_rx).await });
+
+        // Intersect at Origin.
+        let find = encode_message(&ChainSyncMessage::MsgFindIntersect(vec![Point::Origin]));
+        ingress_tx.send(Bytes::from(find)).await.unwrap();
+        let _ = egress_rx.recv().await.unwrap(); // MsgIntersectFound
+
+        // First MsgRequestNext: server drains the stale announcement for
+        // block 0, then serves block 0 via the direct path.  The drain
+        // prevents the stale announcement from re-waking the server on the
+        // next MsgRequestNext.
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        assert!(matches!(
+            decode_message(&resp).unwrap(),
+            ChainSyncMessage::MsgRollForward { .. }
+        ));
+
+        // Second MsgRequestNext: must serve block 1 (slot 2), not re-serve
+        // block 0.  Before the fix, the stale queued announcement for block
+        // 0 could wake the server in the await branch and cause a duplicate.
+        let req = encode_message(&ChainSyncMessage::MsgRequestNext);
+        ingress_tx.send(Bytes::from(req)).await.unwrap();
+        let (_, _, resp) = egress_rx.recv().await.unwrap();
+        let msg = decode_message(&resp).unwrap();
+        match msg {
+            ChainSyncMessage::MsgRollForward { tip_slot, .. } => {
+                assert_eq!(tip_slot, 2, "second serve must advance past block 0");
+            }
+            other => panic!("expected MsgRollForward for block 1, got {other:?}"),
+        }
 
         // Clean up.
         let done = encode_message(&ChainSyncMessage::MsgDone);

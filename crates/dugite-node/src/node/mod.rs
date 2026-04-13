@@ -3668,6 +3668,12 @@ impl Node {
             }
         }
 
+        // Populate the initial stake snapshot from seeded pools/delegations so
+        // cold-start leader election has a non-empty `set`.  Mirrors Haskell's
+        // `resetStakeDistribution` in cardano-ledger Shelley/Transition.hs.
+        // No-op on the Mithril-restore path (snapshots already loaded).
+        ledger.finalize_genesis_state();
+
         ledger
     }
 }
@@ -3784,6 +3790,35 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
+/// Compute the `BlockNo` of the block we are about to forge given the
+/// current ledger tip.
+///
+/// This mirrors Haskell's `expectedBlockNo` pipeline in
+/// `ouroboros-consensus/.../HeaderValidation.hs`:
+///
+/// * At `Origin`, the value is `expectedFirstBlockNo` which the HardFork
+///   combinator delegates to the head of the era list (Byron), and Byron's
+///   `BasicEnvelopeValidation` instance returns `BlockNo 0`
+///   (`ouroboros-consensus-cardano/.../Byron/Ledger/HeaderValidation.hs:40`).
+///   So the first block on the chain — whether it is a Byron genesis EBB or
+///   the first Shelley block of a `TestShelleyHardForkAtEpoch: 0` config —
+///   must be `BlockNo 0`.
+/// * After that, each forged block increments by one: `succ(prev)`.
+///
+/// Using `current_block_number + 1` naively would produce `BlockNo 1` for
+/// the first block (since `current_block_number` at Origin is `0`), which
+/// Haskell rejects with `UnexpectedBlockNo (BlockNo 0) (BlockNo 1)`.
+pub(crate) fn next_forged_block_number(
+    tip_point: &Point,
+    current_block_number: dugite_primitives::time::BlockNo,
+) -> dugite_primitives::time::BlockNo {
+    if *tip_point == Point::Origin {
+        dugite_primitives::time::BlockNo(0)
+    } else {
+        dugite_primitives::time::BlockNo(current_block_number.0 + 1)
+    }
+}
+
 impl Node {
     // ─── try_forge_block() ───────────────────────────────────────────────────
 
@@ -3831,7 +3866,7 @@ impl Node {
         // ls.consensus.epoch_nonce still holds the previous epoch's nonce. epoch_nonce_for_slot
         // pre-computes the correct nonce, matching the sync path.
         let epoch_nonce = ls.epoch_nonce_for_slot(next_slot.0);
-        let block_number = dugite_primitives::time::BlockNo(ls.current_block_number().0 + 1);
+        let block_number = next_forged_block_number(&ls.tip.point, ls.current_block_number());
         let prev_hash = ls
             .tip
             .point
@@ -4118,7 +4153,56 @@ mod tests {
 
     use super::serve::ChainDBBlockProvider;
     use super::sync::validate_genesis_blocks;
+    use super::{next_forged_block_number, Point};
     use crate::config::NodeConfig;
+
+    // ─── next_forged_block_number regression tests ───────────────────────────
+    //
+    // Haskell reference (all verified against IntersectMBO/ouroboros-consensus):
+    //   * HeaderValidation.hs:404-413 (`expectedBlockNo`):
+    //       Origin      -> expectedFirstBlockNo p
+    //       NotOrigin.. -> expectedNextBlockNo p ..annTipBlockNo tip
+    //   * HardFork/Combinator/Block.hs:238-241 — HFC delegates to the FIRST
+    //     era (Byron).
+    //   * Byron/Ledger/HeaderValidation.hs:40 — `expectedFirstBlockNo = BlockNo 0`.
+    //
+    // Dugite only ever forges from Origin on private testnets configured with
+    // `TestShelleyHardForkAtEpoch: 0` (no EBB, first block is a Shelley block).
+    // In that case the first forged block MUST be BlockNo 0, not BlockNo 1,
+    // or Haskell rejects with `UnexpectedBlockNo (BlockNo 0) (BlockNo 1)`.
+
+    #[test]
+    fn next_forged_block_number_at_origin_is_zero() {
+        // Regression: with tip at Origin, the first forged block must be
+        // BlockNo 0 (matching Haskell's `expectedFirstBlockNo` via HFC→Byron).
+        let bn = next_forged_block_number(&Point::Origin, BlockNo(0));
+        assert_eq!(
+            bn.0, 0,
+            "first forged block from Origin must be BlockNo 0, \
+             not BlockNo 1 — Haskell rejects 1 with UnexpectedBlockNo \
+             (HeaderValidation.hs:404 + HardFork/Block.hs:238 + \
+             Byron/HeaderValidation.hs:40)"
+        );
+    }
+
+    #[test]
+    fn next_forged_block_number_at_origin_ignores_current_block_number() {
+        // Origin always produces BlockNo 0 regardless of `current_block_number`.
+        // (A non-zero `current_block_number` at Origin would indicate a state
+        // inconsistency but we still want the invariant to hold.)
+        let bn = next_forged_block_number(&Point::Origin, BlockNo(42));
+        assert_eq!(bn.0, 0);
+    }
+
+    #[test]
+    fn next_forged_block_number_increments_from_non_origin() {
+        // After at least one block is applied, each subsequent forge
+        // increments by one (Haskell `succ`).
+        let point = Point::Specific(SlotNo(10), Hash32::from_bytes([0xAA; 32]));
+        assert_eq!(next_forged_block_number(&point, BlockNo(0)).0, 1);
+        assert_eq!(next_forged_block_number(&point, BlockNo(41)).0, 42);
+        assert_eq!(next_forged_block_number(&point, BlockNo(413)).0, 414);
+    }
 
     /// Helper to create a minimal test block with the given era, block number, hash, and prev_hash.
     fn make_test_block(

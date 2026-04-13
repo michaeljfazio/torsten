@@ -37,11 +37,21 @@ pub fn encode_protocol_version(pv: &ProtocolVersion) -> Vec<u8> {
 ///
 /// [block_number, slot, prev_hash, issuer_vkey, vrf_vkey, vrf_result,
 ///  body_size, body_hash, operational_cert, protocol_version]
+///
+/// The `prev_hash` field is a CBOR nullable hash (Haskell's `PrevHash`):
+/// the first block after genesis encodes it as CBOR null (`0xF6`), all
+/// subsequent blocks encode it as a 32-byte bytestring. We use the domain
+/// sentinel `Hash32::ZERO` to mean "no previous / genesis" — blake2b_256
+/// will never collide with all zeros.
 pub fn encode_block_header_body(header: &BlockHeader) -> Vec<u8> {
     let mut buf = encode_array_header(10);
     buf.extend(encode_uint(header.block_number.0));
     buf.extend(encode_uint(header.slot.0));
-    buf.extend(encode_hash32(&header.prev_hash));
+    if header.prev_hash == Hash32::ZERO {
+        buf.extend(encode_null());
+    } else {
+        buf.extend(encode_hash32(&header.prev_hash));
+    }
     buf.extend(encode_bytes(&header.issuer_vkey));
     buf.extend(encode_bytes(&header.vrf_vkey));
     buf.extend(encode_vrf_result(&header.vrf_result));
@@ -437,6 +447,83 @@ mod tests {
         assert_eq!(encoded[3], 0x19, "slot uint prefix");
         let slot_val = u16::from_be_bytes([encoded[4], encoded[5]]);
         assert_eq!(slot_val, 1000, "slot value");
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: prev_hash must encode as CBOR null (0xF6) at genesis
+    //
+    // In cardano-ledger's `libs/cardano-protocol-tpraos/src/Cardano/Protocol/
+    // TPraos/BHeader.hs`, the `PrevHash` type is encoded as:
+    //     encCBOR GenesisHash   = encodeNull          -- 0xF6
+    //     encCBOR (BlockHash h) = encCBOR h           -- 32-byte bstr
+    // Haskell rejects the first block on the chain with a deserialisation
+    // error if prev_hash is encoded as a 32-byte all-zero bytestring instead
+    // of CBOR null.  Dugite uses the domain sentinel `Hash32::ZERO` to mean
+    // "no previous block" and encodes that as CBOR null.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encode_block_header_body_prev_hash_null_at_genesis() {
+        // At genesis, prev_hash is Hash32::ZERO → must encode as CBOR null (0xF6).
+        let mut header = make_header();
+        header.prev_hash = Hash32::ZERO;
+        let encoded = encode_block_header_body(&header);
+
+        // Layout up to prev_hash:
+        //   byte 0: 0x8a       (array(10) header)
+        //   bytes 1..=2: block_number uint(42) = 0x18 0x2a
+        //   bytes 3..=5: slot uint(1000) = 0x19 0x03 0xe8
+        //   byte 6: prev_hash encoding starts here
+        assert_eq!(
+            encoded[6], 0xF6,
+            "prev_hash at genesis must encode as CBOR null (0xF6), not a 32-byte bstr; \
+             Haskell's PrevHash.GenesisHash maps to encodeNull in cardano-ledger \
+             BHeader.hs"
+        );
+    }
+
+    #[test]
+    fn test_encode_block_header_body_prev_hash_bstr_when_not_genesis() {
+        // After genesis, prev_hash is a concrete 32-byte hash → must encode
+        // as a CBOR byte-string of length 32 (major type 2, length 32 = 0x58 0x20).
+        let header = make_header(); // make_header uses [0xbb; 32]
+        let encoded = encode_block_header_body(&header);
+
+        // byte 6: length prefix for a 32-byte bstr = 0x58 0x20
+        assert_eq!(
+            encoded[6], 0x58,
+            "prev_hash non-genesis must be a bstr(32) — major type 2, 1-byte length"
+        );
+        assert_eq!(encoded[7], 0x20, "bstr length must be 32");
+        // bytes 8..40 must match the prev_hash bytes
+        assert_eq!(
+            &encoded[8..40],
+            &[0xbb; 32],
+            "prev_hash bstr contents must match header.prev_hash bytes"
+        );
+    }
+
+    #[test]
+    fn test_encode_block_header_body_roundtrip_genesis_via_pallas() {
+        // Sanity: decode the encoded header body via minicbor and confirm the
+        // PrevHash field reads back as null (matching cardano-ledger's
+        // `instance DecCBOR PrevHash` which peeks TypeNull to reconstruct
+        // GenesisHash).
+        let mut header = make_header();
+        header.prev_hash = Hash32::ZERO;
+        let encoded = encode_block_header_body(&header);
+
+        let mut dec = minicbor::Decoder::new(&encoded);
+        assert_eq!(dec.array().unwrap(), Some(10), "header body array(10)");
+        let _block_number = dec.u64().unwrap();
+        let _slot = dec.u64().unwrap();
+        // Next token must be CBOR null for PrevHash = GenesisHash.
+        assert_eq!(
+            dec.datatype().unwrap(),
+            minicbor::data::Type::Null,
+            "third header body element must be null at genesis"
+        );
+        dec.null().unwrap(); // consume the null
     }
 
     // -----------------------------------------------------------------------

@@ -1317,6 +1317,91 @@ impl LedgerState {
             .or_insert(Lovelace(0));
     }
 
+    /// Finalize genesis state for cold-start block production.
+    ///
+    /// Mirrors Haskell's `resetStakeDistribution` (cardano-ledger
+    /// `Shelley/Transition.hs`): after `seed_genesis_utxos`, `seed_genesis_pool`,
+    /// and `seed_genesis_delegation` have been called, builds the initial
+    /// stake/pool distribution and pre-populates the `mark` and `set`
+    /// snapshots so that Praos leader election works from slot 0.
+    ///
+    /// In Haskell, leader election reads `nesPd` (active pool distribution),
+    /// which `resetStakeDistribution` fills with the post-genesis pool stake.
+    /// Dugite's forge path uses `snapshots.set` for the same purpose, so we
+    /// populate both `mark` and `set` with the same genesis-derived data —
+    /// the first SNAP rotation at epoch 0→1 preserves the same pool stake
+    /// into `go`, matching Haskell's observable behaviour on a quiet devnet.
+    ///
+    /// No-op on Mithril-restored state, where snapshots are already loaded
+    /// from the Haskell snapshot file.
+    pub fn finalize_genesis_state(&mut self) {
+        use tracing::info;
+
+        // If a snapshot is already present (Mithril restore path), do nothing.
+        if self.epochs.snapshots.set.is_some() || self.epochs.snapshots.mark.is_some() {
+            return;
+        }
+
+        // Build stake_map from seeded UTxOs so pool_stake can be computed.
+        self.rebuild_stake_distribution();
+
+        // Build pool_stake and snapshot_stake exactly as the SNAP rule does
+        // for the mark snapshot at an epoch boundary.
+        let mut pool_stake: HashMap<Hash28, Lovelace> =
+            HashMap::with_capacity(self.certs.pool_params.len());
+        let mut snapshot_stake: HashMap<Hash32, Lovelace> =
+            HashMap::with_capacity(self.certs.delegations.len());
+        for (cred_hash, pool_id) in self.certs.delegations.iter() {
+            let utxo_stake = self
+                .certs
+                .stake_distribution
+                .stake_map
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            let reward_balance = self
+                .certs
+                .reward_accounts
+                .get(cred_hash)
+                .copied()
+                .unwrap_or(Lovelace(0));
+            let total = Lovelace(utxo_stake.0.saturating_add(reward_balance.0));
+            if total.0 > 0 {
+                snapshot_stake.insert(*cred_hash, total);
+                *pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total;
+            }
+        }
+
+        if pool_stake.is_empty() {
+            // No pools registered or no delegated stake yet — nothing to snapshot.
+            return;
+        }
+
+        let total_pool_stake: u64 = pool_stake
+            .values()
+            .fold(0u64, |acc, l| acc.saturating_add(l.0));
+        info!(
+            pools = pool_stake.len(),
+            delegations = self.certs.delegations.len(),
+            total_pool_stake_ada = total_pool_stake / 1_000_000,
+            "Genesis: seeded initial stake/pool snapshot for cold-start leader election"
+        );
+
+        let snap = StakeSnapshot {
+            epoch: self.epoch,
+            delegations: Arc::clone(&self.certs.delegations),
+            pool_stake,
+            pool_params: Arc::clone(&self.certs.pool_params),
+            stake_distribution: Arc::new(snapshot_stake),
+            epoch_fees: Lovelace(0),
+            epoch_block_count: 0,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
+        };
+
+        self.epochs.snapshots.mark = Some(snap.clone());
+        self.epochs.snapshots.set = Some(snap);
+    }
+
     /// Advance the ledger tip through a Byron Epoch Boundary Block (EBB).
     ///
     /// EBBs carry no transactions and do not mutate the UTxO set, stake

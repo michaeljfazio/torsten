@@ -15114,3 +15114,163 @@ fn test_snapshot_migration_populates_deposit_maps() {
     );
     assert_eq!(loaded.certs.pool_deposits.get(&pool_id), Some(&500_000_000));
 }
+
+// ─── finalize_genesis_state regression tests ──────────────────────────────────
+//
+// Reference: Haskell `resetStakeDistribution` in
+// `cardano-ledger/eras/shelley/impl/src/Cardano/Ledger/Shelley/Transition.hs`.
+// After genesis UTxOs/pools/delegations are seeded, the initial pool stake
+// distribution must be populated into the `mark` and `set` snapshots so that
+// cold-start Praos leader election reads non-empty `pd` (pool distribution).
+//
+// Without this call, `snapshots.set` is `None` and `try_forge_block_at` reports
+// zero active stake, so `is_slot_leader` always returns false and no blocks are
+// ever forged from genesis.
+
+#[test]
+fn finalize_genesis_state_populates_mark_and_set_snapshots() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Seed a single SPO with a single delegator that holds 100 ADA in UTxO.
+    let pool_id = Hash28::from_bytes([0xAA; 28]);
+    // The delegation map is keyed by the Hash32 form of the stake credential
+    // (see `credential_to_hash` → `to_typed_hash32`), which is the 28-byte hash
+    // zero-padded with a type tag.  Use the same typed Hash32 so the BaseAddress
+    // stake credential and the delegation key agree.
+    let stake_vk = Hash28::from_bytes([0xBB; 28]);
+    let stake_credential = Credential::VerificationKey(stake_vk);
+    let stake_cred = stake_credential.to_typed_hash32();
+
+    // Seed pool registration via the public genesis API.
+    state.seed_genesis_pool(PoolRegistration {
+        pool_id,
+        vrf_keyhash: Hash32::ZERO,
+        pledge: Lovelace(0),
+        cost: Lovelace(0),
+        margin_numerator: 0,
+        margin_denominator: 1,
+        reward_account: vec![0xe0; 29],
+        owners: vec![],
+        relays: vec![],
+        metadata_url: None,
+        metadata_hash: None,
+    });
+    state.seed_genesis_delegation(stake_cred, pool_id);
+
+    // Seed a UTxO with a BaseAddress binding payment → stake_cred so that
+    // `rebuild_stake_distribution` (called inside `finalize_genesis_state`)
+    // credits the delegator's stake.
+    let payment_cred = Credential::VerificationKey(Hash28::from_bytes([0xCC; 28]));
+    let addr = Address::Base(BaseAddress {
+        network: NetworkId::Mainnet,
+        payment: payment_cred,
+        stake: stake_credential,
+    });
+    let tx_input = TransactionInput {
+        transaction_id: Hash32::from_bytes([0xDD; 32]),
+        index: 0,
+    };
+    let tx_output = TransactionOutput {
+        address: addr,
+        value: Value::lovelace(100_000_000),
+        datum: OutputDatum::None,
+        script_ref: None,
+        is_legacy: false,
+        raw_cbor: None,
+    };
+    state.utxo.utxo_set.insert(tx_input, tx_output);
+
+    // Pre-condition: both snapshots empty.
+    assert!(state.epochs.snapshots.mark.is_none());
+    assert!(state.epochs.snapshots.set.is_none());
+
+    state.finalize_genesis_state();
+
+    // Post-condition: both `mark` and `set` snapshots populated with the
+    // pool's 100 ADA of delegated stake, mirroring Haskell's
+    // `resetStakeDistribution`.
+    let mark = state
+        .epochs
+        .snapshots
+        .mark
+        .as_ref()
+        .expect("finalize_genesis_state must populate `mark` snapshot");
+    let set = state
+        .epochs
+        .snapshots
+        .set
+        .as_ref()
+        .expect("finalize_genesis_state must populate `set` snapshot for leader election");
+
+    // Both snapshots contain the pool and credit the delegator's stake.
+    let set_pool_stake = set
+        .pool_stake
+        .get(&pool_id)
+        .expect("pool in set.pool_stake");
+    assert_eq!(
+        set_pool_stake.0, 100_000_000,
+        "set snapshot must credit delegated UTxO as pool stake"
+    );
+    assert_eq!(
+        mark.pool_stake.get(&pool_id).map(|l| l.0),
+        Some(100_000_000),
+        "mark snapshot must match set snapshot at genesis"
+    );
+}
+
+#[test]
+fn finalize_genesis_state_no_op_on_mithril_restored_state() {
+    // Regression: when snapshots are already present (Mithril-restored state),
+    // finalize_genesis_state must be a no-op and not overwrite them.
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    // Install a sentinel snapshot so we can detect clobbering.
+    let sentinel_pool = Hash28::from_bytes([0x11; 28]);
+    let sentinel_snap = StakeSnapshot {
+        epoch: EpochNo(0),
+        delegations: Arc::new(HashMap::new()),
+        pool_stake: {
+            let mut m = HashMap::new();
+            m.insert(sentinel_pool, Lovelace(999_999_999));
+            m
+        },
+        pool_params: Arc::new(HashMap::new()),
+        stake_distribution: Arc::new(HashMap::new()),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
+    };
+    state.epochs.snapshots.set = Some(sentinel_snap);
+
+    state.finalize_genesis_state();
+
+    // Sentinel must still be intact.
+    let set = state
+        .epochs
+        .snapshots
+        .set
+        .as_ref()
+        .expect("sentinel snapshot must survive finalize_genesis_state");
+    assert_eq!(
+        set.pool_stake.get(&sentinel_pool).map(|l| l.0),
+        Some(999_999_999),
+        "finalize_genesis_state must be a no-op when snapshots exist \
+         (Mithril-restore path)"
+    );
+}
+
+#[test]
+fn finalize_genesis_state_no_pools_is_safe_noop() {
+    // With no seeded pools/delegations, finalize_genesis_state must not
+    // populate snapshots (there is nothing to populate) and must not panic.
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    state.finalize_genesis_state();
+
+    // No pools → no snapshots.
+    assert!(state.epochs.snapshots.mark.is_none());
+    assert!(state.epochs.snapshots.set.is_none());
+}
