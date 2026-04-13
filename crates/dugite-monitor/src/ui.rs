@@ -1205,9 +1205,9 @@ fn render_peers_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 ///   1. Live ledger state — DRep registry (total/active), pools, proposals,
 ///      committee membership, cumulative dormant-epoch counter, ADA pots,
 ///      delegation counts.
-///   2. Conway protocol parameters — drepDeposit, drepActivity, govAction
-///      deposit + lifetime.  These change via ratification so they are real
-///      live gauges, not static config.
+///   2. Conway protocol parameters — DRep deposit, DRep activity, governance
+///      action deposit + lifetime.  These change via ratification so they are
+///      real live gauges, not static config.
 ///
 /// All values are read-only; the panel never modifies node state.
 fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -1285,7 +1285,7 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
 
     let mut lines = vec![
         kv_aligned(
-            "DReps act/tot",
+            "DReps",
             drep_value,
             if drep_active > 0 {
                 theme.info
@@ -1296,7 +1296,7 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
             col_w,
         ),
         kv_aligned(
-            "Pools",
+            "Stake Pools",
             App::format_number(pool_count),
             if pool_count > 0 {
                 theme.info
@@ -1331,7 +1331,7 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
             col_w,
         ),
         kv_aligned(
-            "Dormant ep",
+            "Dormant Epochs",
             App::format_number(dormant),
             if dormant > 0 {
                 theme.warning
@@ -1344,14 +1344,14 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
         ada_row("Treasury", treasury_lovelace),
         ada_row("Reserves", reserves_lovelace),
         kv_aligned(
-            "Delegations",
+            "Stake Delegations",
             App::format_number(delegation_count),
             theme.fg,
             theme,
             col_w,
         ),
         kv_aligned(
-            "Vote delegs",
+            "Vote Delegations",
             App::format_number(vote_deleg_count),
             theme.fg,
             theme,
@@ -1362,24 +1362,30 @@ fn render_governance_panel(frame: &mut Frame, app: &App, theme: &Theme, area: Re
             "─".repeat(inner.width as usize),
             Style::default().fg(theme.border),
         )),
-        kv_aligned("drepDeposit", ada_str(drep_deposit), theme.fg, theme, col_w),
         kv_aligned(
-            "drepActivity",
-            format!("{} ep", App::format_number(drep_activity)),
+            "DRep Deposit",
+            ada_str(drep_deposit),
             theme.fg,
             theme,
             col_w,
         ),
         kv_aligned(
-            "govActDeposit",
+            "DRep Activity",
+            format!("{} epochs", App::format_number(drep_activity)),
+            theme.fg,
+            theme,
+            col_w,
+        ),
+        kv_aligned(
+            "Action Deposit",
             ada_str(gov_action_deposit),
             theme.fg,
             theme,
             col_w,
         ),
         kv_aligned(
-            "govActLife",
-            format!("{} ep", App::format_number(gov_action_lifetime)),
+            "Action Lifetime",
+            format!("{} epochs", App::format_number(gov_action_lifetime)),
             theme.fg,
             theme,
             col_w,
