@@ -120,18 +120,20 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: [build-and-test, integration-offline]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: dugite-linux-x86_64
-          - os: ubuntu-latest
+          # Use the native aarch64 runner instead of cross-compiling: the
+          # bundled gmp-mpfr-sys (via mithril-stm → rug) cannot cross-build
+          # its arch-specific assembly across host architectures.
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: dugite-linux-aarch64
-            cross: true
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: dugite-macos-x86_64
+          # x86_64-apple-darwin is dropped: GitHub macOS runners are aarch64-only
+          # and bundled GMP cannot cross-compile under Apple Silicon clang.
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: dugite-macos-aarch64
@@ -149,12 +151,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
       - name: Cache cargo registry and build
         uses: actions/cache@v5
         with:
@@ -167,8 +163,6 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Build release binaries
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target ${{ matrix.target }} -p dugite-node -p dugite-cli
 
       - name: Package binaries

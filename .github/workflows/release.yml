@@ -29,9 +29,11 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: dugite-aarch64-linux
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: dugite-x86_64-macos
+          # x86_64-apple-darwin is dropped: GitHub's macOS runners are
+          # aarch64-only, and bundled gmp-mpfr-sys (via mithril-stm → rug)
+          # cannot cross-compile its x86_64 assembly under Apple Silicon
+          # clang. Re-enable when GitHub adds Intel mac runners or we move
+          # to a self-hosted/cross-rs build.
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: dugite-aarch64-macos
