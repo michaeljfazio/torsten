@@ -1096,7 +1096,7 @@ dependencies = [
  "dugite-primitives",
  "dugite-serialization",
  "hex",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "rand 0.9.4",
  "reqwest",
  "serde",
@@ -1143,7 +1143,7 @@ dependencies = [
  "dugite-primitives",
  "dugite-serialization",
  "futures",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -1168,7 +1168,7 @@ dependencies = [
  "dugite-primitives",
  "ed25519-dalek",
  "hex",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "pallas-crypto 1.0.0-alpha.6",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
@@ -1190,7 +1190,7 @@ dependencies = [
  "dugite-serialization",
  "hex",
  "memmap2",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "pallas-crypto 1.0.0-alpha.6",
  "pallas-primitives 1.0.0-alpha.6",
  "pallas-traverse 1.0.0-alpha.6",
@@ -1219,7 +1219,7 @@ dependencies = [
  "dugite-lsm",
  "dugite-primitives",
  "dugite-serialization",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -1290,7 +1290,7 @@ dependencies = [
  "futures",
  "hex",
  "hickory-resolver",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "num-bigint",
  "parking_lot",
  "proptest",
@@ -1330,7 +1330,7 @@ dependencies = [
  "indicatif",
  "libc",
  "memmap2",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "mithril-client",
  "num-bigint",
  "pallas-addresses 1.0.0-alpha.6",
@@ -1367,7 +1367,7 @@ dependencies = [
  "criterion",
  "derive_more",
  "hex",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "num-bigint",
  "num-rational",
  "num-traits",
@@ -1386,7 +1386,7 @@ dependencies = [
  "criterion",
  "dugite-primitives",
  "hex",
- "minicbor 0.26.5",
+ "minicbor 2.2.1",
  "pallas-addresses 1.0.0-alpha.6",
  "pallas-codec 1.0.0-alpha.6",
  "pallas-crypto 1.0.0-alpha.6",
@@ -2708,6 +2708,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "minicbor"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e70eae6d4f18f7d76877fe7b13f0bc21f7c2b7239d2041c338335f7b388d0dd7"
+dependencies = [
+ "minicbor-derive 0.19.3",
+]
+
+[[package]]
 name = "minicbor-derive"
 version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2723,6 +2732,17 @@ name = "minicbor-derive"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9882ef5c56df184b8ffc107fc6c61e33ee3a654b021961d790a78571bb9d67a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "minicbor-derive"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "294f0a0c161c510e9746adf546b8b044fbb0b00677d7dfc9a2452f9fdf63439b"
 dependencies = [
  "proc-macro2",
  "quote",
