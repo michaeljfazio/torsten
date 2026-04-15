@@ -167,7 +167,7 @@ impl Governor {
         peer_manager: &PeerManager,
         local_root_groups: &[LocalRootGroupTarget],
     ) -> Vec<GovernorAction> {
-        use rand::seq::SliceRandom;
+        use rand::seq::IndexedRandom;
 
         let mut actions = Vec::new();
 
@@ -459,7 +459,7 @@ impl Governor {
             // routable responses to the cold set.
             let sharing_peers = peer_manager.peers_with_peer_sharing(PeerState::Warm);
             if !sharing_peers.is_empty() {
-                if let Some(&peer) = sharing_peers.choose(&mut rand::thread_rng()) {
+                if let Some(&peer) = sharing_peers.choose(&mut rand::rng()) {
                     actions.push(GovernorAction::PeerShareRequest(peer));
                 }
             }

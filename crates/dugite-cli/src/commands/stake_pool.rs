@@ -226,7 +226,7 @@ impl StakePoolCmd {
                 // Generate proper Sum6Kes key pair (depth-6 binary sum composition)
                 use rand::RngCore;
                 let mut seed = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut seed);
+                rand::rng().fill_bytes(&mut seed);
 
                 let (sk_bytes, pk_bytes) = dugite_crypto::kes::kes_keygen(&seed)
                     .map_err(|e| anyhow::anyhow!("KES key generation failed: {e}"))?;
