@@ -439,16 +439,20 @@ impl QueryHandler {
         match query_tag {
             0 => {
                 // Tag 0: GetLedgerTip
+                //
+                // Wire shape (matches cardano-node 10.6.2, issue #407):
+                //   MsgResult: [4, [[slot, hash]]]
+                // i.e. HFC success wrapper (array(1)) + bare Point [slot, hash].
+                //
+                // GetLedgerTip returns a Point, NOT a Tip: there is no
+                // `block_no` in the response. Callers that need the block
+                // number must issue GetChainBlockNo (top-level outer tag 2).
                 debug!("Query: GetLedgerTip");
                 let (slot, hash) = match &self.state.tip.point {
                     Point::Origin => (0, vec![0u8; 32]),
                     Point::Specific(s, h) => (s.0, h.to_vec()),
                 };
-                QueryResult::ChainTip {
-                    slot,
-                    hash,
-                    block_no: self.state.block_number.0,
-                }
+                QueryResult::LedgerTip { slot, hash }
             }
             1 => {
                 // Tag 1: GetEpochNo
@@ -680,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_handler_chain_tip() {
+    fn test_query_handler_ledger_tip() {
         let hash = Hash32::from_bytes([0xab; 32]);
         let mut handler = QueryHandler::new();
         handler.update_state(NodeStateSnapshot {
@@ -693,16 +697,11 @@ mod tests {
         });
 
         match query(&handler, 0) {
-            QueryResult::ChainTip {
-                slot,
-                hash: h,
-                block_no,
-            } => {
+            QueryResult::LedgerTip { slot, hash: h } => {
                 assert_eq!(slot, 12345);
                 assert_eq!(h, hash.to_vec());
-                assert_eq!(block_no, 100);
             }
-            other => panic!("Expected ChainTip, got {other:?}"),
+            other => panic!("Expected LedgerTip, got {other:?}"),
         }
     }
 

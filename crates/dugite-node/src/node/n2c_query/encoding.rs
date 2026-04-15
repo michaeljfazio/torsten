@@ -50,7 +50,6 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
         // Top-level queries (no wrapping)
         QueryResult::SystemStart(_)
             | QueryResult::ChainBlockNo(_)
-            | QueryResult::ChainTip { .. }
             | QueryResult::ChainPoint { .. }
             // BlockQuery > QueryAnytime results (no wrapping)
             | QueryResult::CurrentEra(_)
@@ -62,6 +61,10 @@ pub fn encode_query_result(result: &QueryResult) -> Vec<u8> {
     if needs_either_mismatch {
         // HFC EitherMismatch success: array(1) containing just the result.
         // Array length 1 = success, length 2 = era mismatch.
+        //
+        // NOTE: `LedgerTip` is a BlockQuery > QueryIfCurrent result and
+        // therefore DOES take the HFC wrapper. Its absence from the exclusion
+        // list above is intentional.
         enc.array(1).ok();
     }
 
@@ -83,7 +86,6 @@ pub fn encode_query_result_payload(result: &QueryResult) -> Vec<u8> {
         result,
         QueryResult::SystemStart(_)
             | QueryResult::ChainBlockNo(_)
-            | QueryResult::ChainTip { .. }
             | QueryResult::ChainPoint { .. }
             | QueryResult::CurrentEra(_)
             | QueryResult::HardForkCurrentEra(_)
@@ -93,6 +95,9 @@ pub fn encode_query_result_payload(result: &QueryResult) -> Vec<u8> {
     if needs_either_mismatch {
         // HFC EitherMismatch success: array(1) containing just the result.
         // Array length 1 = success, length 2 = era mismatch.
+        //
+        // `LedgerTip` is a BlockQuery > QueryIfCurrent result and therefore
+        // DOES take the HFC wrapper (see comment in `encode_query_result`).
         enc.array(1).ok();
     }
 
@@ -112,18 +117,20 @@ pub(crate) fn encode_query_result_value(
         QueryResult::EpochNo(epoch) => {
             enc.u64(*epoch).ok();
         }
-        QueryResult::ChainTip {
-            slot,
-            hash,
-            block_no,
-        } => {
-            enc.array(2).ok();
-            // Point: [slot, hash]
+        QueryResult::LedgerTip { slot, hash } => {
+            // GetLedgerTip (Shelley BlockQuery tag 0) result is a bare Point:
+            //   [slot, hash]
+            //
+            // This matches cardano-node 10.6.2 wire (captured 43-byte payload,
+            // see issue #407):
+            //   82 04 81 82 1a <slot4> 58 20 <hash32>
+            //
+            // The outer `array(1)` HFC EitherMismatch success wrapper is added
+            // by `encode_query_result` because `LedgerTip` is not in the
+            // top-level-query exclusion list.
             enc.array(2).ok();
             enc.u64(*slot).ok();
             enc.bytes(hash).ok();
-            // Block number
-            enc.u64(*block_no).ok();
         }
         QueryResult::CurrentEra(era) => {
             enc.u32(*era).ok();
@@ -3008,7 +3015,7 @@ mod tests {
         );
     }
 
-    /// Top-level queries (SystemStart, ChainBlockNo, ChainTip) must NOT have the
+    /// Top-level queries (SystemStart, ChainBlockNo, ChainPoint) must NOT have the
     /// HFC EitherMismatch wrapper — Haskell encodes them as [4, result] directly.
     #[test]
     fn test_top_level_query_no_hfc_wrapper() {
@@ -3086,6 +3093,44 @@ mod tests {
             val, 42,
             "strip_wrappers must correctly expose inner payload"
         );
+    }
+
+    /// GetLedgerTip golden vector (issue #407).
+    ///
+    /// Captured from cardano-node 10.6.2, 43-byte payload:
+    ///   82 04 81 82 1a 06884258 5820 344bc3f7b7b3686a181a3c73e4a4050122b888e1b596f2c3a398a6a7fc2c9602
+    ///
+    /// Structure:
+    ///   82 04 — MsgResult [4, ...]
+    ///   81    — HFC EitherMismatch success wrapper array(1)
+    ///   82    — Point array(2)
+    ///   1a 06884258 — slot = 109_576_792
+    ///   5820 <32B> — hash bytes
+    ///
+    /// GetLedgerTip returns a bare Point, NOT a Tip — no block_no in the payload.
+    #[test]
+    fn test_ledger_tip_wire_format_bare_point() {
+        let hash_hex = "344bc3f7b7b3686a181a3c73e4a4050122b888e1b596f2c3a398a6a7fc2c9602";
+        let hash: Vec<u8> = (0..32)
+            .map(|i| u8::from_str_radix(&hash_hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
+        let result = QueryResult::LedgerTip {
+            slot: 109_576_792,
+            hash: hash.clone(),
+        };
+        let encoded = encode_query_result(&result);
+
+        let mut expected = vec![0x82, 0x04, 0x81, 0x82, 0x1a];
+        expected.extend_from_slice(&109_576_792u32.to_be_bytes());
+        expected.push(0x58);
+        expected.push(0x20);
+        expected.extend_from_slice(&hash);
+
+        assert_eq!(
+            encoded, expected,
+            "GetLedgerTip MsgResult must match the captured cardano-node 10.6.2 bare-Point wire format (issue #407)"
+        );
+        assert_eq!(encoded.len(), 43, "captured payload length is 43 bytes");
     }
 
     /// QueryAnytime result (CurrentEra) must NOT be wrapped in HFC EitherMismatch.
