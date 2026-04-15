@@ -498,13 +498,9 @@ impl UtxoStore {
     /// Calculate total ADA in the UTxO set by scanning all entries.
     pub fn total_lovelace(&self) -> Lovelace {
         let mut total = 0u64;
-        let start = Key::from([0u8; 0]);
-        let end = Key::from([0xFFu8; KEY_SIZE]);
-        for (_, value) in self.tree.range(&start, &end) {
-            if let Some(output) = decode_value(&value) {
-                total = total.saturating_add(output.value.coin.0);
-            }
-        }
+        self.scan_all(|_, output| {
+            total = total.saturating_add(output.value.coin.0);
+        });
         Lovelace(total)
     }
 
@@ -525,32 +521,86 @@ impl UtxoStore {
 
     /// Iterate over all UTxO entries by scanning the full LSM tree.
     ///
-    /// This is expensive (full scan + deserialization). Use sparingly
-    /// (e.g., at epoch boundaries for stake distribution rebuild).
+    /// Materialises the entire UTxO set into a `Vec`. Prefer [`scan_all`] for
+    /// streaming callers — at preview-scale (~3M entries) this allocation is
+    /// several GB and was one of the root causes of the post-replay OOM hang
+    /// fixed in #403. Kept for tests that need a concrete collection.
+    ///
+    /// [`scan_all`]: Self::scan_all
     pub fn iter(&self) -> Vec<(TransactionInput, TransactionOutput)> {
-        let start = Key::from([0u8; 0]);
-        let end = Key::from([0xFFu8; KEY_SIZE]);
-        self.tree
-            .range(&start, &end)
-            .filter_map(|(key, value)| {
+        // Pre-size to avoid repeated reallocations of a multi-GB Vec.
+        let mut out = Vec::with_capacity(self.count);
+        self.scan_all(|input, output| out.push((input, output)));
+        out
+    }
+
+    /// Stream every live UTxO entry into a callback without materialising
+    /// the full set in memory.
+    ///
+    /// The LSM `tree.range()` API buffers every page within the requested
+    /// range before returning, so a single full-key-space scan peaks at
+    /// O(total_bytes) memory.  At preview scale (~3M UTxOs) that buffer is
+    /// several GB; on a 32 GB machine the post-replay chain of a full scan +
+    /// `rebuild_address_index` + `rebuild_stake_distribution` + snapshot
+    /// serialisation was enough to get dugite-node Jetsam-killed (#403).
+    ///
+    /// To keep peak memory bounded we split the 36-byte UTxO key space into
+    /// 256 chunks by the first byte of the transaction hash (which is a
+    /// blake2b output and therefore uniformly distributed). Each chunk scans
+    /// ~1/256 of the set, drops the per-chunk Vec, and moves on, so peak
+    /// memory scales with chunk size rather than total set size.
+    pub fn scan_all<F>(&self, mut f: F)
+    where
+        F: FnMut(TransactionInput, TransactionOutput),
+    {
+        // Split on the first byte of the 36-byte key so that chunks are
+        // non-overlapping.  Each chunk is [[prefix, 0..0], [prefix, FF..FF]]
+        // (inclusive both ends — matches LsmTree::range semantics).
+        let mut from_bytes = [0u8; KEY_SIZE];
+        let mut to_bytes = [0u8; KEY_SIZE];
+        for prefix in 0u8..=255 {
+            from_bytes[0] = prefix;
+            for b in from_bytes.iter_mut().skip(1) {
+                *b = 0x00;
+            }
+            to_bytes[0] = prefix;
+            for b in to_bytes.iter_mut().skip(1) {
+                *b = 0xFF;
+            }
+            let from = Key::from(&from_bytes[..]);
+            let to = Key::from(&to_bytes[..]);
+            for (key, value) in self.tree.range(&from, &to) {
                 let input = decode_key(&key);
-                decode_value(&value).map(|output| (input, output))
-            })
-            .collect()
+                if let Some(output) = decode_value(&value) {
+                    f(input, output);
+                }
+            }
+        }
     }
 
     /// Rebuild the address index by scanning all UTxO entries.
     /// Must be called after opening from a snapshot.
+    ///
+    /// Uses [`scan_all`] to stream entries one at a time, avoiding the
+    /// multi-GB intermediate `Vec` that `iter()` + rebuild produced prior
+    /// to #403.
+    ///
+    /// [`scan_all`]: Self::scan_all
     pub fn rebuild_address_index(&mut self) {
         self.address_index.clear();
-        let entries = self.iter();
-        self.count = entries.len();
-        for (input, output) in entries {
-            self.address_index
-                .entry(output.address.clone())
+        let mut count = 0usize;
+        // Rebuild into a local map so we don't need `&mut self` inside the
+        // closure — `scan_all` takes `&self`.
+        let mut address_index: HashMap<Address, HashSet<TransactionInput>> = HashMap::new();
+        self.scan_all(|input, output| {
+            count += 1;
+            address_index
+                .entry(output.address)
                 .or_default()
                 .insert(input);
-        }
+        });
+        self.address_index = address_index;
+        self.count = count;
         info!(
             "Address index rebuilt: {} addresses, {} UTxOs",
             self.address_index.len(),
@@ -559,10 +609,14 @@ impl UtxoStore {
     }
 
     /// Count entries by scanning the LSM tree. Sets the internal count.
+    ///
+    /// Uses [`scan_all`] so that peak memory stays bounded even when the
+    /// store holds millions of entries (#403).
+    ///
+    /// [`scan_all`]: Self::scan_all
     pub fn count_entries(&mut self) -> usize {
-        let start = Key::from([0u8; 0]);
-        let end = Key::from([0xFFu8; KEY_SIZE]);
-        let count = self.tree.range(&start, &end).count();
+        let mut count = 0usize;
+        self.scan_all(|_, _| count += 1);
         self.count = count;
         count
     }
