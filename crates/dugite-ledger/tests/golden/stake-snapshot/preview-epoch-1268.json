@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Koios pool_stake_snapshot for Cardano preview testnet — golden vector for issue #422 mark/set/go regression tests.",
+  "source": "https://preview.koios.rest/api/v1/pool_stake_snapshot?_pool_bech32=<pool>",
+  "captured_at": "2026-04-15",
+  "network": "preview",
+  "network_magic": 2,
+  "query_epoch": 1268,
+  "epoch_info": {
+    "epoch_no": 1268,
+    "era": "Conway",
+    "active_stake": "1259333994152147",
+    "start_time": 1776211200,
+    "end_time": 1776297600
+  },
+  "notes": [
+    "Koios labels the SNAPSHOTS with the epoch in which they are ACTIVE. When the current epoch is 1268:",
+    "  - 'Go'   (the stake-distribution used for rewards) carries epoch_no=1267",
+    "  - 'Set'  (the stake-distribution used to elect this epoch's leaders) carries epoch_no=1268",
+    "  - 'Mark' (the freshly-captured stake-distribution, live for the next epoch) carries epoch_no=1269",
+    "This matches Haskell's ss{Mark,Set,Go} shift convention: mark is the freshest, go is two epochs back.",
+    "Dugite stores the same three snapshots with the same rotation semantics, see crates/dugite-ledger/src/state/epoch.rs recompute_snapshot_pool_stakes."
+  ],
+  "pools": {
+    "6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856": {
+      "ticker": "SAND",
+      "bech32": "pool1d92wcyw0wzt6dymjzyzp8xukc488703237082amrpau9vgadcnk",
+      "stakeGo": "1039883628214",
+      "stakeSet": "1039883628214",
+      "stakeMark": "1039883628214",
+      "go_epoch_no": 1267,
+      "set_epoch_no": 1268,
+      "mark_epoch_no": 1269,
+      "comment": "SAND has 3 stable delegators and no active_stake change across the window. Verifies that dugite's mark/set/go report the same value when the underlying stake is stable, and that zero-drift does not hide the #418 regression."
+    },
+    "24d3394028c590692542c932784632147319b6c50e1c17805de044c6": {
+      "ticker": "top-by-active-stake-1",
+      "bech32": "pool1ynfnjspgckgxjf2zeye8s33jz3e3ndk9pcwp0qzaupzvvd8ukwt",
+      "stakeGo": "72054814190229",
+      "stakeSet": "72094186978462",
+      "stakeMark": "72125906398171",
+      "go_epoch_no": 1267,
+      "set_epoch_no": 1268,
+      "mark_epoch_no": 1269
+    },
+    "2afbef2f8a3a624f6f4492260fe2053f6daebd8c5ff13f6f14574417": {
+      "ticker": "top-by-active-stake-2",
+      "bech32": "pool19ta77tu28f3y7m6yjgnqlcs98ak6a0vvtlcn7mc52azpwr4l2xt",
+      "stakeGo": "64673487972227",
+      "stakeSet": "64702467972698",
+      "stakeMark": "64729049565834",
+      "go_epoch_no": 1267,
+      "set_epoch_no": 1268,
+      "mark_epoch_no": 1269
+    },
+    "e283fd58d5263defcc9d0cd9925ac19c9fe4ef1e0b75a4f6af4b0d1b": {
+      "ticker": "top-by-active-stake-3",
+      "bech32": "pool1u2pl6kx4yc77lnyapnveykkpnj07fmc7pd66fa40fvx3khw7cua",
+      "stakeGo": "62635043152048",
+      "stakeSet": "62658754013182",
+      "stakeMark": "62684856605421",
+      "go_epoch_no": 1267,
+      "set_epoch_no": 1268,
+      "mark_epoch_no": 1269
+    }
+  },
+  "totals": {
+    "go": {
+      "epoch_no": 1267,
+      "active_stake": "1255361364631358"
+    },
+    "set": {
+      "epoch_no": 1268,
+      "active_stake": "1259333994152147"
+    },
+    "mark": {
+      "epoch_no": 1269,
+      "active_stake": "1259605258016677"
+    },
+    "comment": "active_stake is Koios's epoch-wide total for the respective snapshot. Between set and mark the drift is approximately 0.0215% (~270 million lovelace out of 1.26 trillion). Between go and set it is approximately 0.316%. Any live-clobber regression (#418) would collapse all three totals to the same value."
+  }
+}
