@@ -477,7 +477,7 @@ impl QueryHandler {
             17 => stake::handle_stake_pool_params(&self.state, decoder),
             18 => stake::handle_reward_info_pools(&self.state),
             19 => stake::handle_pool_state(&self.state, decoder),
-            20 => stake::handle_stake_snapshots(&self.state),
+            20 => stake::handle_stake_snapshots(&self.state, decoder),
             21 => stake::handle_pool_distr(&self.state, decoder),
             22 => stake::handle_stake_deleg_deposits(&self.state, decoder),
             23 => governance::handle_constitution(&self.state),

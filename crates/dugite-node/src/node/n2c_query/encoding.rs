@@ -2741,6 +2741,78 @@ mod tests {
         );
     }
 
+    // ─── Stake snapshots (tag 20) — golden vector (issue #406) ──────────────
+
+    /// Golden vector for `GetStakeSnapshots` response encoding.
+    ///
+    /// Haskell's `StakeSnapshots` record encodes as `encodeListLen 4` followed by
+    /// `ssStakeSnapshots` (a CBOR map from pool key hash to `StakeSnapshot`),
+    /// then `ssMarkTotal`, `ssSetTotal`, `ssGoTotal` (all `NonZero Coin`).
+    /// The inner `StakeSnapshot` encodes as `encodeListLen 3` of `[sMark, sSet, sGo]`.
+    ///
+    /// See `cardano-ledger-api`'s `Cardano.Ledger.Api.State.Query` for the reference.
+    ///
+    /// Layout verified: `array(4) [map(1){hash => array(3)[m,s,g]}, mark_total, set_total, go_total]`.
+    #[test]
+    fn test_stake_snapshots_golden_vector() {
+        let result = QueryResult::StakeSnapshots(StakeSnapshotsResult {
+            pools: vec![PoolStakeSnapshotEntry {
+                pool_id: vec![0xAA; 28],
+                mark_stake: 100,
+                set_stake: 200,
+                go_stake: 300,
+            }],
+            total_mark_stake: 1_000,
+            total_set_stake: 2_000,
+            total_go_stake: 3_000,
+        });
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        // Hand-built expected bytes.
+        let mut expected: Vec<u8> = Vec::new();
+        expected.push(0x84); // array(4)
+        expected.push(0xa1); // map(1)
+        expected.extend_from_slice(&[0x58, 0x1c]); // bstr(28)
+        expected.extend_from_slice(&[0xAA; 28]);
+        expected.push(0x83); // array(3)
+        expected.extend_from_slice(&[0x18, 100]); // uint 100
+        expected.extend_from_slice(&[0x18, 200]); // uint 200
+        expected.extend_from_slice(&[0x19, 0x01, 0x2c]); // uint 300 (go stake)
+        expected.extend_from_slice(&[0x19, 0x03, 0xe8]); // total mark 1000
+        expected.extend_from_slice(&[0x19, 0x07, 0xd0]); // total set 2000
+        expected.extend_from_slice(&[0x19, 0x0b, 0xb8]); // total go 3000
+
+        assert_eq!(
+            hex::encode(&inner),
+            hex::encode(&expected),
+            "StakeSnapshots golden vector mismatch"
+        );
+    }
+
+    /// Totals in `StakeSnapshots` are `NonZero Coin` — they must serialise as at
+    /// least 1 even if the underlying value was 0. This prevents cardano-cli
+    /// from choking on a zeroed out "total" field while the node is still
+    /// bootstrapping epoch snapshots.
+    #[test]
+    fn test_stake_snapshots_zero_totals_encode_as_one() {
+        let result = QueryResult::StakeSnapshots(StakeSnapshotsResult {
+            pools: vec![],
+            total_mark_stake: 0,
+            total_set_stake: 0,
+            total_go_stake: 0,
+        });
+        let encoded = encode_query_result(&result);
+        let inner = strip_wrappers(&encoded);
+
+        let mut dec = Decoder::new(&inner);
+        assert_eq!(dec.array().unwrap(), Some(4));
+        assert_eq!(dec.map().unwrap(), Some(0));
+        assert_eq!(dec.u64().unwrap(), 1);
+        assert_eq!(dec.u64().unwrap(), 1);
+        assert_eq!(dec.u64().unwrap(), 1);
+    }
+
     // ─── Stake snapshots (tag 20) — pool IDs must be 28 bytes ───────────────
 
     #[test]
