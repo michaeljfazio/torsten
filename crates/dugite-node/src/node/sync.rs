@@ -2097,15 +2097,18 @@ impl Node {
                 let mut ls = ledger_state.blocking_write();
                 ls.utxo.utxo_set.set_wal_enabled(true); // Re-enable WAL after replay
                 ls.utxo.utxo_set.set_indexing_enabled(true);
+                info!("Post-replay: rebuilding address index");
                 ls.utxo.utxo_set.rebuild_address_index();
                 // Rebuild stake distribution from the full UTxO set to correct any
                 // residual state from the pre-replay snapshot. After this single
                 // rebuild, incremental tracking is accurate and needs_stake_rebuild
                 // self-disables at the next epoch boundary.
+                info!("Post-replay: rebuilding stake distribution");
                 ls.epochs.needs_stake_rebuild = true;
                 ls.rebuild_stake_distribution();
                 // Recompute pool_stake for all mark/set/go snapshots using the
                 // freshly rebuilt stake_distribution and current reward_accounts.
+                info!("Post-replay: recomputing snapshot pool stakes");
                 ls.recompute_snapshot_pool_stakes();
                 debug!("Rebuilt address index, stake distribution, and snapshot pool stakes after chunk replay");
             }
@@ -2113,13 +2116,19 @@ impl Node {
             // Save final snapshot (write lock to flush UTxO store — no WAL)
             {
                 let mut ls = ledger_state.blocking_write();
+                info!("Post-replay: saving UTxO snapshot");
                 if let Err(e) = ls.save_utxo_snapshot() {
                     error!("Failed to save UTxO store after replay: {e}");
                 }
+                info!(
+                    "Post-replay: saving ledger snapshot to {}",
+                    snapshot_path.display()
+                );
                 if let Err(e) = ls.save_snapshot(&snapshot_path) {
                     error!("Failed to save ledger snapshot after replay: {e}");
                 }
             }
+            info!("Post-replay: initialization complete");
 
             result
         })
