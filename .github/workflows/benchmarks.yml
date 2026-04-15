@@ -88,7 +88,7 @@ jobs:
           echo '```' >> "$REPORT"
 
       - name: Upload benchmark results as artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results-${{ github.run_number }}
           path: benches/*-nightly.md
@@ -109,7 +109,7 @@ jobs:
           fi
 
       - name: Store Criterion HTML reports
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: criterion-reports-${{ github.run_number }}
           path: target/criterion/

@@ -62,7 +62,7 @@ jobs:
 
       - name: Upload corpus
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: corpus-${{ matrix.target }}
           path: fuzz/corpus/fuzz_${{ matrix.target }}/
@@ -70,7 +70,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: crashes-${{ matrix.target }}
           path: fuzz/artifacts/fuzz_${{ matrix.target }}/
