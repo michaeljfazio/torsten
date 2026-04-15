@@ -1244,7 +1244,23 @@ fn skip_item(decoder: &mut minicbor::Decoder) -> Result<(), minicbor::decode::Er
 // the import_snapshot flow in a follow-up (Task 10). Allow dead_code until then.
 // ---------------------------------------------------------------------------
 
-/// Cardano Database snapshot from the V2 `/artifact/cardano-database` API.
+/// List item from the V2 `/artifact/cardano-database` endpoint.
+///
+/// The list response is a summary and does NOT include `ancillary`,
+/// `immutables`, or `digests` — those fields only appear on the detail
+/// endpoint `/artifact/cardano-database/{hash}`. Deserializing the list
+/// into [`CardanoDatabaseSnapshot`] (which requires `ancillary`) caused
+/// reqwest's `.json()` call to fail with `error decoding response body`
+/// (see issue #405).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CardanoDatabaseSnapshotListItem {
+    pub hash: String,
+    pub beacon: SnapshotBeacon,
+}
+
+/// Full Cardano Database snapshot detail from the V2
+/// `/artifact/cardano-database/{hash}` endpoint. Includes the `ancillary`
+/// location info needed to download the Haskell ledger-state archive.
 #[allow(dead_code)]
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct CardanoDatabaseSnapshot {
@@ -1454,15 +1470,21 @@ pub(crate) async fn download_ancillary(
         .build()?;
 
     // Step 1: Get latest Cardano Database snapshot list.
+    //
+    // The list endpoint returns summary items — it does NOT include the
+    // `ancillary` / `immutables` / `digests` fields. Deserialize into
+    // [`CardanoDatabaseSnapshotListItem`], then fetch the detail endpoint
+    // below for full location info. See #405.
     info!("Fetching Cardano Database snapshot list from V2 API...");
-    let snapshots: Vec<CardanoDatabaseSnapshot> = client
+    let snapshots: Vec<CardanoDatabaseSnapshotListItem> = client
         .get(format!("{aggregator}/artifact/cardano-database"))
         .send()
         .await?
         .error_for_status()
         .context("Failed to fetch Cardano Database snapshot list")?
         .json()
-        .await?;
+        .await
+        .context("Failed to decode Cardano Database snapshot list response")?;
 
     let latest = snapshots
         .first()
@@ -1486,7 +1508,8 @@ pub(crate) async fn download_ancillary(
         .error_for_status()
         .context("Failed to fetch Cardano Database snapshot detail")?
         .json()
-        .await?;
+        .await
+        .context("Failed to decode Cardano Database snapshot detail response")?;
 
     // Step 3: Extract the first cloud_storage URI with a plain string value.
     let download_url = snapshot_detail
@@ -2634,5 +2657,127 @@ mod tests {
         // Second location has an object URI.
         assert!(snapshot.ancillary.locations[1].uri.is_object());
         assert_eq!(snapshot.certificate_hash, "def456");
+    }
+
+    /// Regression test for #405: the V2 `/artifact/cardano-database` list
+    /// endpoint returns summary items that do NOT include an `ancillary`
+    /// field. The previous implementation deserialized the list into
+    /// `Vec<CardanoDatabaseSnapshot>` (which requires `ancillary`), causing
+    /// reqwest's `.json()` call to fail with `error decoding response body`
+    /// and forcing a full block replay.
+    ///
+    /// This JSON is copied verbatim from a real preview aggregator response
+    /// captured on 2026-04-15 (epoch 1268). Must deserialize successfully
+    /// into the list-item type.
+    #[test]
+    fn test_cardano_database_snapshot_list_item_real_response() {
+        let list_json = r#"[
+            {
+                "hash": "f49483a660c8a7adc0d342581ad70e26ccd99fc995601b1d0323756c051a49a1",
+                "merkle_root": "7c8185107a170f1b930baa8335971e2c997280f95ca594cbfceaed6e2a487e25",
+                "beacon": {"epoch": 1268, "immutable_file_number": 25366},
+                "certificate_hash": "eb697a0fcd2e9f01f1ee2869640c9c5cd7f4d804ce7df36bdcbcd2c1d382c5f7",
+                "total_db_size_uncompressed": 14741127720,
+                "cardano_node_version": "10.6.2",
+                "created_at": "2026-04-15T12:21:23.718555629Z"
+            },
+            {
+                "hash": "3f5763a4b8fb3fffccf5f3b90bc753d6dea59adf3e2430461446300e1ae976a1",
+                "merkle_root": "fa4f9aa7d720a7dd1fe991199ea2e83a87e0183c9b7e526aa14967073875055d",
+                "beacon": {"epoch": 1268, "immutable_file_number": 25365},
+                "certificate_hash": "2080b77c2518f6f5ad4fb3bfb3d78343d01505111efc77158acf2bd7a0a39408",
+                "total_db_size_uncompressed": 14740835402,
+                "cardano_node_version": "10.6.2",
+                "created_at": "2026-04-15T11:10:42.860579054Z"
+            }
+        ]"#;
+
+        let items: Vec<CardanoDatabaseSnapshotListItem> = serde_json::from_str(list_json)
+            .expect("V2 cardano-database list response must deserialize (see #405)");
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].hash,
+            "f49483a660c8a7adc0d342581ad70e26ccd99fc995601b1d0323756c051a49a1"
+        );
+        assert_eq!(items[0].beacon.epoch, 1268);
+        assert_eq!(items[0].beacon.immutable_file_number, 25366);
+        assert_eq!(items[1].beacon.immutable_file_number, 25365);
+    }
+
+    /// Guard against accidentally using the detail type for the list
+    /// endpoint again: the detail type requires `ancillary`, which the
+    /// list response omits, so deserialization must fail.
+    #[test]
+    fn test_cardano_database_snapshot_detail_rejects_list_shape() {
+        let list_item_json = r#"{
+            "hash": "f49483a660c8a7adc0d342581ad70e26ccd99fc995601b1d0323756c051a49a1",
+            "beacon": {"epoch": 1268, "immutable_file_number": 25366},
+            "certificate_hash": "eb697a0fcd2e9f01f1ee2869640c9c5cd7f4d804ce7df36bdcbcd2c1d382c5f7"
+        }"#;
+
+        let result: Result<CardanoDatabaseSnapshot, _> = serde_json::from_str(list_item_json);
+        assert!(
+            result.is_err(),
+            "Detail type must reject list-shaped response (missing ancillary)"
+        );
+    }
+
+    /// Full V2 detail response captured from the preview aggregator on
+    /// 2026-04-15. Exercises the full `ancillary` shape including the
+    /// `size_uncompressed` and `cloud_storage` location the downloader
+    /// picks.
+    #[test]
+    fn test_cardano_database_snapshot_detail_real_response() {
+        let detail_json = r#"{
+            "hash": "f49483a660c8a7adc0d342581ad70e26ccd99fc995601b1d0323756c051a49a1",
+            "merkle_root": "7c8185107a170f1b930baa8335971e2c997280f95ca594cbfceaed6e2a487e25",
+            "network": "preview",
+            "beacon": {"epoch": 1268, "immutable_file_number": 25366},
+            "certificate_hash": "eb697a0fcd2e9f01f1ee2869640c9c5cd7f4d804ce7df36bdcbcd2c1d382c5f7",
+            "total_db_size_uncompressed": 14741127720,
+            "digests": {
+                "size_uncompressed": 8827717,
+                "locations": [
+                    {
+                        "type": "cloud_storage",
+                        "uri": "https://storage.googleapis.com/cdn/preview-e1268-i25366.digests.tar.zst",
+                        "compression_algorithm": "zstandard"
+                    }
+                ]
+            },
+            "immutables": {
+                "average_size_uncompressed": 531528,
+                "locations": [
+                    {
+                        "type": "cloud_storage",
+                        "uri": {"Template": "https://storage.googleapis.com/cdn/{immutable_file_number}.tar.zst"},
+                        "compression_algorithm": "zstandard"
+                    }
+                ]
+            },
+            "ancillary": {
+                "size_uncompressed": 1258381427,
+                "locations": [
+                    {
+                        "type": "cloud_storage",
+                        "uri": "https://storage.googleapis.com/cdn/preview-e1268-i25366.ancillary.tar.zst",
+                        "compression_algorithm": "zstandard"
+                    }
+                ]
+            },
+            "cardano_node_version": "10.6.2",
+            "created_at": "2026-04-15T12:21:23.718555629Z"
+        }"#;
+
+        let detail: CardanoDatabaseSnapshot = serde_json::from_str(detail_json)
+            .expect("V2 cardano-database detail response must deserialize");
+        assert_eq!(detail.beacon.epoch, 1268);
+        assert_eq!(detail.ancillary.size_uncompressed, 1_258_381_427);
+        assert_eq!(detail.ancillary.locations.len(), 1);
+        assert_eq!(detail.ancillary.locations[0].location_type, "cloud_storage");
+        assert_eq!(
+            detail.ancillary.locations[0].uri.as_str().unwrap(),
+            "https://storage.googleapis.com/cdn/preview-e1268-i25366.ancillary.tar.zst"
+        );
     }
 }
