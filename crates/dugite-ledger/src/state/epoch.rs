@@ -977,81 +977,67 @@ impl LedgerState {
 
     /// Recompute pool_stake for all existing snapshots (mark/set/go).
     ///
-    /// After rebuilding stake_distribution from the UTxO set, this updates
-    /// each snapshot's pool_stake map using the current (rebuilt) stake
-    /// distribution and reward accounts.  Crucially, each snapshot's own
-    /// delegation map is preserved — it reflects the delegations that were
-    /// active at the time the snapshot epoch boundary was crossed.  Replacing
-    /// snapshot delegations with the current map would incorrectly include
-    /// delegations that became active AFTER the snapshot epoch, producing
-    /// inflated sigma values for historical snapshots (issue #171).
+    /// Rebuild each snapshot's `pool_stake` map from that snapshot's own
+    /// historical per-credential stake.
     ///
-    /// The zero-stake bug (issue #113) is handled separately by the
-    /// `rebuild_stake_distribution` + `recompute_snapshot_pool_stakes` call
-    /// in node startup code after the UTxO store is attached.
+    /// Each `StakeSnapshot.stake_distribution` holds the per-credential stake
+    /// that was captured when the epoch boundary for that snapshot was crossed
+    /// (for dugite-built snapshots this comes from `process_epoch_transition`;
+    /// for Haskell-imported snapshots it comes from `convert_stake_snapshot`
+    /// via `ssStake`, which already folds in reward balances and deposits).
+    /// Recomputing `pool_stake` by re-aggregating that per-credential stake
+    /// over `snap.delegations` is idempotent and preserves the mark/set/go
+    /// independence required by Ouroboros Praos.
+    ///
+    /// Prior to #418 this function summed the **current live**
+    /// `self.certs.stake_distribution.stake_map` over each snapshot's
+    /// delegation map. Because mark/set/go share nearly-identical delegation
+    /// sets in steady state, that made all three snapshots collapse to the
+    /// same post-load live stake values on every call, which on preview broke
+    /// 624/625 pools' stake-snapshot query responses.  See issue #418 and the
+    /// parent diagnosis in #417.
     pub fn recompute_snapshot_pool_stakes(&mut self) {
-        // Borrow ptr_stake and pointer_map immutably for ptr resolution.
-        // We'll use each snapshot's own delegation map for the ptr_stake lookup
-        // (preserving the historical delegation state that was active at that snapshot).
-        let ptr_stake = &self.epochs.ptr_stake;
-        let pointer_map = &self.certs.pointer_map;
-        let reward_accounts = &self.certs.reward_accounts;
-        let stake_map = &self.certs.stake_distribution.stake_map;
-
         for (name, snapshot) in [
             ("mark", &mut self.epochs.snapshots.mark),
             ("set", &mut self.epochs.snapshots.set),
             ("go", &mut self.epochs.snapshots.go),
         ] {
-            if let Some(snap) = snapshot {
-                let old_total: u64 = snap
-                    .pool_stake
-                    .values()
-                    .fold(0u64, |acc, s| acc.saturating_add(s.0));
-                let mut new_pool_stake: HashMap<dugite_primitives::hash::Hash28, Lovelace> =
-                    HashMap::with_capacity(snap.pool_stake.len());
-                for (cred_hash, pool_id) in snap.delegations.iter() {
-                    let utxo_stake = stake_map.get(cred_hash).copied().unwrap_or(Lovelace(0));
-                    let reward_balance = reward_accounts
-                        .get(cred_hash)
-                        .copied()
-                        .unwrap_or(Lovelace(0));
-                    let total_stake = Lovelace(utxo_stake.0.saturating_add(reward_balance.0));
-                    *new_pool_stake.entry(*pool_id).or_insert(Lovelace(0)) += total_stake;
+            let Some(snap) = snapshot else { continue };
+
+            let old_total: u64 = snap
+                .pool_stake
+                .values()
+                .fold(0u64, |acc, s| acc.saturating_add(s.0));
+
+            let mut new_pool_stake: HashMap<dugite_primitives::hash::Hash28, Lovelace> =
+                HashMap::with_capacity(snap.pool_stake.len());
+            for (cred_hash, pool_id) in snap.delegations.iter() {
+                let stake = snap
+                    .stake_distribution
+                    .get(cred_hash)
+                    .copied()
+                    .unwrap_or(Lovelace(0));
+                if stake.0 == 0 {
+                    continue;
                 }
-                // Include pointer-addressed UTxO stake resolved via the current pointer_map.
-                // Use each snapshot's own delegation map so that historical delegations are
-                // respected (matching the per-snapshot delegation semantics of SNAP).
-                // ptr_stake is empty in Conway (cleared at HFC boundary), so this loop
-                // is a no-op post-Conway.
-                for (pointer, &coin) in ptr_stake {
-                    if coin == 0 {
-                        continue;
-                    }
-                    if let Some(cred_hash) = pointer_map.get(pointer) {
-                        if reward_accounts.contains_key(cred_hash) {
-                            if let Some(pool_id) = snap.delegations.get(cred_hash) {
-                                *new_pool_stake.entry(*pool_id).or_insert(Lovelace(0)) +=
-                                    Lovelace(coin);
-                            }
-                        }
-                    }
-                }
-                let new_total: u64 = new_pool_stake
-                    .values()
-                    .fold(0u64, |acc, s| acc.saturating_add(s.0));
-                if old_total != new_total {
-                    debug!(
-                        snapshot = name,
-                        epoch = snap.epoch.0,
-                        old_total_ada = old_total / 1_000_000,
-                        new_total_ada = new_total / 1_000_000,
-                        delta_ada = (new_total as i128 - old_total as i128) / 1_000_000,
-                        "Snapshot pool_stake recomputed (corrected drift)"
-                    );
-                }
-                snap.pool_stake = new_pool_stake;
+                let entry = new_pool_stake.entry(*pool_id).or_insert(Lovelace(0));
+                entry.0 = entry.0.saturating_add(stake.0);
             }
+
+            let new_total: u64 = new_pool_stake
+                .values()
+                .fold(0u64, |acc, s| acc.saturating_add(s.0));
+            if old_total != new_total {
+                debug!(
+                    snapshot = name,
+                    epoch = snap.epoch.0,
+                    old_total_ada = old_total / 1_000_000,
+                    new_total_ada = new_total / 1_000_000,
+                    delta_ada = (new_total as i128 - old_total as i128) / 1_000_000,
+                    "Snapshot pool_stake recomputed from snap.stake_distribution"
+                );
+            }
+            snap.pool_stake = new_pool_stake;
         }
     }
 

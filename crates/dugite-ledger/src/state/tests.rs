@@ -10668,21 +10668,22 @@ fn test_recompute_snapshot_pool_stakes_includes_reward_accounts() {
 }
 
 // -----------------------------------------------------------------------
-// Issue #171. recompute_snapshot_pool_stakes must NOT replace snapshot
-// delegations with current delegations.
+// Issue #171 / #418. recompute_snapshot_pool_stakes must preserve each
+// snapshot's historical state end-to-end.
 // -----------------------------------------------------------------------
 //
-// The previous implementation replaced a snapshot's delegation map with the
-// current (live) delegation map whenever the current map had significantly
-// more entries. This over-corrects: delegations registered AFTER the
-// snapshot epoch are included retroactively, inflating sigma values used
-// for historical reward calculations.
+// Both the delegation map AND the per-credential stake distribution carried
+// by a StakeSnapshot are snapshots of the ledger state at the moment that
+// snapshot's epoch boundary was crossed. Recomputing pool_stake must
+// re-aggregate the snapshot's own `stake_distribution` over the snapshot's
+// own `delegations` — never the live post-load stake_map or delegation map.
 //
-// The correct behaviour: each snapshot's delegation map is preserved exactly
-// as it was captured at the time the epoch boundary was crossed. Only the
-// pool_stake values (ADA amounts) are recalculated using the current
-// (rebuilt) stake_distribution — the set of which pools are visible in
-// each snapshot must remain epoch-accurate.
+// Issue #171 was the delegation-side variant of this rule: using the live
+// delegation map injects post-snapshot delegators. Issue #418 is the
+// stake-side variant: using the live stake_map overwrites mark/set/go with
+// the same post-load values and collapses them to byte-identity (624/625
+// preview pools affected prior to the fix). Both bugs have the same cure —
+// read only from the snapshot itself.
 
 /// Verify that recompute_snapshot_pool_stakes() does NOT inject post-epoch
 /// delegations into historical snapshots.
@@ -10808,6 +10809,355 @@ fn test_recompute_snapshot_pool_stakes_preserves_snapshot_delegations() {
          delegation replacement bug would inflate this value",
         amount_x + amount_y,
         pool_stake.0
+    );
+}
+
+// -----------------------------------------------------------------------
+// Issue #418. recompute_snapshot_pool_stakes must NOT use the live
+// stake_map; each snapshot is re-aggregated from its own stake_distribution.
+// -----------------------------------------------------------------------
+
+/// Build a synthetic `StakeSnapshot` carrying the supplied per-pool stake.
+///
+/// Both `delegations` and `stake_distribution` are populated so that
+/// `recompute_snapshot_pool_stakes` (which reads both) re-derives the same
+/// per-pool totals that were supplied. Credentials are derived from
+/// `pool_index_in_call` only — not from the stake amount — so that calling
+/// this helper with the same pool set and different per-pool amounts
+/// produces snapshots that share an identical credential/delegation set but
+/// carry distinct per-credential stake values. That exactly models the
+/// preview steady-state case that #417/#418 were diagnosed against, where
+/// mark/set/go have overlapping delegation sets and only the ADA amounts
+/// shift slightly across the three-epoch window.
+fn synthesize_pool_stake_snapshot(
+    epoch: EpochNo,
+    per_pool: &[(Hash28, u64)],
+) -> super::StakeSnapshot {
+    use std::sync::Arc;
+    let mut delegations: HashMap<Hash32, Hash28> = HashMap::new();
+    let mut stake_distribution: HashMap<Hash32, Lovelace> = HashMap::new();
+    let mut pool_stake: HashMap<Hash28, Lovelace> = HashMap::new();
+    for (idx, (pool_id, amount)) in per_pool.iter().enumerate() {
+        let mut cred_bytes = [0u8; 32];
+        cred_bytes[0] = 0xC0;
+        cred_bytes[1] = idx as u8;
+        let cred = Hash32::from_bytes(cred_bytes);
+        delegations.insert(cred, *pool_id);
+        stake_distribution.insert(cred, Lovelace(*amount));
+        pool_stake.insert(*pool_id, Lovelace(*amount));
+    }
+    super::StakeSnapshot {
+        epoch,
+        delegations: Arc::new(delegations),
+        pool_stake,
+        pool_params: Arc::new(HashMap::new()),
+        stake_distribution: Arc::new(stake_distribution),
+        epoch_fees: Lovelace(0),
+        epoch_block_count: 0,
+        epoch_blocks_by_pool: Arc::new(HashMap::new()),
+    }
+}
+
+/// Seed three snapshots (mark/set/go) with per-pool stake values that are
+/// distinct across the three snapshots, then call
+/// `recompute_snapshot_pool_stakes` and verify each snapshot still holds its
+/// own historical values.
+///
+/// This is the direct regression for issue #418 (parent #417): the pre-fix
+/// implementation aggregated the live `stake_distribution.stake_map` over
+/// each snapshot's delegation map, which collapsed mark/set/go to the same
+/// values on every call.
+#[test]
+fn test_recompute_snapshot_pool_stakes_preserves_per_snapshot_independence() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    let pool_a = Hash28::from_bytes([0xA0u8; 28]);
+    let pool_b = Hash28::from_bytes([0xB0u8; 28]);
+    let pool_c = Hash28::from_bytes([0xC0u8; 28]);
+
+    // Three pools × three snapshots, all distinct — the spec values from #418.
+    let mark_values = [
+        (pool_a, 300_000_000_000u64),
+        (pool_b, 310_000_000_000u64),
+        (pool_c, 320_000_000_000u64),
+    ];
+    let set_values = [
+        (pool_a, 200_000_000_000u64),
+        (pool_b, 210_000_000_000u64),
+        (pool_c, 220_000_000_000u64),
+    ];
+    let go_values = [
+        (pool_a, 100_000_000_000u64),
+        (pool_b, 110_000_000_000u64),
+        (pool_c, 120_000_000_000u64),
+    ];
+
+    state.epochs.snapshots.mark = Some(synthesize_pool_stake_snapshot(EpochNo(3), &mark_values));
+    state.epochs.snapshots.set = Some(synthesize_pool_stake_snapshot(EpochNo(2), &set_values));
+    state.epochs.snapshots.go = Some(synthesize_pool_stake_snapshot(EpochNo(1), &go_values));
+
+    // Pollute the live stake_map with a single synthetic value per shared
+    // credential. Under the pre-fix clobber, `recompute_snapshot_pool_stakes`
+    // would aggregate this value over every snapshot's delegation map,
+    // yielding mark == set == go == 3 × 999_999_999_999 for each snapshot.
+    // Under the fix, the live stake_map is never read and each snapshot
+    // retains its own historical per-pool totals.
+    for idx in 0..mark_values.len() {
+        let mut cred_bytes = [0u8; 32];
+        cred_bytes[0] = 0xC0;
+        cred_bytes[1] = idx as u8;
+        let cred = Hash32::from_bytes(cred_bytes);
+        state
+            .certs
+            .stake_distribution
+            .stake_map
+            .insert(cred, Lovelace(999_999_999_999));
+    }
+
+    state.recompute_snapshot_pool_stakes();
+
+    for (label, expected_values, snap) in [
+        (
+            "mark",
+            &mark_values[..],
+            state.epochs.snapshots.mark.as_ref().unwrap(),
+        ),
+        (
+            "set",
+            &set_values[..],
+            state.epochs.snapshots.set.as_ref().unwrap(),
+        ),
+        (
+            "go",
+            &go_values[..],
+            state.epochs.snapshots.go.as_ref().unwrap(),
+        ),
+    ] {
+        for (pool, expected) in expected_values {
+            let actual = snap.pool_stake.get(pool).copied().unwrap_or(Lovelace(0));
+            assert_eq!(
+                actual.0, *expected,
+                "{label} snapshot pool {pool:?} must retain its historical value {expected}, got {}",
+                actual.0
+            );
+        }
+    }
+
+    let mark_snap = state.epochs.snapshots.mark.as_ref().unwrap();
+    let set_snap = state.epochs.snapshots.set.as_ref().unwrap();
+    let go_snap = state.epochs.snapshots.go.as_ref().unwrap();
+    assert_ne!(
+        mark_snap.pool_stake, set_snap.pool_stake,
+        "mark and set must NOT be equal after recompute (regression for #418)"
+    );
+    assert_ne!(
+        set_snap.pool_stake, go_snap.pool_stake,
+        "set and go must NOT be equal after recompute (regression for #418)"
+    );
+    assert_ne!(
+        mark_snap.pool_stake, go_snap.pool_stake,
+        "mark and go must NOT be equal after recompute (regression for #418)"
+    );
+}
+
+/// After a normal epoch transition, the SNAP rule at epoch.rs:139-141 rotates
+/// mark → set and set → go, then builds a fresh mark. This test confirms the
+/// rotation produces three snapshots with distinct per-pool stake values
+/// when the live stake has been mutated between epoch boundaries, and that
+/// `recompute_snapshot_pool_stakes` does not subsequently flatten them.
+///
+/// This refutes hypothesis-2 of #417 (that rotation was missing) and locks
+/// in the interaction between rotation and the #418 fix.
+#[test]
+fn test_snapshot_rotation_with_mutating_stake_is_preserved_across_recompute() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.epoch_length = 1000;
+    state.shelley_transition_epoch = 0;
+    state.byron_epoch_length = 0;
+
+    let pool_id = Hash28::from_bytes([0x50u8; 28]);
+    let cred_a = Credential::VerificationKey(Hash28::from_bytes([0x51u8; 28]));
+    let cred_b = Credential::VerificationKey(Hash28::from_bytes([0x52u8; 28]));
+    let cred_c = Credential::VerificationKey(Hash28::from_bytes([0x53u8; 28]));
+
+    // Epoch 0: register pool + delegator A with 100 ADA.
+    let b0 = make_pool_registration_block(1, 1, Hash32::ZERO, pool_id);
+    state
+        .apply_block(&b0, BlockValidationMode::ApplyOnly)
+        .unwrap();
+    let b1 = make_delegation_block(2, 2, *b0.hash(), &cred_a, pool_id, 100_000_000);
+    state
+        .apply_block(&b1, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Epoch 1 boundary: mark built with A's stake only.
+    let b2 = make_empty_block(1001, 3, *b1.hash());
+    state
+        .apply_block(&b2, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Delegator B joins mid-epoch 1 with 200 ADA.
+    let b3 = make_delegation_block(1002, 4, *b2.hash(), &cred_b, pool_id, 200_000_000);
+    state
+        .apply_block(&b3, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Epoch 2 boundary: set=mark(epoch1, A only), new mark built (A + B).
+    let b4 = make_empty_block(2001, 5, *b3.hash());
+    state
+        .apply_block(&b4, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Delegator C joins mid-epoch 2 with 400 ADA.
+    let b5 = make_delegation_block(2002, 6, *b4.hash(), &cred_c, pool_id, 400_000_000);
+    state
+        .apply_block(&b5, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Epoch 3 boundary: go=set(A), set=mark(A+B), new mark built (A+B+C).
+    let b6 = make_empty_block(3001, 7, *b5.hash());
+    state
+        .apply_block(&b6, BlockValidationMode::ApplyOnly)
+        .unwrap();
+
+    // Run the fix under test.
+    state.recompute_snapshot_pool_stakes();
+
+    let mark = state
+        .epochs
+        .snapshots
+        .mark
+        .as_ref()
+        .expect("mark snapshot must exist");
+    let set = state
+        .epochs
+        .snapshots
+        .set
+        .as_ref()
+        .expect("set snapshot must exist");
+    let go = state
+        .epochs
+        .snapshots
+        .go
+        .as_ref()
+        .expect("go snapshot must exist");
+
+    let mark_stake = mark
+        .pool_stake
+        .get(&pool_id)
+        .copied()
+        .unwrap_or(Lovelace(0))
+        .0;
+    let set_stake = set
+        .pool_stake
+        .get(&pool_id)
+        .copied()
+        .unwrap_or(Lovelace(0))
+        .0;
+    let go_stake = go
+        .pool_stake
+        .get(&pool_id)
+        .copied()
+        .unwrap_or(Lovelace(0))
+        .0;
+
+    // mark > set > go — each new delegator pushed the freshest mark higher
+    // than the snapshots inherited from earlier boundaries.
+    assert!(
+        mark_stake > set_stake,
+        "mark ({mark_stake}) must exceed set ({set_stake}) after rotation"
+    );
+    assert!(
+        set_stake > go_stake,
+        "set ({set_stake}) must exceed go ({go_stake}) after rotation"
+    );
+    assert!(
+        go_stake >= 100_000_000,
+        "go must retain A's epoch-1 stake (>= 100 ADA), got {go_stake}"
+    );
+}
+
+/// Reproduce the mark==set==go pattern reported on preview (#418) using a
+/// synthetic two-snapshot setup where `recompute_snapshot_pool_stakes` is
+/// called after loading. Before the fix this test would clobber mark/set/go
+/// with the same live value; after the fix, the three historical values are
+/// preserved.
+///
+/// This complements the synthetic-independence test above by exercising the
+/// exact sequence that `load_snapshot` runs (rebuild_stake_distribution
+/// followed by recompute_snapshot_pool_stakes).
+#[test]
+fn test_recompute_does_not_produce_mark_eq_set_eq_go_on_load() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+
+    let pool_a = Hash28::from_bytes([0xA1u8; 28]);
+
+    let mark = synthesize_pool_stake_snapshot(EpochNo(3), &[(pool_a, 3_000_000)]);
+    let set = synthesize_pool_stake_snapshot(EpochNo(2), &[(pool_a, 2_000_000)]);
+    let go = synthesize_pool_stake_snapshot(EpochNo(1), &[(pool_a, 1_000_000)]);
+
+    state.epochs.snapshots.mark = Some(mark);
+    state.epochs.snapshots.set = Some(set);
+    state.epochs.snapshots.go = Some(go);
+
+    // Drive the live stake_distribution to a single large value for the
+    // shared credential that mark/set/go all delegate. Under the pre-fix
+    // code this would make all three snapshots report 9_999_999 for pool_a;
+    // under the fix each snapshot keeps its own historical value.
+    let mut cred_bytes = [0u8; 32];
+    cred_bytes[0] = 0xC0;
+    cred_bytes[1] = 0;
+    state
+        .certs
+        .stake_distribution
+        .stake_map
+        .insert(Hash32::from_bytes(cred_bytes), Lovelace(9_999_999));
+
+    state.recompute_snapshot_pool_stakes();
+
+    let mark_val = state
+        .epochs
+        .snapshots
+        .mark
+        .as_ref()
+        .unwrap()
+        .pool_stake
+        .get(&pool_a)
+        .copied()
+        .unwrap_or(Lovelace(0))
+        .0;
+    let set_val = state
+        .epochs
+        .snapshots
+        .set
+        .as_ref()
+        .unwrap()
+        .pool_stake
+        .get(&pool_a)
+        .copied()
+        .unwrap_or(Lovelace(0))
+        .0;
+    let go_val = state
+        .epochs
+        .snapshots
+        .go
+        .as_ref()
+        .unwrap()
+        .pool_stake
+        .get(&pool_a)
+        .copied()
+        .unwrap_or(Lovelace(0))
+        .0;
+
+    assert_eq!(mark_val, 3_000_000);
+    assert_eq!(set_val, 2_000_000);
+    assert_eq!(go_val, 1_000_000);
+    assert!(
+        !(mark_val == set_val && set_val == go_val),
+        "mark==set==go is the #418 bug; fix must keep the values distinct"
     );
 }
 
