@@ -43,7 +43,7 @@ dugite-monitor = { path = "crates/dugite-monitor" }
 
 # Terminal UI
 ratatui = "0.30"
-crossterm = "0.28"
+crossterm = "0.29"
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }
