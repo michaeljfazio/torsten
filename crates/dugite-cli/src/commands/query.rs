@@ -866,7 +866,15 @@ impl QueryCmd {
 
                 let epoch = client.query_epoch().await.unwrap_or(0);
                 let era = client.query_era().await.unwrap_or(6);
-                let block_no = client.query_block_no().await.unwrap_or(tip.block_no);
+                // `GetLedgerTip` does not carry a block number, so `tip.block_no`
+                // is always `None` here (see TipResult docs, issue #407). Fall
+                // back to 0 if `GetChainBlockNo` also fails.
+                let block_no = client
+                    .query_block_no()
+                    .await
+                    .ok()
+                    .or(tip.block_no)
+                    .unwrap_or(0);
 
                 // Query system start time from the node for accurate sync progress
                 let system_start_str = client.query_system_start().await.ok();

@@ -16,14 +16,26 @@ use crate::mux::channel::MuxChannel;
 use crate::mux::{Direction, Mux};
 
 /// Result of a tip query.
+///
+/// `GetLedgerTip` (Shelley BlockQuery tag 0) returns a bare `Point`
+/// `[slot, hash]` — it does **not** carry a block number. Callers that need
+/// the block number must issue `GetChainBlockNo` (top-level outer tag 2, via
+/// [`N2CClient::query_block_no`]) separately.
+///
+/// Accordingly, [`TipResult::block_no`] is `Option<u64>`:
+/// - `None` when populated from a raw `GetLedgerTip` response.
+/// - `Some(_)` when a caller has back-filled it from `GetChainBlockNo`.
+///
+/// See issue #407.
 #[derive(Debug, Clone)]
 pub struct TipResult {
     /// Slot number at the tip.
     pub slot: u64,
     /// Block header hash (32 bytes).
     pub hash: Vec<u8>,
-    /// Block number at the tip.
-    pub block_no: u64,
+    /// Block number at the tip, if known. `GetLedgerTip` never populates this
+    /// — use `GetChainBlockNo` if the value is required.
+    pub block_no: Option<u64>,
     /// Epoch number (filled in by caller if needed).
     pub epoch: u64,
     /// Era index (filled in by caller if needed).
@@ -183,12 +195,17 @@ impl N2CClient {
 
     /// Query the chain tip (`GetLedgerTip` -- Shelley query tag 0).
     ///
-    /// Returns a [`TipResult`] with slot, hash, and block_no populated.
-    /// The `epoch` and `era` fields default to 0; callers fill them via
+    /// Returns a [`TipResult`] populated from the wire `Point` — `slot` and
+    /// `hash` are set; `block_no` is `None` because `GetLedgerTip` does not
+    /// carry a block number (see issue #407 and the [`TipResult`] docs).
+    ///
+    /// `epoch` and `era` default to 0; callers fill them via
     /// [`query_epoch`](Self::query_epoch) / [`query_era`](Self::query_era).
+    /// Callers that need the block number should call
+    /// [`query_block_no`](Self::query_block_no).
     pub async fn query_tip(&mut self) -> Result<TipResult, NetworkError> {
         let result = self.send_shelley_query(0).await?;
-        parse_tip_result(&result)
+        parse_ledger_tip_result(&result)
     }
 
     /// Query the current epoch number (`GetEpochNo` -- Shelley query tag 1).
@@ -877,33 +894,81 @@ fn strip_hfc_wrapper(decoder: &mut minicbor::Decoder) -> Result<(), NetworkError
     }
 }
 
-/// Parse a `GetLedgerTip` MsgResult into a [`TipResult`].
-fn parse_tip_result(payload: &[u8]) -> Result<TipResult, NetworkError> {
+/// Parse a `GetLedgerTip` (Shelley BlockQuery tag 0) MsgResult into a [`TipResult`].
+///
+/// Wire shape (captured from cardano-node 10.6.2, see issue #407):
+/// ```text
+/// 82 04 81 82 1a 06884258 5820 <32-byte hash>
+/// ```
+/// i.e. `MsgResult [4, [[slot, hash]]]`:
+/// - `[4, ...]`   — MsgResult envelope
+/// - `array(1)`   — HFC EitherMismatch success wrapper (BlockQuery > QueryIfCurrent)
+/// - `[slot, hash]` — bare `Point`
+///
+/// `GetLedgerTip` returns a `Point`, **not** a `Tip`: there is no block number
+/// in the payload. The returned [`TipResult::block_no`] is therefore always
+/// `None`. Callers that need the block number should call
+/// [`N2CClient::query_block_no`] (`GetChainBlockNo`, top-level outer tag 2).
+///
+/// Dispatch-by-opcode: this function is specialised for tag 0 and does not
+/// attempt to handle the legacy `[[slot, hash], block_no]` `Tip` shape. That
+/// shape was previously emitted by dugite's own server as a bug — the server
+/// now also emits the bare-Point form, so there is no legacy form to parse.
+fn parse_ledger_tip_result(payload: &[u8]) -> Result<TipResult, NetworkError> {
     let mut dec = minicbor::Decoder::new(payload);
     strip_msg_result(&mut dec)?;
     strip_hfc_wrapper(&mut dec)?;
 
-    // Haskell `Tip` CBOR encoding (ouroboros-network):
-    //   TipGenesis  = [0, null]
-    //   Tip sl h bn = [[1, [sl, h]], bn]   -- discriminated BlockPoint form
-    //
-    // Dugite's own server sends the older compact form:
-    //   [[slot, hash], block_no]           -- no discriminator
-    //
-    // We detect which format we're in by checking whether the element
-    // following the first integer in the inner (Point) array is an array
-    // (Haskell form) or bytes (compact form).
-    let _ = dec.array(); // outer Tip array
-    let _ = dec.array(); // Point array: either [disc, [sl, h]] or [sl, h]
-
-    let first = dec
+    // Point: [slot, hash]
+    let point_len = dec
+        .array()
+        .map_err(|e| protocol_err(format!("bad ledger-tip point array: {e}")))?;
+    if point_len != Some(2) {
+        return Err(protocol_err(format!(
+            "GetLedgerTip Point must be array(2), got {point_len:?}"
+        )));
+    }
+    let slot = dec
         .u64()
-        .map_err(|e| protocol_err(format!("bad tip first field: {e}")))?;
+        .map_err(|e| protocol_err(format!("bad slot: {e}")))?;
+    let hash = dec
+        .bytes()
+        .map_err(|e| protocol_err(format!("bad hash: {e}")))?
+        .to_vec();
 
-    let (slot, hash) = match dec.datatype().unwrap_or(minicbor::data::Type::Undefined) {
-        minicbor::data::Type::Array => {
-            // Haskell form: first = discriminator (1), next = [slot, hash]
-            let _ = dec.array();
+    Ok(TipResult {
+        slot,
+        hash,
+        block_no: None,
+        epoch: 0,
+        era: 0,
+    })
+}
+
+/// Parse a `GetChainPoint` (top-level outer tag 3) MsgResult into a `(slot, hash)` pair.
+///
+/// Wire shape:
+/// ```text
+/// [4, [slot, hash]]   -- Point, top-level (no HFC wrapper)
+/// [4, []]             -- Point::Origin
+/// ```
+///
+/// Returns `None` for `Point::Origin`.
+#[allow(dead_code)] // exposed for future GetChainPoint callers and unit tests
+fn parse_chain_point_result(payload: &[u8]) -> Result<Option<(u64, Vec<u8>)>, NetworkError> {
+    let mut dec = minicbor::Decoder::new(payload);
+    strip_msg_result(&mut dec)?;
+    // Top-level query: no HFC wrapper. Use strip_hfc_wrapper defensively — it
+    // resets position if no `array(1)` is present, so top-level replies parse
+    // correctly.
+    strip_hfc_wrapper(&mut dec)?;
+
+    let point_len = dec
+        .array()
+        .map_err(|e| protocol_err(format!("bad chain-point array: {e}")))?;
+    match point_len {
+        Some(0) => Ok(None),
+        Some(2) => {
             let slot = dec
                 .u64()
                 .map_err(|e| protocol_err(format!("bad slot: {e}")))?;
@@ -911,29 +976,12 @@ fn parse_tip_result(payload: &[u8]) -> Result<TipResult, NetworkError> {
                 .bytes()
                 .map_err(|e| protocol_err(format!("bad hash: {e}")))?
                 .to_vec();
-            (slot, hash)
+            Ok(Some((slot, hash)))
         }
-        _ => {
-            // Compact form: first = slot, next = hash bytes
-            let hash = dec
-                .bytes()
-                .map_err(|e| protocol_err(format!("bad hash: {e}")))?
-                .to_vec();
-            (first, hash)
-        }
-    };
-
-    let block_no = dec
-        .u64()
-        .map_err(|e| protocol_err(format!("bad block_no: {e}")))?;
-
-    Ok(TipResult {
-        slot,
-        hash,
-        block_no,
-        epoch: 0,
-        era: 0,
-    })
+        other => Err(protocol_err(format!(
+            "GetChainPoint Point must be array(0|2), got {other:?}"
+        ))),
+    }
 }
 
 /// Parse a `GetEpochNo` MsgResult into a `u64`.
@@ -1489,42 +1537,85 @@ mod tests {
         assert_eq!(format_rational_decimal(75, 100), "0.75");
     }
 
+    /// GetLedgerTip bare-Point golden vector (issue #407).
+    ///
+    /// Captured from cardano-node 10.6.2, 43-byte payload:
+    /// ```text
+    /// 82 04 81 82 1a 06884258 5820
+    ///   344bc3f7b7b3686a181a3c73e4a4050122b888e1b596f2c3a398a6a7fc2c9602
+    /// ```
+    /// i.e. `[4, [[slot=109576792, hash]]]`.
+    ///
+    /// Prior to #407, `parse_tip_result` over-read the payload trying to decode
+    /// a legacy `Tip` shape `[[slot, hash], block_no]` and returned an error or
+    /// wrong data. The fix dispatches by query opcode: `GetLedgerTip` is parsed
+    /// specifically as a bare Point with `block_no = None`.
     #[test]
-    fn test_parse_tip_result() {
-        let mut buf = Vec::new();
-        let mut enc = minicbor::Encoder::new(&mut buf);
-        enc.array(2).unwrap();
-        enc.u32(4).unwrap(); // MsgResult tag
-        enc.array(1).unwrap(); // HFC success wrapper: array(1)[result]
-        enc.array(2).unwrap(); // [[slot, hash], block_no]
-        enc.array(2).unwrap();
-        enc.u64(12345).unwrap();
-        enc.bytes(&[0xab; 32]).unwrap();
-        enc.u64(100).unwrap();
+    fn test_parse_ledger_tip_bare_point_golden() {
+        let hash_hex = "344bc3f7b7b3686a181a3c73e4a4050122b888e1b596f2c3a398a6a7fc2c9602";
+        let expected_hash: Vec<u8> = (0..32)
+            .map(|i| u8::from_str_radix(&hash_hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect();
 
-        let result = parse_tip_result(&buf).unwrap();
-        assert_eq!(result.slot, 12345);
-        assert_eq!(result.hash, vec![0xab; 32]);
-        assert_eq!(result.block_no, 100);
+        // Build the captured 43-byte payload byte-for-byte.
+        let mut payload = vec![0x82, 0x04, 0x81, 0x82, 0x1a];
+        payload.extend_from_slice(&109_576_792u32.to_be_bytes());
+        payload.push(0x58);
+        payload.push(0x20);
+        payload.extend_from_slice(&expected_hash);
+        assert_eq!(payload.len(), 43);
+
+        let result = parse_ledger_tip_result(&payload).unwrap();
+        assert_eq!(result.slot, 109_576_792);
+        assert_eq!(result.hash, expected_hash);
+        assert_eq!(
+            result.block_no, None,
+            "GetLedgerTip does not carry block_no (use GetChainBlockNo)"
+        );
     }
 
     #[test]
-    fn test_parse_tip_result_no_hfc_wrapper() {
+    fn test_parse_ledger_tip_synthesised() {
         let mut buf = Vec::new();
         let mut enc = minicbor::Encoder::new(&mut buf);
         enc.array(2).unwrap();
         enc.u32(4).unwrap(); // MsgResult tag
-                             // No HFC wrapper — parser should handle unwrapped responses
-        enc.array(2).unwrap(); // [[slot, hash], block_no]
-        enc.array(2).unwrap();
+        enc.array(1).unwrap(); // HFC success wrapper
+        enc.array(2).unwrap(); // bare Point: [slot, hash]
         enc.u64(12345).unwrap();
         enc.bytes(&[0xab; 32]).unwrap();
-        enc.u64(100).unwrap();
 
-        let result = parse_tip_result(&buf).unwrap();
+        let result = parse_ledger_tip_result(&buf).unwrap();
         assert_eq!(result.slot, 12345);
         assert_eq!(result.hash, vec![0xab; 32]);
-        assert_eq!(result.block_no, 100);
+        assert_eq!(result.block_no, None);
+    }
+
+    /// `GetChainPoint` (top-level outer tag 3) is a Point without an HFC wrapper.
+    #[test]
+    fn test_parse_chain_point_specific() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(4).unwrap(); // MsgResult tag
+        enc.array(2).unwrap(); // bare Point: [slot, hash]
+        enc.u64(999).unwrap();
+        enc.bytes(&[0xcd; 32]).unwrap();
+
+        let (slot, hash) = parse_chain_point_result(&buf).unwrap().unwrap();
+        assert_eq!(slot, 999);
+        assert_eq!(hash, vec![0xcd; 32]);
+    }
+
+    #[test]
+    fn test_parse_chain_point_origin() {
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(4).unwrap(); // MsgResult tag
+        enc.array(0).unwrap(); // Point::Origin = []
+
+        assert_eq!(parse_chain_point_result(&buf).unwrap(), None);
     }
 
     #[test]

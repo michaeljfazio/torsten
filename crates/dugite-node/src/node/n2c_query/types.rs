@@ -6,15 +6,25 @@ use dugite_primitives::time::{BlockNo, EpochNo};
 #[allow(dead_code)] // variants constructed in trait impl methods (dynamic dispatch)
 pub enum QueryResult {
     EpochNo(u64),
-    ChainTip {
+    /// GetLedgerTip result (Shelley BlockQuery tag 0).
+    ///
+    /// Wire shape (MsgResult): `[4, [[slot, hash]]]`
+    ///
+    /// The outer `array(1)` is the HFC EitherMismatch success wrapper (this is
+    /// a BlockQuery > QueryIfCurrent), and the inner `[slot, hash]` is a bare
+    /// `Point` — **not** a `Tip`. GetLedgerTip deliberately does not include
+    /// `block_no`; callers who need it must issue `GetChainBlockNo` (top-level
+    /// outer tag 2) separately. See issue #407.
+    LedgerTip {
         slot: u64,
         hash: Vec<u8>,
-        block_no: u64,
     },
     CurrentEra(u32),
     SystemStart(String),
     ChainBlockNo(u64),
-    /// GetChainPoint result: Point encoding ([slot, hash] or [] for Origin)
+    /// GetChainPoint result: Point encoding ([slot, hash] or [] for Origin).
+    ///
+    /// Top-level query (outer tag 3) — no HFC wrapper.
     ChainPoint {
         slot: u64,
         hash: Vec<u8>,
