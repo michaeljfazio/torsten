@@ -124,7 +124,7 @@ impl PeerInfo {
         // Exponential backoff: 5s, 10s, 20s, 40s, 80s, 160s (cap), ±2s fuzz.
         let exp = (self.failure_count - 1).min(COLD_RETRY_MAX_EXP);
         let base = COLD_RETRY_BASE_SECS * 2f64.powi(exp as i32);
-        let fuzz: f64 = rand::thread_rng().gen_range(-2.0..2.0);
+        let fuzz: f64 = rand::rng().random_range(-2.0..2.0);
         let delay_secs = (base + fuzz).max(1.0);
         self.next_connect_after = Some(Instant::now() + Duration::from_secs_f64(delay_secs));
     }

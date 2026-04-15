@@ -1690,7 +1690,7 @@ pub fn generate_vrf_keypair_from_secret(secret: &[u8; 32]) -> VrfKeyPair {
 /// Generate a new VRF key pair using a cryptographically secure RNG.
 pub fn generate_vrf_keypair() -> VrfKeyPair {
     let mut seed = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    rand::RngCore::fill_bytes(&mut rand::rng(), &mut seed);
     let sk = SecretKey03::from_bytes(&seed);
     let secret_bytes = sk.to_bytes();
 

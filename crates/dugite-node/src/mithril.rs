@@ -2420,7 +2420,11 @@ mod tests {
         data.insert("b.txt".to_string(), hash_b);
 
         // Generate a real Ed25519 signature over the manifest hash.
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = {
+            let mut seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rng(), &mut seed);
+            ed25519_dalek::SigningKey::from_bytes(&seed)
+        };
         let vkey_bytes: [u8; 32] = signing_key.verifying_key().to_bytes();
 
         let manifest_hash = {
@@ -2478,11 +2482,19 @@ mod tests {
 
         // Use a valid key but wrong signature (all zeros is not a valid sig
         // for this message with overwhelming probability).
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = {
+            let mut seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rng(), &mut seed);
+            ed25519_dalek::SigningKey::from_bytes(&seed)
+        };
         let vkey_bytes = signing_key.verifying_key().to_bytes();
 
         // Create a valid-format but wrong signature.
-        let wrong_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let wrong_key = {
+            let mut seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rng(), &mut seed);
+            ed25519_dalek::SigningKey::from_bytes(&seed)
+        };
         let manifest_hash = compute_manifest_hash(&AncillaryManifest {
             data: data.clone(),
             signature: None,

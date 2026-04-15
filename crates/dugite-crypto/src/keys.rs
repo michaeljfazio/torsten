@@ -1,6 +1,6 @@
 use dugite_primitives::hash::{blake2b_224, Hash28};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -30,8 +30,11 @@ pub struct PaymentVerificationKey {
 
 impl PaymentSigningKey {
     pub fn generate() -> Self {
-        let signing_key = SigningKey::generate(&mut OsRng);
-        PaymentSigningKey { inner: signing_key }
+        let mut seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut seed);
+        PaymentSigningKey {
+            inner: SigningKey::from_bytes(&seed),
+        }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, KeyError> {
