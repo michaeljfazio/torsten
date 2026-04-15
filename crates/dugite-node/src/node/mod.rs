@@ -3526,11 +3526,14 @@ impl Node {
                     index: txin.txix as u32,
                 };
 
-                // Convert MemPackTxOut → TransactionOutput
-                // Only process entries with valid address and coin data.
-                // Tags 2/3 (Addr28Extra compact encoding) have opaque coin
-                // encoding that we cannot fully decode yet — skip them.
-                if txout.address.is_empty() || (txout.coin == 0 && txout.multi_asset.is_none()) {
+                // Convert MemPackTxOut → TransactionOutput.
+                //
+                // All tags (including 2/3 Addr28Extra compact forms) now
+                // produce a fully decoded address and coin value via
+                // dugite-serialization. A zero coin is legal for multi-asset
+                // entries; only truly malformed entries (empty address) are
+                // skipped.
+                if txout.address.is_empty() {
                     skipped += 1;
                     continue;
                 }
