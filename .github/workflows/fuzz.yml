@@ -34,7 +34,7 @@ jobs:
           - mempool_admission
           - epoch_transition
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@nightly
 
