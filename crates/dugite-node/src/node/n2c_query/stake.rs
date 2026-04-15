@@ -193,9 +193,40 @@ pub(crate) fn handle_spo_stake_distr(
 }
 
 /// Handle GetStakeSnapshots (tag 20).
-pub(crate) fn handle_stake_snapshots(state: &NodeStateSnapshot) -> QueryResult {
+///
+/// Argument: mandatory `tag(258) Set<KeyHash StakePool>`. An empty set
+/// requests all pools (Haskell's `getStakeSnapshots` semantics).
+///
+/// Before the fix for issue #406 the argument was ignored entirely and the
+/// response always contained every pool. This both violated the wire protocol
+/// (trailing CBOR bytes in the decoder) and broke compatibility with
+/// `cardano-cli query stake-snapshot --stake-pool-id <id>`.
+pub(crate) fn handle_stake_snapshots(
+    state: &NodeStateSnapshot,
+    decoder: &mut minicbor::Decoder<'_>,
+) -> QueryResult {
     debug!("Query: GetStakeSnapshots");
-    QueryResult::StakeSnapshots(state.stake_snapshots.clone())
+    let filter_pools = parse_pool_id_set(decoder);
+    let snapshots = &state.stake_snapshots;
+    if filter_pools.is_empty() {
+        QueryResult::StakeSnapshots(snapshots.clone())
+    } else {
+        let filtered_pools = snapshots
+            .pools
+            .iter()
+            .filter(|p| filter_pools.iter().any(|h| h == &p.pool_id))
+            .cloned()
+            .collect();
+        // Totals are global — matching Haskell's `StakeSnapshots` record, where
+        // `ssMarkTotal` / `ssSetTotal` / `ssGoTotal` are the total active stake
+        // across the whole epoch snapshot regardless of any pool filter.
+        QueryResult::StakeSnapshots(crate::node::n2c_query::types::StakeSnapshotsResult {
+            pools: filtered_pools,
+            total_mark_stake: snapshots.total_mark_stake,
+            total_set_stake: snapshots.total_set_stake,
+            total_go_stake: snapshots.total_go_stake,
+        })
+    }
 }
 
 /// Handle GetPoolDistr (tag 21) -- returns pool stake distribution.
@@ -861,30 +892,113 @@ mod tests {
 
     // ─── GetStakeSnapshots (tag 20) ────────────────────────────────────
 
-    #[test]
-    fn test_stake_snapshots() {
+    fn make_stake_snapshots_state() -> NodeStateSnapshot {
         use crate::node::n2c_query::types::{PoolStakeSnapshotEntry, StakeSnapshotsResult};
-        let state = NodeStateSnapshot {
+        NodeStateSnapshot {
             stake_snapshots: StakeSnapshotsResult {
-                pools: vec![PoolStakeSnapshotEntry {
-                    pool_id: vec![1u8; 28],
-                    mark_stake: 100,
-                    set_stake: 200,
-                    go_stake: 300,
-                }],
-                total_mark_stake: 100,
-                total_set_stake: 200,
-                total_go_stake: 300,
+                pools: vec![
+                    PoolStakeSnapshotEntry {
+                        pool_id: vec![1u8; 28],
+                        mark_stake: 100,
+                        set_stake: 200,
+                        go_stake: 300,
+                    },
+                    PoolStakeSnapshotEntry {
+                        pool_id: vec![2u8; 28],
+                        mark_stake: 1_000,
+                        set_stake: 2_000,
+                        go_stake: 3_000,
+                    },
+                ],
+                total_mark_stake: 10_100,
+                total_set_stake: 20_200,
+                total_go_stake: 30_300,
             },
             ..NodeStateSnapshot::default()
-        };
-        let result = handle_stake_snapshots(&state);
+        }
+    }
+
+    #[test]
+    fn test_stake_snapshots_empty_filter_returns_all_pools() {
+        let state = make_stake_snapshots_state();
+        let cbor = make_empty_filter_cbor();
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_stake_snapshots(&state, &mut dec);
+        match result {
+            QueryResult::StakeSnapshots(ss) => {
+                assert_eq!(ss.pools.len(), 2);
+                assert_eq!(ss.total_mark_stake, 10_100);
+                assert_eq!(ss.total_set_stake, 20_200);
+                assert_eq!(ss.total_go_stake, 30_300);
+            }
+            _ => panic!("Expected StakeSnapshots"),
+        }
+    }
+
+    #[test]
+    fn test_stake_snapshots_filter_single_pool() {
+        let state = make_stake_snapshots_state();
+        let cbor = make_pool_filter_cbor(&[2u8; 28]);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_stake_snapshots(&state, &mut dec);
         match result {
             QueryResult::StakeSnapshots(ss) => {
                 assert_eq!(ss.pools.len(), 1);
-                assert_eq!(ss.total_mark_stake, 100);
-                assert_eq!(ss.total_set_stake, 200);
-                assert_eq!(ss.total_go_stake, 300);
+                assert_eq!(ss.pools[0].pool_id, vec![2u8; 28]);
+                assert_eq!(ss.pools[0].mark_stake, 1_000);
+                // Totals are global even when filtered (matches Haskell semantics)
+                assert_eq!(ss.total_mark_stake, 10_100);
+                assert_eq!(ss.total_set_stake, 20_200);
+                assert_eq!(ss.total_go_stake, 30_300);
+            }
+            _ => panic!("Expected StakeSnapshots"),
+        }
+    }
+
+    /// Feed the full Shelley inner query body `[20, tag(258) [hash1, hash2]]`
+    /// through the same parsing the dispatcher would apply — verifies that the
+    /// argument is consumed correctly and filtering hits the expected pool set.
+    #[test]
+    fn test_stake_snapshots_parses_tagged_set_from_query_body() {
+        let state = make_stake_snapshots_state();
+
+        // Build the inner Shelley query body: [20, tag(258) [p1, p2]]
+        let mut buf = Vec::new();
+        let mut enc = minicbor::Encoder::new(&mut buf);
+        enc.array(2).unwrap();
+        enc.u32(20).unwrap();
+        enc.tag(minicbor::data::Tag::new(258)).unwrap();
+        enc.array(2).unwrap();
+        enc.bytes(&[1u8; 28]).unwrap();
+        enc.bytes(&[2u8; 28]).unwrap();
+
+        // Dispatcher would peel the outer array and read the tag u32 first.
+        let mut dec = minicbor::Decoder::new(&buf);
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u32().unwrap(), 20);
+        // Handler receives the decoder positioned at the argument set.
+        let result = handle_stake_snapshots(&state, &mut dec);
+        match result {
+            QueryResult::StakeSnapshots(ss) => {
+                assert_eq!(ss.pools.len(), 2);
+                assert_eq!(ss.pools[0].pool_id, vec![1u8; 28]);
+                assert_eq!(ss.pools[1].pool_id, vec![2u8; 28]);
+            }
+            _ => panic!("Expected StakeSnapshots"),
+        }
+    }
+
+    #[test]
+    fn test_stake_snapshots_filter_unknown_pool_returns_empty_list() {
+        let state = make_stake_snapshots_state();
+        let cbor = make_pool_filter_cbor(&[0xFFu8; 28]);
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let result = handle_stake_snapshots(&state, &mut dec);
+        match result {
+            QueryResult::StakeSnapshots(ss) => {
+                assert!(ss.pools.is_empty());
+                // Totals remain global
+                assert_eq!(ss.total_mark_stake, 10_100);
             }
             _ => panic!("Expected StakeSnapshots"),
         }

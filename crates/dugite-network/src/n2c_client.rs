@@ -425,9 +425,33 @@ impl N2CClient {
 
     /// Query stake snapshots (`GetStakeSnapshots` -- Shelley query tag 20).
     ///
-    /// Returns raw MsgResult CBOR payload.
+    /// Returns raw MsgResult CBOR payload. Requests snapshots for all pools.
+    ///
+    /// Note: `GetStakeSnapshots` takes a mandatory `Set (KeyHash StakePool)` argument.
+    /// An empty set requests all pools. See [`Self::query_stake_snapshots_for_pools`]
+    /// for per-pool filtering.
     pub async fn query_stake_snapshot(&mut self) -> Result<Vec<u8>, NetworkError> {
-        self.send_shelley_query(20).await
+        self.query_stake_snapshots_for_pools(&[]).await
+    }
+
+    /// Query stake snapshots for a specific set of pools
+    /// (`GetStakeSnapshots` -- Shelley query tag 20).
+    ///
+    /// Each entry in `pool_ids` must be a 28-byte pool key hash. Pass an empty
+    /// slice to request snapshots for all pools.
+    ///
+    /// Wire format:
+    /// `[3, [0, [0, [6, [20, tag(258) [<pool_hash>, ...]]]]]]`
+    ///
+    /// Returns raw MsgResult CBOR payload.
+    pub async fn query_stake_snapshots_for_pools(
+        &mut self,
+        pool_ids: &[Vec<u8>],
+    ) -> Result<Vec<u8>, NetworkError> {
+        let inner = encode_get_stake_snapshots_query(pool_ids)?;
+        let buf = encode_conway_block_query(&inner)?;
+        self.send_query(buf).await?;
+        self.recv_query().await
     }
 
     /// Query account state (`GetAccountState` -- Shelley query tag 29).
@@ -768,6 +792,29 @@ fn encode_hard_fork_query(sub_tag: u32) -> Result<Vec<u8>, NetworkError> {
     enc.array(1).map_err(cbor_err)?;
     enc.u32(sub_tag).map_err(cbor_err)?;
     Ok(buf)
+}
+
+/// Encode the inner body of a `GetStakeSnapshots` (Shelley tag 20) query.
+///
+/// Produces `[20, tag(258) [<pool_hash>, ...]]`. The tag(258) wrapper is
+/// always emitted, even for an empty set, because `GetStakeSnapshots` takes
+/// a mandatory `Set (KeyHash StakePool)` argument in Haskell. An empty set
+/// requests all pools.
+///
+/// Each pool ID must be a 28-byte key hash.
+pub(crate) fn encode_get_stake_snapshots_query(
+    pool_ids: &[Vec<u8>],
+) -> Result<Vec<u8>, NetworkError> {
+    let mut inner = Vec::new();
+    let mut enc = minicbor::Encoder::new(&mut inner);
+    enc.array(2).map_err(cbor_err)?;
+    enc.u32(20).map_err(cbor_err)?; // GetStakeSnapshots
+    enc.tag(minicbor::data::Tag::new(258)).map_err(cbor_err)?;
+    enc.array(pool_ids.len() as u64).map_err(cbor_err)?;
+    for pid in pool_ids {
+        enc.bytes(pid).map_err(cbor_err)?;
+    }
+    Ok(inner)
 }
 
 /// Encode a Conway-era BlockQuery (QueryIfCurrent) with full HFC telescope.
@@ -1497,5 +1544,69 @@ mod tests {
     fn test_utctime_to_iso8601() {
         let s = utctime_to_iso8601(2022, 298, 0);
         assert_eq!(s, "2022-10-25T00:00:00Z");
+    }
+
+    // ─── GetStakeSnapshots (tag 20) query encoding (issue #406) ──────────
+
+    /// Single-pool `GetStakeSnapshots` query must encode as
+    /// `[20, tag(258) [<28-byte hash>]]` exactly.
+    ///
+    /// Byte layout for a single-pool set containing 0xAA repeated 28 times:
+    /// - `82`                  — array(2)
+    /// - `14`                  — unsigned 20 (shelley tag)
+    /// - `d9 01 02`            — tag(258)
+    /// - `81`                  — array(1)
+    /// - `58 1c aa..aa` (x28)  — byte string, length 28
+    #[test]
+    fn test_encode_get_stake_snapshots_single_pool() {
+        let pool = vec![0xAAu8; 28];
+        let bytes = encode_get_stake_snapshots_query(&[pool]).unwrap();
+
+        let mut expected: Vec<u8> = Vec::new();
+        expected.push(0x82); // array(2)
+        expected.push(0x14); // 20
+        expected.extend_from_slice(&[0xd9, 0x01, 0x02]); // tag(258)
+        expected.push(0x81); // array(1)
+        expected.extend_from_slice(&[0x58, 0x1c]); // bstr(28)
+        expected.extend_from_slice(&[0xAA; 28]);
+
+        assert_eq!(
+            hex::encode(&bytes),
+            hex::encode(&expected),
+            "single-pool GetStakeSnapshots wire mismatch"
+        );
+    }
+
+    /// Empty-set (all pools) `GetStakeSnapshots` query must still emit the
+    /// tag(258) wrapper: `[20, tag(258) []]`. cardano-node rejects any form
+    /// without the tag.
+    #[test]
+    fn test_encode_get_stake_snapshots_empty_set_has_tag() {
+        let bytes = encode_get_stake_snapshots_query(&[]).unwrap();
+
+        // Expected: 82 14 d9 01 02 80
+        let expected: Vec<u8> = vec![0x82, 0x14, 0xd9, 0x01, 0x02, 0x80];
+        assert_eq!(
+            hex::encode(&bytes),
+            hex::encode(&expected),
+            "empty GetStakeSnapshots must include tag(258) wrapper"
+        );
+    }
+
+    /// Multi-pool `GetStakeSnapshots` must order pools as supplied.
+    #[test]
+    fn test_encode_get_stake_snapshots_two_pools() {
+        let pool_a = vec![0x11u8; 28];
+        let pool_b = vec![0x22u8; 28];
+        let bytes = encode_get_stake_snapshots_query(&[pool_a.clone(), pool_b.clone()]).unwrap();
+
+        // Decode back and verify structure.
+        let mut dec = minicbor::Decoder::new(&bytes);
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.u32().unwrap(), 20);
+        assert_eq!(dec.tag().unwrap().as_u64(), 258);
+        assert_eq!(dec.array().unwrap(), Some(2));
+        assert_eq!(dec.bytes().unwrap(), pool_a.as_slice());
+        assert_eq!(dec.bytes().unwrap(), pool_b.as_slice());
     }
 }
