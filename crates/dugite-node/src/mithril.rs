@@ -149,6 +149,30 @@ fn verify_block_checksum(block_data: &[u8], expected: u32) -> bool {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Read the full body of a reqwest response as text, then deserialize it as
+/// JSON. On failure the error carries `label` and a 512-char prefix of the
+/// offending body, so logs point at the bad field rather than the opaque
+/// reqwest `error decoding response body` default.
+async fn fetch_and_decode_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    label: &'static str,
+) -> Result<T> {
+    let body = response
+        .text()
+        .await
+        .with_context(|| format!("{label}: failed to read response body"))?;
+    serde_json::from_str::<T>(&body).map_err(|e| {
+        let prefix_len = body.len().min(512);
+        let prefix: String = body.chars().take(prefix_len).collect();
+        anyhow::anyhow!(
+            "{label}: failed to decode JSON ({e}); body prefix ({} bytes of {}): {}",
+            prefix.len(),
+            body.len(),
+            prefix
+        )
+    })
+}
+
 /// Get the aggregator URL for a given network magic
 pub fn aggregator_url(network_magic: u64) -> &'static str {
     match network_magic {
@@ -189,14 +213,16 @@ pub async fn import_snapshot(
         .user_agent("dugite-node/0.1")
         .build()?;
 
-    let snapshots: Vec<SnapshotListItem> = client
-        .get(format!("{aggregator}/artifact/snapshots"))
-        .send()
-        .await?
-        .error_for_status()
-        .context("Failed to fetch snapshot list")?
-        .json()
-        .await?;
+    let snapshots: Vec<SnapshotListItem> = fetch_and_decode_json(
+        client
+            .get(format!("{aggregator}/artifact/snapshots"))
+            .send()
+            .await?
+            .error_for_status()
+            .context("Failed to fetch V1 snapshot list")?,
+        "V1 /artifact/snapshots list",
+    )
+    .await?;
 
     let latest = snapshots
         .first()
@@ -210,14 +236,16 @@ pub async fn import_snapshot(
     );
 
     // Step 2: Get download locations
-    let detail: SnapshotDetail = client
-        .get(format!("{aggregator}/artifact/snapshot/{}", latest.digest))
-        .send()
-        .await?
-        .error_for_status()
-        .context("Failed to fetch snapshot detail")?
-        .json()
-        .await?;
+    let detail: SnapshotDetail = fetch_and_decode_json(
+        client
+            .get(format!("{aggregator}/artifact/snapshot/{}", latest.digest))
+            .send()
+            .await?
+            .error_for_status()
+            .context("Failed to fetch V1 snapshot detail")?,
+        "V1 /artifact/snapshot/{hash} detail",
+    )
+    .await?;
 
     let download_url = detail
         .locations
@@ -1476,15 +1504,16 @@ pub(crate) async fn download_ancillary(
     // [`CardanoDatabaseSnapshotListItem`], then fetch the detail endpoint
     // below for full location info. See #405.
     info!("Fetching Cardano Database snapshot list from V2 API...");
-    let snapshots: Vec<CardanoDatabaseSnapshotListItem> = client
-        .get(format!("{aggregator}/artifact/cardano-database"))
-        .send()
-        .await?
-        .error_for_status()
-        .context("Failed to fetch Cardano Database snapshot list")?
-        .json()
-        .await
-        .context("Failed to decode Cardano Database snapshot list response")?;
+    let snapshots: Vec<CardanoDatabaseSnapshotListItem> = fetch_and_decode_json(
+        client
+            .get(format!("{aggregator}/artifact/cardano-database"))
+            .send()
+            .await?
+            .error_for_status()
+            .context("Failed to fetch Cardano Database snapshot list")?,
+        "V2 /artifact/cardano-database list",
+    )
+    .await?;
 
     let latest = snapshots
         .first()
@@ -1498,18 +1527,19 @@ pub(crate) async fn download_ancillary(
     );
 
     // Step 2: Fetch snapshot detail to get full ancillary location info.
-    let snapshot_detail: CardanoDatabaseSnapshot = client
-        .get(format!(
-            "{aggregator}/artifact/cardano-database/{}",
-            latest.hash
-        ))
-        .send()
-        .await?
-        .error_for_status()
-        .context("Failed to fetch Cardano Database snapshot detail")?
-        .json()
-        .await
-        .context("Failed to decode Cardano Database snapshot detail response")?;
+    let snapshot_detail: CardanoDatabaseSnapshot = fetch_and_decode_json(
+        client
+            .get(format!(
+                "{aggregator}/artifact/cardano-database/{}",
+                latest.hash
+            ))
+            .send()
+            .await?
+            .error_for_status()
+            .context("Failed to fetch Cardano Database snapshot detail")?,
+        "V2 /artifact/cardano-database/{hash} detail",
+    )
+    .await?;
 
     // Step 3: Extract the first cloud_storage URI with a plain string value.
     let download_url = snapshot_detail
@@ -2790,6 +2820,105 @@ mod tests {
         assert_eq!(
             detail.ancillary.locations[0].uri.as_str().unwrap(),
             "https://storage.googleapis.com/cdn/preview-e1268-i25366.ancillary.tar.zst"
+        );
+    }
+
+    /// Regression for #421: deserialize the exact verbatim V2 `cardano-database`
+    /// list response captured from the live pre-release-preview aggregator on
+    /// 2026-04-15. Fails if the live V2 list shape ever drifts away from what
+    /// [`CardanoDatabaseSnapshotListItem`] accepts.
+    #[test]
+    fn test_421_live_v2_list_verbatim() {
+        let list_json = include_str!("../tests/fixtures/mithril-421-list.json");
+        let items: Vec<CardanoDatabaseSnapshotListItem> = serde_json::from_str(list_json)
+            .expect("V2 list fixture must decode (see #421 — update fixture if aggregator drifts)");
+        assert_eq!(items.len(), 20);
+        assert_eq!(items[0].beacon.epoch, 1268);
+        assert_eq!(items[0].beacon.immutable_file_number, 25367);
+    }
+
+    /// Regression for #421: deserialize the exact verbatim V2 `cardano-database`
+    /// detail response captured from the live aggregator on 2026-04-15. Covers
+    /// the full `ancillary` / `digests` / `immutables` shape including the
+    /// `{"Template": "..."}` object URI for the immutables location.
+    #[test]
+    fn test_421_live_v2_detail_verbatim() {
+        let detail_json = include_str!("../tests/fixtures/mithril-421-detail.json");
+        let detail: CardanoDatabaseSnapshot =
+            serde_json::from_str(detail_json).expect("V2 detail fixture must decode (see #421)");
+        assert_eq!(detail.beacon.epoch, 1268);
+        assert_eq!(detail.ancillary.locations.len(), 1);
+        assert_eq!(detail.ancillary.locations[0].location_type, "cloud_storage");
+        assert!(detail.ancillary.locations[0].uri.is_string());
+    }
+
+    /// Regression for #421: deserialize the exact verbatim V1 `/artifact/snapshots`
+    /// list response. The V1 path was previously unwrapped (bare `.await?`) so a
+    /// decode failure surfaced as the opaque top-level reqwest Display
+    /// "error decoding response body" — the exact message the issue reports.
+    #[test]
+    fn test_421_live_v1_list_verbatim() {
+        let list_json = include_str!("../tests/fixtures/mithril-421-v1-list.json");
+        let items: Vec<SnapshotListItem> =
+            serde_json::from_str(list_json).expect("V1 list fixture must decode (see #421)");
+        assert!(!items.is_empty());
+        assert!(items[0].size > 0);
+    }
+
+    /// Regression for #421: deserialize the exact verbatim V1
+    /// `/artifact/snapshot/{hash}` detail response.
+    #[test]
+    fn test_421_live_v1_detail_verbatim() {
+        let detail_json = include_str!("../tests/fixtures/mithril-421-v1-detail.json");
+        let detail: SnapshotDetail =
+            serde_json::from_str(detail_json).expect("V1 detail fixture must decode (see #421)");
+        assert!(detail.size > 0);
+        assert!(!detail.locations.is_empty());
+    }
+
+    /// #421 helper: on a malformed body, `fetch_and_decode_json` must surface
+    /// the offending body prefix so logs pinpoint the broken field. Uses a
+    /// mock HTTP server so there is no network dependency.
+    #[tokio::test]
+    async fn test_421_fetch_and_decode_json_logs_body_prefix_on_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bad_body = r#"{"beacon": "not_an_object"}"#;
+        let bad_body_owned = bad_body.to_string();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    bad_body_owned.len(),
+                    bad_body_owned
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/bogus"))
+            .send()
+            .await
+            .expect("send")
+            .error_for_status()
+            .expect("2xx");
+        let result: Result<CardanoDatabaseSnapshot> =
+            fetch_and_decode_json(resp, "unit-test V2 detail").await;
+        let err = result.expect_err("must fail on malformed body");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unit-test V2 detail"),
+            "error must carry the call-site label, got: {msg}"
+        );
+        assert!(
+            msg.contains("not_an_object"),
+            "error must include the offending body prefix, got: {msg}"
         );
     }
 }
