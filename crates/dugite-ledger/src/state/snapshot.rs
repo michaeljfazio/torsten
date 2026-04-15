@@ -28,6 +28,34 @@ use super::{LedgerError, LedgerState, MAX_SNAPSHOT_SIZE};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
+/// `std::io::Write` adapter that forwards every byte to an inner writer
+/// and simultaneously feeds it into a blake2b-256 hasher.
+///
+/// Used by [`LedgerState::save_snapshot`] so that the snapshot digest can
+/// be computed while `bincode::serialize_into` streams the payload to a
+/// buffered file, without first materialising the whole payload in a
+/// `Vec<u8>`.
+struct HashingWriter<'a, W: std::io::Write> {
+    inner: &'a mut W,
+    hasher: dugite_primitives::hash::Blake2b256Hasher,
+    bytes_written: u64,
+}
+
+impl<'a, W: std::io::Write> std::io::Write for HashingWriter<'a, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        // Only hash bytes that were actually accepted by the underlying
+        // writer — partial writes must not double-hash the prefix.
+        self.hasher.update(&buf[..n]);
+        self.bytes_written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl LedgerState {
     /// Current snapshot format version.
     ///
@@ -55,42 +83,85 @@ impl LedgerState {
     /// The write is atomic: data is written to a `.tmp` file and then renamed
     /// over the final path so that a crash mid-write does not produce a partial
     /// or corrupt snapshot file.
+    ///
+    /// The payload is streamed through a two-pass write:
+    ///
+    ///   1. First pass: `bincode::serialize_into` writes directly to the
+    ///      temp file via a buffered writer while simultaneously feeding
+    ///      every byte into an incremental blake2b hasher. No full
+    ///      in-memory `Vec<u8>` copy of the snapshot is ever produced.
+    ///   2. Second pass: seek back to the header slot and overwrite the
+    ///      placeholder checksum with the computed hash.
+    ///
+    /// Prior to #403 this function allocated a single contiguous `Vec<u8>`
+    /// via `bincode::serialize(&snapshot)` before writing it out. At
+    /// preview scale (~3M UTxOs in the in-memory backend) that allocation
+    /// was multiple GB and contributed materially to the post-replay OOM
+    /// that killed dugite-node on 32 GB hosts.
     pub fn save_snapshot(&self, path: &Path) -> Result<(), LedgerError> {
+        use dugite_primitives::hash::Blake2b256Hasher;
+        use std::io::{Seek, SeekFrom, Write};
+
         let tmp_path = path.with_extension("tmp");
 
-        // Serialize the ledger state to bincode.
+        // Build the serde-friendly snapshot view. For the LSM backend this is
+        // cheap (empty `utxo_set`); for the in-memory backend it still clones
+        // the UTxO `HashMap`, but that cost is bounded (#403 follow-up work
+        // can thread a borrowing wrapper through bincode if needed).
         let snapshot = super::snapshot_format::LedgerStateSnapshot::from(self);
-        let data = bincode::serialize(&snapshot).map_err(|e| {
-            LedgerError::EpochTransition(format!("Failed to serialize ledger state: {e}"))
-        })?;
 
-        // Compute checksum over the serialized data
-        let checksum = dugite_primitives::hash::blake2b_256(&data);
-
-        // Write header + data using a single buffered write.
-        // Header: "DUGT" (4 bytes) + version (1 byte) + blake2b checksum (32 bytes)
-        use std::io::Write;
         let file = std::fs::File::create(&tmp_path)
             .map_err(|e| LedgerError::EpochTransition(format!("Failed to create snapshot: {e}")))?;
         let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+
+        // Header: "DUGT" (4) + version (1) + blake2b placeholder (32).
+        // We fill the checksum slot with zeros, remember its offset, and
+        // rewrite it once the payload has been streamed and hashed.
         writer.write_all(b"DUGT").map_err(|e| {
             LedgerError::EpochTransition(format!("Failed to write snapshot header: {e}"))
         })?;
         writer.write_all(&[Self::SNAPSHOT_VERSION]).map_err(|e| {
             LedgerError::EpochTransition(format!("Failed to write snapshot version: {e}"))
         })?;
+        const CHECKSUM_LEN: usize = 32;
+        let checksum_offset: u64 = 4 + 1;
+        writer.write_all(&[0u8; CHECKSUM_LEN]).map_err(|e| {
+            LedgerError::EpochTransition(format!("Failed to write checksum placeholder: {e}"))
+        })?;
+
+        // Stream the payload through a `HashingWriter` that forwards writes
+        // to the buffered file while updating a blake2b-256 hasher in-line.
+        // `bincode::serialize_into` never materialises the whole payload in
+        // memory — it walks the struct and emits bytes incrementally.
+        let mut hashing_writer = HashingWriter {
+            inner: &mut writer,
+            hasher: Blake2b256Hasher::new(),
+            bytes_written: 0,
+        };
+        bincode::serialize_into(&mut hashing_writer, &snapshot).map_err(|e| {
+            LedgerError::EpochTransition(format!("Failed to serialize ledger state: {e}"))
+        })?;
+        let payload_bytes = hashing_writer.bytes_written;
+        let checksum = hashing_writer.hasher.finalize();
+
+        // Rewrite the checksum placeholder now that the payload hash is
+        // known.  Flush afterwards so the file on disk is consistent before
+        // the atomic rename.
+        writer.flush().map_err(|e| {
+            LedgerError::EpochTransition(format!("Failed to flush snapshot payload: {e}"))
+        })?;
+        writer
+            .seek(SeekFrom::Start(checksum_offset))
+            .map_err(|e| LedgerError::EpochTransition(format!("Failed to seek snapshot: {e}")))?;
         writer.write_all(checksum.as_bytes()).map_err(|e| {
             LedgerError::EpochTransition(format!("Failed to write snapshot checksum: {e}"))
-        })?;
-        writer.write_all(&data).map_err(|e| {
-            LedgerError::EpochTransition(format!("Failed to write snapshot data: {e}"))
         })?;
         writer
             .flush()
             .map_err(|e| LedgerError::EpochTransition(format!("Failed to flush snapshot: {e}")))?;
         drop(writer);
 
-        let total_bytes = 4 + 1 + 32 + data.len();
+        let total_bytes = 4 + 1 + CHECKSUM_LEN as u64 + payload_bytes;
 
         std::fs::rename(&tmp_path, path)
             .map_err(|e| LedgerError::EpochTransition(format!("Failed to rename snapshot: {e}")))?;
@@ -286,13 +357,16 @@ impl LedgerState {
     /// If the ledger has in-memory UTxOs (from bincode snapshot load),
     /// they are migrated to the store before attachment.
     pub fn attach_utxo_store(&mut self, mut store: crate::utxo_store::UtxoStore) {
-        // Migrate any in-memory UTxOs to the store
+        // Migrate any in-memory UTxOs to the store. `iter()` used to
+        // materialise every entry into a throw-away `Vec` before the copy
+        // loop; at preview scale (~3M UTxOs) that intermediate buffer was
+        // multi-GB.  Stream the HashMap directly instead (#403).
         if !self.utxo.utxo_set.is_empty() && !self.utxo.utxo_set.has_store() {
             let count = self.utxo.utxo_set.len();
             tracing::info!("Migrating {} in-memory UTxOs to on-disk store", count);
-            for (input, output) in self.utxo.utxo_set.iter() {
-                store.insert(input, output);
-            }
+            self.utxo.utxo_set.scan_all(|input, output| {
+                store.insert(input.clone(), output.clone());
+            });
         }
         store.set_indexing_enabled(true);
         store.rebuild_address_index();

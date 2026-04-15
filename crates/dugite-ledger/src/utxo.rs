@@ -365,14 +365,38 @@ impl UtxoSet {
     /// Iterate over all UTxOs.
     /// Returns owned tuples (compatible with both in-memory and on-disk backends).
     /// For on-disk stores, this performs a full LSM scan — use sparingly.
+    ///
+    /// Prefer [`scan_all`] for hot paths: this helper materialises the whole
+    /// set in a single `Vec`, which at preview scale (~3M UTxOs) is multiple
+    /// GB and was implicated in the #403 post-replay OOM hang. Retained for
+    /// test callers that want a concrete collection.
+    ///
+    /// [`scan_all`]: Self::scan_all
     pub fn iter(&self) -> Vec<(TransactionInput, TransactionOutput)> {
+        let mut out = Vec::with_capacity(self.len());
+        self.scan_all(|input, output| out.push((input.clone(), output.clone())));
+        out
+    }
+
+    /// Stream every live UTxO entry into a callback without materialising
+    /// the full set in memory.
+    ///
+    /// For the in-memory backend this is a direct `HashMap` walk; for the
+    /// LSM-backed store it delegates to
+    /// [`UtxoStore::scan_all`](crate::utxo_store::UtxoStore::scan_all),
+    /// which splits the key space into 256 chunks so peak memory stays
+    /// bounded regardless of UTxO set size (#403).
+    pub fn scan_all<F>(&self, mut f: F)
+    where
+        F: FnMut(&TransactionInput, &TransactionOutput),
+    {
         if let Some(ref store) = self.store {
-            return store.iter();
+            store.scan_all(|input, output| f(&input, &output));
+            return;
         }
-        self.utxos
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+        for (k, v) in &self.utxos {
+            f(k, v);
+        }
     }
 }
 

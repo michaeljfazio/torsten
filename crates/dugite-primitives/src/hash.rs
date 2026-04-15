@@ -150,6 +150,80 @@ pub fn blake2b_224(data: &[u8]) -> Hash28 {
     Hash(out)
 }
 
+/// Streaming Blake2b-256 hasher.
+///
+/// Use this when hashing data that is streamed or built incrementally (for
+/// example, `std::io::Write` adapters for `bincode::serialize_into`) so that
+/// the caller never has to materialise the whole payload in a `Vec<u8>` just
+/// to compute its digest.
+///
+/// Cross-platform wrapper: `blake2b_simd` on x86_64 (SSE/AVX), `blake2`
+/// (RustCrypto) on other targets, matching the one-shot [`blake2b_256`].
+pub struct Blake2b256Hasher {
+    #[cfg(target_arch = "x86_64")]
+    inner: blake2b_simd::State,
+    #[cfg(not(target_arch = "x86_64"))]
+    inner: blake2::Blake2b<blake2::digest::consts::U32>,
+}
+
+impl Blake2b256Hasher {
+    /// Create a new empty hasher.
+    #[cfg(target_arch = "x86_64")]
+    pub fn new() -> Self {
+        Self {
+            inner: blake2b_simd::Params::new().hash_length(32).to_state(),
+        }
+    }
+
+    /// Create a new empty hasher.
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn new() -> Self {
+        Self {
+            inner: <blake2::Blake2b<blake2::digest::consts::U32> as blake2::Digest>::new(),
+        }
+    }
+
+    /// Absorb additional bytes into the running digest.
+    #[cfg(target_arch = "x86_64")]
+    pub fn update(&mut self, data: &[u8]) {
+        self.inner.update(data);
+    }
+
+    /// Absorb additional bytes into the running digest.
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn update(&mut self, data: &[u8]) {
+        <blake2::Blake2b<blake2::digest::consts::U32> as blake2::Digest>::update(
+            &mut self.inner,
+            data,
+        );
+    }
+
+    /// Finalise the digest and return a 32-byte hash.
+    #[cfg(target_arch = "x86_64")]
+    pub fn finalize(self) -> Hash32 {
+        let hash = self.inner.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(hash.as_bytes());
+        Hash(out)
+    }
+
+    /// Finalise the digest and return a 32-byte hash.
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn finalize(self) -> Hash32 {
+        let result =
+            <blake2::Blake2b<blake2::digest::consts::U32> as blake2::Digest>::finalize(self.inner);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&result);
+        Hash(out)
+    }
+}
+
+impl Default for Blake2b256Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Hash `[tag_byte] || data` with Blake2b-224.
 ///
 /// Matches pallas `Hasher::<224>::hash_tagged(&self.0, VERSION as u8)`

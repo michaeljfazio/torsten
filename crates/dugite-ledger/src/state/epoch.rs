@@ -913,9 +913,14 @@ impl LedgerState {
         let mut new_ptr_stake: HashMap<dugite_primitives::credentials::Pointer, u64> =
             HashMap::new();
 
-        for (_, output) in self.utxo.utxo_set.iter() {
+        // Stream the UTxO set — `iter()` used to materialise the full set
+        // into a single `Vec`, which at preview scale (~3M entries) peaked at
+        // several GB and was one of the contributors to the #403 post-replay
+        // OOM. `scan_all` walks the set one entry at a time.
+        let ptr_stake_excluded = self.epochs.ptr_stake_excluded;
+        self.utxo.utxo_set.scan_all(|_, output| {
             let coin = output.value.coin.0;
-            match stake_routing(&output.address, self.epochs.ptr_stake_excluded) {
+            match stake_routing(&output.address, ptr_stake_excluded) {
                 StakeRouting::Credential(cred_hash) => {
                     *new_map.entry(cred_hash).or_insert(Lovelace(0)) += Lovelace(coin);
                 }
@@ -924,7 +929,7 @@ impl LedgerState {
                 }
                 StakeRouting::None => {}
             }
-        }
+        });
         // Also ensure all registered stake credentials have entries (even with 0 stake)
         for cred_hash in self.certs.delegations.keys() {
             new_map.entry(*cred_hash).or_insert(Lovelace(0));
