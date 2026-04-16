@@ -1,8 +1,10 @@
 use super::{
     credential_to_hash, GovRelation, GovernanceState, LedgerState, PGraph, PRoot, ProposalState,
 };
+use super::{CertSubState, EpochSubState, GovSubState};
 use crate::ledger_seq::{GovernanceChange, LedgerDelta};
 use dugite_primitives::hash::{Hash28, Hash32};
+use dugite_primitives::protocol_params::ProtocolParameters;
 use dugite_primitives::time::EpochNo;
 use dugite_primitives::transaction::{
     Anchor, DRep, GovAction, GovActionId, ProposalProcedure, Rational, Vote, Voter, VotingProcedure,
@@ -634,495 +636,7 @@ impl LedgerState {
     /// When `None` (genesis, or loading an old snapshot without this field), we fall
     /// back to live-state ratification (the pre-snapshot behavior).
     pub fn ratify_proposals(&mut self) {
-        // Lazy forest reconstruction for backward compatibility with old snapshots
-        // that lack proposal_roots / proposal_graph.  Runs once per node startup
-        // from a pre-forest snapshot, then the forest is persisted in subsequent saves.
-        if self.gov.governance.proposal_roots == GovRelation::default()
-            && !self.gov.governance.proposals.is_empty()
-        {
-            let (roots, graph) = rebuild_forest_from_flat(
-                &self.gov.governance.proposals,
-                &self.gov.governance.enacted_pparam_update,
-                &self.gov.governance.enacted_hard_fork,
-                &self.gov.governance.enacted_committee,
-                &self.gov.governance.enacted_constitution,
-            );
-            let gov = Arc::make_mut(&mut self.gov.governance);
-            gov.proposal_roots = roots;
-            gov.proposal_graph = graph;
-        }
-
-        let total_drep_stake = self.compute_total_drep_stake();
-        // Pre-compute DRep voting power once (O(delegations)) instead of per-DRep per-proposal
-        let (drep_power_cache, no_confidence_stake, _abstain_stake) = self.build_drep_power_cache();
-
-        // Diagnostic: DRep distribution details for governance debugging
-        {
-            let cache_sum: u64 = drep_power_cache.values().sum();
-            let active_dreps = self
-                .gov
-                .governance
-                .dreps
-                .values()
-                .filter(|d| d.active)
-                .count();
-            let total_dreps = self.gov.governance.dreps.len();
-            debug!(
-                epoch = self.epoch.0,
-                drep_cache_size = drep_power_cache.len(),
-                drep_cache_sum = cache_sum,
-                no_confidence_stake,
-                _abstain_stake,
-                total_drep_stake,
-                active_dreps,
-                total_dreps,
-                "DRep distribution for ratification"
-            );
-        }
-
-        // SPO voting power: use the **set** snapshot (= previous epoch's mark),
-        // matching Haskell's `dpStakePoolDistr` in the DRep pulser.
-        //
-        // After SNAP rotation (mark→set→go), `self.epochs.snapshots.mark` is the NEW
-        // mark for the upcoming epoch, while `self.epochs.snapshots.set` holds the mark
-        // from the PREVIOUS boundary — which is when the Haskell DRep pulser was
-        // initialized and captured `ssStakeMarkPoolDistr`.  Using `mark` here
-        // caused a one-epoch SPO stake mismatch, leading to HardForkInitiation
-        // proposals being ratified one epoch early (see #332).
-        //
-        // We clone the pool_stake map to avoid holding an immutable borrow on
-        // `self.epochs.snapshots` across the mutable `self.enact_gov_action()` calls.
-        let ratify_pool_stake: Option<HashMap<Hash28, Lovelace>> = self
-            .epochs
-            .snapshots
-            .set
-            .as_ref()
-            .map(|s| s.pool_stake.clone());
-        let ratify_pool_stake_ref = ratify_pool_stake.as_ref();
-        let total_spo_stake: u64 = ratify_pool_stake_ref
-            .map(|ps| {
-                ps.values()
-                    .fold(0u64, |acc, s| acc.saturating_add(s.0))
-                    .max(1)
-            })
-            .unwrap_or_else(|| self.compute_total_spo_stake());
-
-        // Determine the source of proposals, votes, and committee state:
-        // prefer the frozen ratification snapshot, fall back to live state.
-        let snapshot = self.gov.governance.ratification_snapshot.clone();
-        let using_snapshot = snapshot.is_some();
-
-        let (
-            snap_proposals,
-            snap_votes,
-            snap_committee_hot_keys,
-            snap_committee_expiration,
-            snap_committee_resigned,
-            snap_committee_threshold,
-            _snap_no_confidence,
-            mut enacted_pparam,
-            mut enacted_hardfork,
-            mut enacted_committee_root,
-            mut enacted_constitution,
-        ) = if let Some(ref snap) = snapshot {
-            (
-                snap.proposals.clone(),
-                snap.votes_by_action.clone(),
-                snap.committee_hot_keys.clone(),
-                snap.committee_expiration.clone(),
-                snap.committee_resigned.clone(),
-                snap.committee_threshold.clone(),
-                snap.no_confidence,
-                snap.enacted_pparam_update.clone(),
-                snap.enacted_hard_fork.clone(),
-                snap.enacted_committee.clone(),
-                snap.enacted_constitution.clone(),
-            )
-        } else {
-            // Fallback: live state (first epoch or old snapshot without this field)
-            let gov = &self.gov.governance;
-            (
-                gov.proposals.clone(),
-                gov.votes_by_action.clone(),
-                gov.committee_hot_keys.clone(),
-                gov.committee_expiration.clone(),
-                gov.committee_resigned.clone(),
-                gov.committee_threshold.clone(),
-                gov.no_confidence,
-                gov.enacted_pparam_update.clone(),
-                gov.enacted_hard_fork.clone(),
-                gov.enacted_committee.clone(),
-                gov.enacted_constitution.clone(),
-            )
-        };
-
-        // Frozen vote delegations for default SPO vote computation, matching
-        // Haskell's `dpDefaultDRepVoteDelegs` from the DRep pulser.
-        let snap_vote_delegations: Option<HashMap<Hash32, DRep>> = if let Some(ref snap) = snapshot
-        {
-            if snap.vote_delegations.is_empty() {
-                // Old snapshot without this field — fall back to live state.
-                None
-            } else {
-                Some(snap.vote_delegations.clone())
-            }
-        } else {
-            None
-        };
-        let snap_vote_delegations_ref = snap_vote_delegations.as_ref();
-
-        // Collect all proposals sorted by priority (lower = higher priority)
-        let mut candidates: Vec<(GovActionId, GovAction, EpochNo)> = snap_proposals
-            .iter()
-            .map(|(id, state)| {
-                (
-                    id.clone(),
-                    state.procedure.gov_action.clone(),
-                    state.expires_epoch,
-                )
-            })
-            .collect();
-        candidates.sort_by_key(|(_, action, _)| gov_action_priority(action));
-
-        debug!(
-            epoch = self.epoch.0,
-            active_proposals = candidates.len(),
-            total_drep_stake,
-            total_spo_stake,
-            no_confidence_stake,
-            using_snapshot,
-            bootstrap = self.is_bootstrap_phase(),
-            protocol_version = self.epochs.protocol_params.protocol_version_major,
-            cc_members = snap_committee_expiration.len(),
-            cc_hot_keys = snap_committee_hot_keys.len(),
-            cc_threshold = ?snap_committee_threshold,
-            "Governance ratification: evaluating proposals"
-        );
-
-        let mut ratified = Vec::new();
-        let mut delayed = false;
-        // Track cumulative enacted treasury withdrawals across the ratification
-        // pass so that multiple TreasuryWithdrawals proposals in the same epoch
-        // cannot collectively exceed the treasury balance (Haskell: checkWithdrawals).
-        let mut enacted_withdrawals_total: u64 = 0;
-
-        for (action_id, action, expires) in &candidates {
-            // Per Haskell RATIFY: skip proposals whose expiry epoch has passed.
-            // `gasExpiresAfter < reCurrentEpoch` — Haskell's `reCurrentEpoch` is
-            // the epoch during which the DRep pulser ran (self.epoch = old epoch),
-            // matching `currentEpoch` at the time RATIFY is evaluated.
-            if *expires < self.epoch {
-                continue;
-            }
-
-            // Check prev_action_id chain against the threaded enacted roots
-            if !prev_action_as_expected(
-                action,
-                &enacted_pparam,
-                &enacted_hardfork,
-                &enacted_committee_root,
-                &enacted_constitution,
-            ) {
-                trace!(
-                    action_id = %action_id.transaction_id.to_hex(),
-                    action_type = ?std::mem::discriminant(action),
-                    "Governance proposal: prev_action_id chain mismatch — skipping"
-                );
-                continue;
-            }
-
-            // If a delaying action was already enacted this epoch, skip remaining
-            if delayed {
-                debug!(
-                    action_id = %action_id.transaction_id.to_hex(),
-                    "Governance proposal: delayed by previously enacted action"
-                );
-                continue;
-            }
-
-            // Check voting thresholds using snapshot data
-            if let Some(state) = snap_proposals.get(action_id) {
-                let remaining_treasury = self
-                    .epochs
-                    .treasury
-                    .0
-                    .saturating_sub(enacted_withdrawals_total);
-                let met = self.check_ratification(
-                    action_id,
-                    state,
-                    total_drep_stake,
-                    total_spo_stake,
-                    &drep_power_cache,
-                    no_confidence_stake,
-                    &snap_votes,
-                    &snap_committee_hot_keys,
-                    &snap_committee_expiration,
-                    &snap_committee_resigned,
-                    &snap_committee_threshold,
-                    remaining_treasury,
-                    ratify_pool_stake_ref,
-                    snap_vote_delegations_ref,
-                );
-                if met {
-                    debug!(
-                        action_id = %action_id.transaction_id.to_hex(),
-                        action_type = ?std::mem::discriminant(action),
-                        "Governance proposal RATIFIED"
-                    );
-                    // Enact immediately and update threaded roots
-                    self.enact_gov_action(action);
-                    // Track cumulative treasury withdrawals for aggregate cap
-                    if let GovAction::TreasuryWithdrawals { withdrawals, .. } = action {
-                        enacted_withdrawals_total += withdrawals
-                            .values()
-                            .fold(0u64, |acc, a| acc.saturating_add(a.0));
-                    }
-                    // Update the threaded local enacted roots (for chaining
-                    // within this ratification pass)
-                    update_enacted_root_local(
-                        action_id,
-                        action,
-                        &mut enacted_pparam,
-                        &mut enacted_hardfork,
-                        &mut enacted_committee_root,
-                        &mut enacted_constitution,
-                    );
-                    ratified.push(action_id.clone());
-                    if is_delaying_action(action) {
-                        delayed = true;
-                    }
-                } else if !matches!(action, GovAction::InfoAction) {
-                    trace!(
-                        action_id = %action_id.transaction_id.to_hex(),
-                        action_type = ?std::mem::discriminant(action),
-                        "Governance proposal NOT ratified"
-                    );
-                }
-            }
-        }
-
-        // After ratification pass, persist the final enacted roots to live state
-        {
-            let gov = Arc::make_mut(&mut self.gov.governance);
-            gov.enacted_pparam_update = enacted_pparam;
-            gov.enacted_hard_fork = enacted_hardfork;
-            gov.enacted_committee = enacted_committee_root;
-            gov.enacted_constitution = enacted_constitution;
-        }
-
-        // ── proposalsApplyEnactment ──────────────────────────────────────
-        //
-        // Per Haskell `proposalsApplyEnactment` in Conway.Governance.Proposals:
-        //   1. Remove expired proposals + all transitive descendants
-        //   2. Remove enacted proposals + refund deposits
-        //   3. For each enacted proposal (sequentially):
-        //      a. Find siblings (other children of same root in purpose tree)
-        //      b. Remove siblings + all descendants
-        //      c. Promote enacted proposal to new root
-        //
-        // Step 1 was previously in epoch.rs; it is now here to match Haskell
-        // ordering (expired-with-descendants before enactment processing).
-
-        // ── Step 1: Expire proposals with descendants ─────────────────────
-        //
-        // Per Haskell: gasExpiresAfter = proposedIn + govActionLifetime.
-        // A proposal is active while currentEpoch <= gasExpiresAfter.
-        // `self.epoch` is the old (completing) epoch.
-        // Removal: `gasExpiresAfter < self.epoch` (strictly less-than).
-        //
-        // Note: if a ratified proposal happens to be a descendant of an expired
-        // proposal, it will be removed here and its deposit refunded.  This is
-        // correct because: (a) the enacted effects (`enact_gov_action`) were
-        // already applied in the ratification loop above, and (b) the ratified
-        // set was fixed before this removal runs, so step 2's `proposals.remove`
-        // will harmlessly return None for already-removed proposals.  This matches
-        // Haskell's `proposalsApplyEnactment` which also removes expired+descendants
-        // before processing the enacted sequence.
-        let current_epoch = self.epoch;
-        let expired_ids: Vec<GovActionId> = self
-            .gov
-            .governance
-            .proposals
-            .iter()
-            .filter(|(_, state)| state.expires_epoch < current_epoch)
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        let expired_removed = if !expired_ids.is_empty() {
-            let gov = Arc::make_mut(&mut self.gov.governance);
-            let removed = forest_remove_with_descendants(
-                &expired_ids,
-                &mut gov.proposals,
-                &mut gov.proposal_roots,
-                &mut gov.proposal_graph,
-                &mut gov.votes_by_action,
-            );
-            // Refund deposits for expired proposals (and their descendants).
-            for (action_id, proposal_state) in &removed {
-                let deposit = proposal_state.procedure.deposit;
-                if deposit.0 > 0 {
-                    let return_addr = &proposal_state.procedure.return_addr;
-                    if return_addr.len() >= 29 {
-                        let key = Self::reward_account_to_hash(return_addr);
-                        if self.certs.reward_accounts.contains_key(&key) {
-                            *Arc::make_mut(&mut self.certs.reward_accounts)
-                                .entry(key)
-                                .or_insert(Lovelace(0)) += deposit;
-                        } else {
-                            self.epochs.treasury += deposit;
-                            debug!(
-                                "Governance proposal {:?} deposit {} -> treasury \
-                                 (unregistered return address)",
-                                action_id, deposit.0
-                            );
-                        }
-                    }
-                }
-                debug!(
-                    "Governance proposal expired: {:?} (deposit {} returned)",
-                    action_id, proposal_state.procedure.deposit.0
-                );
-            }
-            if !removed.is_empty() {
-                debug!(
-                    "Expired {} governance proposal(s) (incl. descendants) at epoch {}",
-                    removed.len(),
-                    current_epoch.0
-                );
-            }
-            removed.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
-        // ── Step 2: Remove enacted proposals + refund deposits ────────────
-        let mut ratified_with_state = Vec::new();
-
-        if !ratified.is_empty() {
-            for action_id in &ratified {
-                // Remove from forest first.
-                if let Some(state) = self.gov.governance.proposals.get(action_id) {
-                    let purpose = gov_action_purpose_tag(&state.procedure.gov_action);
-                    if let Some(tag) = purpose {
-                        let gov = Arc::make_mut(&mut self.gov.governance);
-                        forest_remove_node(
-                            action_id,
-                            tag,
-                            &mut gov.proposal_roots,
-                            &mut gov.proposal_graph,
-                        );
-                    }
-                }
-                if let Some(proposal_state) = Arc::make_mut(&mut self.gov.governance)
-                    .proposals
-                    .remove(action_id)
-                {
-                    let deposit = proposal_state.procedure.deposit;
-                    if deposit.0 > 0 {
-                        let return_addr = &proposal_state.procedure.return_addr;
-                        if return_addr.len() >= 29 {
-                            let key = Self::reward_account_to_hash(return_addr);
-                            if self.certs.reward_accounts.contains_key(&key) {
-                                *Arc::make_mut(&mut self.certs.reward_accounts)
-                                    .entry(key)
-                                    .or_insert(Lovelace(0)) += deposit;
-                            } else {
-                                self.epochs.treasury += deposit;
-                                debug!(
-                                    "Governance proposal {:?} deposit {} -> treasury \
-                                     (unregistered return address)",
-                                    action_id, deposit.0
-                                );
-                            }
-                        }
-                    }
-                    ratified_with_state.push((action_id.clone(), proposal_state));
-                }
-                Arc::make_mut(&mut self.gov.governance)
-                    .votes_by_action
-                    .remove(action_id);
-            }
-            debug!(
-                "Governance   {} proposal(s) ratified and enacted",
-                ratified.len()
-            );
-
-            // ── Step 3: Per-enacted sibling removal + root promotion ──────
-            //
-            // Per Haskell `proposalsApplyEnactment.enact`: for each enacted
-            // proposal, find siblings (other children of the same purpose root)
-            // and remove them plus all descendants.  Then promote the enacted
-            // proposal to the new root of its purpose tree.
-            for (enacted_id, enacted_state) in &ratified_with_state {
-                let enacted_action = &enacted_state.procedure.gov_action;
-                let Some(tag) = gov_action_purpose_tag(enacted_action) else {
-                    // TreasuryWithdrawals and InfoAction have no purpose tree.
-                    continue;
-                };
-
-                // Siblings = other children of the same root (before promotion),
-                // i.e. PRoot.children minus the enacted proposal.
-                let siblings: Vec<GovActionId> = {
-                    let root = self.gov.governance.proposal_roots.get(tag);
-                    root.children
-                        .iter()
-                        .filter(|id| *id != enacted_id)
-                        .cloned()
-                        .collect()
-                };
-
-                // Remove siblings + all descendants using the forest.
-                if !siblings.is_empty() {
-                    let gov = Arc::make_mut(&mut self.gov.governance);
-                    let removed = forest_remove_with_descendants(
-                        &siblings,
-                        &mut gov.proposals,
-                        &mut gov.proposal_roots,
-                        &mut gov.proposal_graph,
-                        &mut gov.votes_by_action,
-                    );
-                    // Refund deposits for removed sibling/descendant proposals.
-                    for (_action_id, proposal_state) in &removed {
-                        let deposit = proposal_state.procedure.deposit;
-                        if deposit.0 > 0 {
-                            let return_addr = &proposal_state.procedure.return_addr;
-                            if return_addr.len() >= 29 {
-                                let key = Self::reward_account_to_hash(return_addr);
-                                if self.certs.reward_accounts.contains_key(&key) {
-                                    *Arc::make_mut(&mut self.certs.reward_accounts)
-                                        .entry(key)
-                                        .or_insert(Lovelace(0)) += deposit;
-                                } else {
-                                    self.epochs.treasury += deposit;
-                                }
-                            }
-                        }
-                    }
-                    if !removed.is_empty() {
-                        debug!(
-                            "Governance   {} sibling/descendant proposal(s) removed due to enactment of {:?}",
-                            removed.len(),
-                            enacted_id
-                        );
-                    }
-                }
-
-                // Promote enacted proposal to new root of its purpose tree.
-                let gov = Arc::make_mut(&mut self.gov.governance);
-                forest_promote_root(
-                    enacted_id,
-                    tag,
-                    &mut gov.proposal_roots,
-                    &mut gov.proposal_graph,
-                );
-            }
-        }
-
-        // Store ratification and expiry results for GetRatifyState query (tag 32).
-        let gov = Arc::make_mut(&mut self.gov.governance);
-        gov.last_ratified = ratified_with_state;
-        gov.last_expired = expired_removed;
-        gov.last_ratify_delayed = delayed;
+        ratify_proposals_impl(self.epoch, &mut self.epochs, &mut self.certs, &mut self.gov);
     }
 
     /// Whether we are in the Conway bootstrap phase (protocol version 9).
@@ -1149,6 +663,7 @@ impl LedgerState {
     /// Committee state, votes, and no-confidence flag are passed explicitly so that
     /// `ratify_proposals()` can supply either live or snapshot data.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     fn check_ratification(
         &self,
         action_id: &GovActionId,
@@ -1420,6 +935,7 @@ impl LedgerState {
     ///
     /// Returns `(drep_yes, drep_total, spo_yes, spo_abstain, cc_yes, cc_total)`.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn count_votes_by_type(
         &self,
         action_id: &GovActionId,
@@ -1591,6 +1107,7 @@ impl LedgerState {
     /// Looks up the pool's reward account credential in `vote_delegations` to find
     /// the DRep delegation. If the credential delegates to `AlwaysNoConfidence`,
     /// returns `NoConfidence`; if `AlwaysAbstain`, returns `Abstain`; otherwise `No`.
+    #[allow(dead_code)]
     fn default_spo_vote(
         &self,
         pool_id: &Hash28,
@@ -1789,95 +1306,20 @@ impl LedgerState {
     /// and `compute_total_drep_stake()` at the NEXT epoch boundary, providing
     /// the one-epoch-lagged DRep voting power that matches Haskell's pulser
     /// lifecycle.
+    #[allow(dead_code)]
     pub(crate) fn capture_drep_distribution_snapshot(&mut self) {
-        // Build the BASE DRep distribution (without proposal deposits), matching
-        // Haskell's `computeDRepDistr` which does NOT include proposal deposits.
-        // Proposal deposits are added separately during ratification via the
-        // `dpProposalDeposits` mechanism in the DRep pulser.
-        //
-        // Using live `credential_stake()` for UTxO + reward balances (UTxOs don't
-        // change during epoch transitions, and rewards are post-distribution).
-        let mut cache: HashMap<Hash32, u64> = HashMap::new();
-        let mut no_confidence = 0u64;
-        let mut abstain = 0u64;
-        // No proposal deposits — matches Haskell's computeDRepDistr
-        for (stake_cred, drep) in &self.gov.governance.vote_delegations {
-            let stake = self.credential_stake(stake_cred);
-            match drep {
-                DRep::KeyHash(h) => {
-                    if self.gov.governance.dreps.get(h).is_some_and(|d| d.active) {
-                        *cache.entry(*h).or_default() += stake;
-                    }
-                }
-                DRep::ScriptHash(h) => {
-                    let hash32 = h.to_hash32_padded();
-                    if self
-                        .gov
-                        .governance
-                        .dreps
-                        .get(&hash32)
-                        .is_some_and(|d| d.active)
-                    {
-                        *cache.entry(hash32).or_default() += stake;
-                    }
-                }
-                DRep::NoConfidence => {
-                    no_confidence += stake;
-                }
-                DRep::Abstain => {
-                    abstain += stake;
-                }
-            }
-        }
-        let gov = Arc::make_mut(&mut self.gov.governance);
-        gov.drep_distribution_snapshot = cache;
-        gov.drep_snapshot_no_confidence = no_confidence;
-        gov.drep_snapshot_abstain = abstain;
-        debug!(
-            "DRep distribution snapshot captured: {} DReps, no_confidence={}, abstain={}",
-            gov.drep_distribution_snapshot.len(),
-            gov.drep_snapshot_no_confidence,
-            gov.drep_snapshot_abstain,
-        );
+        capture_drep_distribution_snapshot_impl(&self.certs, &mut self.gov);
     }
 
-    /// Capture a ratification snapshot at an epoch boundary.
-    ///
-    /// Called AFTER ratification/expiry/enactment have been applied to live state,
-    /// so that the snapshot contains the "surviving" proposals, updated enacted roots,
-    /// and current committee state.  The snapshot is consumed by `ratify_proposals()`
-    /// at the NEXT epoch boundary, matching Haskell's DRep pulser timing where the
-    /// pulser is created with `setFreshDRepPulsingState` from post-transition state.
+    #[allow(dead_code)]
     pub(crate) fn capture_ratification_snapshot(&mut self) {
-        let gov = &self.gov.governance;
-        let snapshot = super::RatificationSnapshot {
-            proposals: gov.proposals.clone(),
-            votes_by_action: gov.votes_by_action.clone(),
-            committee_hot_keys: gov.committee_hot_keys.clone(),
-            committee_expiration: gov.committee_expiration.clone(),
-            committee_resigned: gov.committee_resigned.clone(),
-            committee_threshold: gov.committee_threshold.clone(),
-            no_confidence: gov.no_confidence,
-            enacted_pparam_update: gov.enacted_pparam_update.clone(),
-            enacted_hard_fork: gov.enacted_hard_fork.clone(),
-            enacted_committee: gov.enacted_committee.clone(),
-            enacted_constitution: gov.enacted_constitution.clone(),
-            snapshot_epoch: self.epoch,
-            vote_delegations: gov.vote_delegations.clone(),
-        };
-        debug!(
-            epoch = self.epoch.0,
-            proposals = snapshot.proposals.len(),
-            votes = snapshot.votes_by_action.len(),
-            committee = snapshot.committee_expiration.len(),
-            "Ratification snapshot captured for next epoch boundary"
-        );
-        Arc::make_mut(&mut self.gov.governance).ratification_snapshot = Some(snapshot);
+        capture_ratification_snapshot_impl(self.epoch, &mut self.gov);
     }
 
     /// Compute total active DRep-delegated stake across all DReps.
     /// Excludes stake delegated to inactive DReps.
     /// Includes stake delegated to Abstain and NoConfidence (they are part of total DRep ecosystem).
+    #[allow(dead_code)]
     pub(crate) fn compute_total_drep_stake(&self) -> u64 {
         // Use the epoch-boundary DRep distribution snapshot when available,
         // matching Haskell's `reDRepDistr` from the DRep pulser.  The snapshot
@@ -1946,6 +1388,7 @@ impl LedgerState {
     ///
     /// Reference: Haskell `spoVotingPower` in `Cardano.Ledger.Conway.Governance.Procedures`
     /// uses `ssStakeMarkPoolDistr` (the mark pool distribution).
+    #[allow(dead_code)]
     pub(crate) fn compute_spo_voting_power(&self, pool_id: &Hash28) -> u64 {
         // Use the "mark" snapshot — non-ratification fallback.
         if let Some(ref snapshot) = self.epochs.snapshots.mark {
@@ -1972,6 +1415,7 @@ impl LedgerState {
     /// function.  This ensures ratification uses the previous epoch's mark
     /// (matching Haskell's `dpStakePoolDistr`).  This function is used as a
     /// fallback for non-ratification contexts and early epochs.
+    #[allow(dead_code)]
     fn compute_total_spo_stake(&self) -> u64 {
         // Use "mark" snapshot if available, else fall back.
         if let Some(ref snapshot) = self.epochs.snapshots.mark {
@@ -1991,125 +1435,1479 @@ impl LedgerState {
     }
 
     /// Enact a ratified governance action by applying its effects
+    #[allow(dead_code)]
     pub(crate) fn enact_gov_action(&mut self, action: &GovAction) {
-        match action {
-            GovAction::ParameterChange {
-                protocol_param_update,
-                ..
-            } => {
-                if let Err(e) = self.apply_protocol_param_update(protocol_param_update) {
-                    warn!(
-                        error = %e,
-                        "Governance protocol parameter update rejected"
-                    );
-                } else {
-                    debug!("Governance   protocol parameters updated");
+        enact_gov_action_impl(action, &mut self.epochs, &mut self.certs, &mut self.gov);
+    }
+}
+
+// ── Free functions for governance epoch operations ─────────────────────
+//
+// These functions are extracted from `LedgerState` methods so they can be
+// called from both the monolithic `LedgerState::process_epoch_transition`
+// (via thin wrappers) and the new `EraRules`-based dispatch path which
+// operates on decomposed sub-states.
+
+/// Update dormant epoch counter per Haskell Conway.Rules.Epoch `updateNumDormantEpochs`.
+/// Only applicable during Conway era (PV >= 9).
+pub(crate) fn update_dormant_epochs(
+    new_epoch: EpochNo,
+    epochs: &EpochSubState,
+    gov: &mut GovSubState,
+) {
+    if epochs.protocol_params.protocol_version_major >= 9 {
+        let gov_state = Arc::make_mut(&mut gov.governance);
+        if gov_state.proposals.is_empty() {
+            gov_state.num_dormant_epochs = gov_state.num_dormant_epochs.saturating_add(1);
+            debug!(
+                epoch = new_epoch.0,
+                num_dormant = gov_state.num_dormant_epochs,
+                "Governance: epoch is dormant (no active proposals)"
+            );
+        }
+    }
+}
+
+/// Mark inactive DReps per CIP-1694.
+///
+/// Haskell stores drepExpiry = (activity_epoch + drep_activity) - num_dormant
+/// at registration/vote time, then checks: currentEpoch > drepExpiry.
+/// We store the same value in drep.drep_expiry, so the check is simple.
+pub(crate) fn update_drep_activity(
+    new_epoch: EpochNo,
+    epochs: &EpochSubState,
+    gov: &mut GovSubState,
+) {
+    if epochs.protocol_params.protocol_version_major >= 9 {
+        let mut newly_inactive = 0u64;
+        let mut reactivated = 0u64;
+        for drep in Arc::make_mut(&mut gov.governance).dreps.values_mut() {
+            let expired = new_epoch.0 > drep.drep_expiry.0;
+            if expired && drep.active {
+                drep.active = false;
+                newly_inactive += 1;
+            } else if !expired && !drep.active {
+                drep.active = true;
+                reactivated += 1;
+            }
+        }
+        if newly_inactive > 0 || reactivated > 0 {
+            debug!(
+                "DRep activity update at epoch {}: {} newly inactive, {} reactivated",
+                new_epoch.0, newly_inactive, reactivated
+            );
+        }
+    }
+}
+
+/// Expire committee members that have passed their expiration epoch.
+pub(crate) fn expire_committee_members(new_epoch: EpochNo, gov: &mut GovSubState) {
+    let expired_members: Vec<Hash32> = gov
+        .governance
+        .committee_expiration
+        .iter()
+        .filter(|(_, exp_epoch)| **exp_epoch <= new_epoch)
+        .map(|(hash, _)| *hash)
+        .collect();
+    if !expired_members.is_empty() {
+        for hash in &expired_members {
+            Arc::make_mut(&mut gov.governance)
+                .committee_hot_keys
+                .remove(hash);
+            Arc::make_mut(&mut gov.governance)
+                .committee_expiration
+                .remove(hash);
+        }
+        debug!(
+            "Expired {} committee members at epoch {}",
+            expired_members.len(),
+            new_epoch.0
+        );
+    }
+}
+
+/// Capture the DRep distribution snapshot and ratification snapshot for the
+/// NEXT epoch boundary.
+///
+/// Per Haskell `setFreshDRepPulsingState`, the pulser is created from the
+/// post-transition state — after ratification/expiry have pruned proposals,
+/// enacted roots have been updated, DRep activity has been updated, and
+/// committee members have been expired.
+pub(crate) fn capture_governance_snapshots(
+    epoch: EpochNo,
+    epochs: &EpochSubState,
+    certs: &CertSubState,
+    gov: &mut GovSubState,
+) {
+    if epochs.protocol_params.protocol_version_major >= 9 {
+        capture_drep_distribution_snapshot_impl(certs, gov);
+        capture_ratification_snapshot_impl(epoch, gov);
+    }
+}
+
+/// Build the DRep distribution snapshot from live state.
+fn capture_drep_distribution_snapshot_impl(certs: &CertSubState, gov: &mut GovSubState) {
+    let mut cache: HashMap<Hash32, u64> = HashMap::new();
+    let mut no_confidence = 0u64;
+    let mut abstain = 0u64;
+    for (stake_cred, drep) in &gov.governance.vote_delegations {
+        let stake = credential_stake_from(stake_cred, certs);
+        match drep {
+            DRep::KeyHash(h) => {
+                if gov.governance.dreps.get(h).is_some_and(|d| d.active) {
+                    *cache.entry(*h).or_default() += stake;
                 }
             }
-            GovAction::HardForkInitiation {
-                protocol_version, ..
-            } => {
-                self.epochs.protocol_params.protocol_version_major = protocol_version.0;
-                self.epochs.protocol_params.protocol_version_minor = protocol_version.1;
-                debug!(
-                    "Governance   hard fork initiated (protocol version {}.{})",
-                    protocol_version.0, protocol_version.1
-                );
-            }
-            GovAction::TreasuryWithdrawals { withdrawals, .. } => {
-                // Matching Haskell's enactTreasury: debit the total from treasury
-                // in one shot, then credit each withdrawal to its reward account
-                // unconditionally (without per-withdrawal capping). The
-                // ratification layer is expected to reject proposals that exceed
-                // the available treasury balance. We use saturating_sub to
-                // prevent underflow if local treasury tracking drifts.
-                let total: u64 = withdrawals
-                    .values()
-                    .fold(0u64, |acc, a| acc.saturating_add(a.0));
-                if total > self.epochs.treasury.0 {
-                    warn!(
-                        "Treasury withdrawal exceeds balance: requested {} but only {} available",
-                        total, self.epochs.treasury.0
-                    );
+            DRep::ScriptHash(h) => {
+                let hash32 = h.to_hash32_padded();
+                if gov.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                    *cache.entry(hash32).or_default() += stake;
                 }
-                self.epochs.treasury.0 = self.epochs.treasury.0.saturating_sub(total);
-                for (reward_addr, amount) in withdrawals {
-                    if amount.0 > 0 && reward_addr.len() >= 29 {
-                        let key = Self::reward_account_to_hash(reward_addr);
-                        *Arc::make_mut(&mut self.certs.reward_accounts)
-                            .entry(key)
-                            .or_insert(Lovelace(0)) += *amount;
-                    }
-                }
-                debug!(
-                    "Governance   treasury withdrawal: {} lovelace to {} accounts",
-                    total,
-                    withdrawals.len()
-                );
             }
-            GovAction::NoConfidence { .. } => {
-                // No confidence motion: dissolve the committee entirely.
-                // Per Haskell: `ensCommittee = SNothing` — committee is set to Nothing.
-                let gov = Arc::make_mut(&mut self.gov.governance);
-                gov.committee_hot_keys.clear();
-                gov.committee_expiration.clear();
-                gov.committee_threshold = None; // Match Haskell SNothing
-                gov.no_confidence = true;
-                debug!("Governance   no confidence motion enacted, committee disbanded");
+            DRep::NoConfidence => {
+                no_confidence += stake;
             }
-            GovAction::UpdateCommittee {
-                members_to_remove,
-                members_to_add,
-                threshold,
-                ..
-            } => {
-                // Remove specified members
-                for cred in members_to_remove {
-                    let key = credential_to_hash(cred);
-                    Arc::make_mut(&mut self.gov.governance)
-                        .committee_hot_keys
-                        .remove(&key);
-                    Arc::make_mut(&mut self.gov.governance)
-                        .committee_expiration
-                        .remove(&key);
-                    Arc::make_mut(&mut self.gov.governance)
-                        .committee_resigned
-                        .remove(&key);
-                }
-                // Add new members with expiration epochs
-                for (cred, expiration_epoch) in members_to_add {
-                    let key = credential_to_hash(cred);
-                    Arc::make_mut(&mut self.gov.governance)
-                        .committee_expiration
-                        .insert(key, EpochNo(*expiration_epoch));
-                    // Hot key auth comes via CommitteeHotAuth certificates
-                }
-                // Store the new committee quorum threshold
-                Arc::make_mut(&mut self.gov.governance).committee_threshold =
-                    Some(threshold.clone());
-                // UpdateCommittee restores confidence
-                Arc::make_mut(&mut self.gov.governance).no_confidence = false;
-                debug!(
-                    "Governance   committee updated: {} removed, {} added, threshold={}/{}",
-                    members_to_remove.len(),
-                    members_to_add.len(),
-                    threshold.numerator,
-                    threshold.denominator,
-                );
-            }
-            GovAction::NewConstitution { constitution, .. } => {
-                Arc::make_mut(&mut self.gov.governance).constitution = Some(constitution.clone());
-                debug!(
-                    "Governance   new constitution enacted (script_hash: {:?})",
-                    constitution.script_hash.as_ref().map(|h| h.to_hex())
-                );
-            }
-            GovAction::InfoAction => {
-                // Info actions have no on-chain effect
-                debug!("Info action ratified (no on-chain effect)");
+            DRep::Abstain => {
+                abstain += stake;
             }
         }
     }
+    let gov_state = Arc::make_mut(&mut gov.governance);
+    gov_state.drep_distribution_snapshot = cache;
+    gov_state.drep_snapshot_no_confidence = no_confidence;
+    gov_state.drep_snapshot_abstain = abstain;
+    debug!(
+        "DRep distribution snapshot captured: {} DReps, no_confidence={}, abstain={}",
+        gov_state.drep_distribution_snapshot.len(),
+        gov_state.drep_snapshot_no_confidence,
+        gov_state.drep_snapshot_abstain,
+    );
+}
+
+/// Capture a ratification snapshot at an epoch boundary.
+fn capture_ratification_snapshot_impl(epoch: EpochNo, gov: &mut GovSubState) {
+    let gov_ref = &gov.governance;
+    let snapshot = super::RatificationSnapshot {
+        proposals: gov_ref.proposals.clone(),
+        votes_by_action: gov_ref.votes_by_action.clone(),
+        committee_hot_keys: gov_ref.committee_hot_keys.clone(),
+        committee_expiration: gov_ref.committee_expiration.clone(),
+        committee_resigned: gov_ref.committee_resigned.clone(),
+        committee_threshold: gov_ref.committee_threshold.clone(),
+        no_confidence: gov_ref.no_confidence,
+        enacted_pparam_update: gov_ref.enacted_pparam_update.clone(),
+        enacted_hard_fork: gov_ref.enacted_hard_fork.clone(),
+        enacted_committee: gov_ref.enacted_committee.clone(),
+        enacted_constitution: gov_ref.enacted_constitution.clone(),
+        snapshot_epoch: epoch,
+        vote_delegations: gov_ref.vote_delegations.clone(),
+    };
+    debug!(
+        epoch = epoch.0,
+        proposals = snapshot.proposals.len(),
+        votes = snapshot.votes_by_action.len(),
+        committee = snapshot.committee_expiration.len(),
+        "Ratification snapshot captured for next epoch boundary"
+    );
+    Arc::make_mut(&mut gov.governance).ratification_snapshot = Some(snapshot);
+}
+
+/// Compute the stake for a credential from sub-state components.
+///
+/// Equivalent to `LedgerState::credential_stake` but operates on
+/// decomposed sub-states.
+fn credential_stake_from(cred_hash: &Hash32, certs: &CertSubState) -> u64 {
+    let utxo = certs
+        .stake_distribution
+        .stake_map
+        .get(cred_hash)
+        .map(|s| s.0)
+        .unwrap_or(0);
+    let reward = certs
+        .reward_accounts
+        .get(cred_hash)
+        .map(|s| s.0)
+        .unwrap_or(0);
+    utxo + reward
+}
+
+/// Determine the default vote for a non-voting SPO.
+///
+/// Equivalent to `LedgerState::default_spo_vote` but operates on
+/// decomposed sub-states.
+fn default_spo_vote_from(
+    pool_id: &Hash28,
+    certs: &CertSubState,
+    vote_delegations: &HashMap<Hash32, DRep>,
+    vote_delegations_override: Option<&HashMap<Hash32, DRep>>,
+) -> DefaultVote {
+    let pool_reg = certs.pool_params.get(pool_id);
+    let reward_account = match pool_reg {
+        Some(reg) if reg.reward_account.len() >= 29 => &reg.reward_account,
+        _ => return DefaultVote::No,
+    };
+    let cred_hash = LedgerState::reward_account_to_hash(reward_account);
+    let delegations = vote_delegations_override.unwrap_or(vote_delegations);
+    match delegations.get(&cred_hash) {
+        Some(DRep::NoConfidence) => DefaultVote::NoConfidence,
+        Some(DRep::Abstain) => DefaultVote::Abstain,
+        _ => DefaultVote::No,
+    }
+}
+
+/// Count stake-weighted votes by voter type for a specific governance action.
+///
+/// Equivalent to `LedgerState::count_votes_by_type` but operates on
+/// decomposed sub-states.
+#[allow(clippy::too_many_arguments)]
+fn count_votes_by_type_impl(
+    action_id: &GovActionId,
+    action: &GovAction,
+    drep_power_cache: &HashMap<Hash32, u64>,
+    no_confidence_stake: u64,
+    votes_by_action: &BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
+    pool_stake_override: Option<&HashMap<Hash28, Lovelace>>,
+    vote_delegations_override: Option<&HashMap<Hash32, DRep>>,
+    bootstrap: bool,
+    mark_pool_stake: Option<&HashMap<Hash28, Lovelace>>,
+    certs: &CertSubState,
+    gov: &GovSubState,
+    epochs: &EpochSubState,
+) -> (u64, u64, u64, u64, u64, u64) {
+    let mut cc_yes = 0u64;
+    let mut cc_total = 0u64;
+
+    let mut drep_votes: HashMap<Hash32, Vote> = HashMap::new();
+    let mut spo_votes: HashMap<Hash28, Vote> = HashMap::new();
+
+    let empty = vec![];
+    let action_votes = votes_by_action.get(action_id).unwrap_or(&empty);
+
+    for (voter, procedure) in action_votes {
+        match voter {
+            Voter::DRep(cred) => {
+                let drep_hash = credential_to_hash(cred);
+                drep_votes.insert(drep_hash, procedure.vote.clone());
+            }
+            Voter::StakePool(pool_hash) => {
+                let pool_id = Hash28::from_bytes({
+                    let mut b = [0u8; 28];
+                    b.copy_from_slice(&pool_hash.as_bytes()[..28]);
+                    b
+                });
+                spo_votes.insert(pool_id, procedure.vote.clone());
+            }
+            Voter::ConstitutionalCommittee(_) => {
+                cc_total += 1;
+                if procedure.vote == Vote::Yes {
+                    cc_yes += 1;
+                }
+            }
+        }
+    }
+
+    let is_hardfork = matches!(action, GovAction::HardForkInitiation { .. });
+    let is_no_confidence = matches!(action, GovAction::NoConfidence { .. });
+
+    let mut spo_yes = 0u64;
+    let mut spo_abstain = 0u64;
+
+    let effective_pool_stake: Option<&HashMap<Hash28, Lovelace>> =
+        pool_stake_override.or(mark_pool_stake);
+
+    if let Some(pool_stake) = effective_pool_stake {
+        for (pool_id, stake) in pool_stake {
+            let stake = stake.0;
+            match spo_votes.get(pool_id) {
+                Some(Vote::Yes) => {
+                    spo_yes += stake;
+                }
+                Some(Vote::Abstain) => {
+                    spo_abstain += stake;
+                }
+                Some(Vote::No) => {}
+                None => {
+                    if is_hardfork {
+                        // No vote on HardFork -> No
+                    } else if bootstrap {
+                        spo_abstain += stake;
+                    } else {
+                        match default_spo_vote_from(
+                            pool_id,
+                            certs,
+                            &gov.governance.vote_delegations,
+                            vote_delegations_override,
+                        ) {
+                            DefaultVote::NoConfidence if is_no_confidence => {
+                                spo_yes += stake;
+                            }
+                            DefaultVote::Abstain => {
+                                spo_abstain += stake;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for (pool_id, vote) in &spo_votes {
+            let stake = compute_spo_voting_power_from(pool_id, certs, epochs);
+            match vote {
+                Vote::Yes => spo_yes += stake,
+                Vote::Abstain => spo_abstain += stake,
+                Vote::No => {}
+            }
+        }
+    }
+
+    let mut drep_yes = 0u64;
+    let mut drep_abstain = 0u64;
+    let mut drep_total_all = 0u64;
+
+    for (drep_hash, &power) in drep_power_cache {
+        drep_total_all += power;
+        match drep_votes.get(drep_hash) {
+            Some(Vote::Yes) => {
+                drep_yes += power;
+            }
+            Some(Vote::Abstain) => {
+                drep_abstain += power;
+            }
+            Some(Vote::No) | None => {}
+        }
+    }
+
+    if no_confidence_stake > 0 {
+        drep_total_all += no_confidence_stake;
+        if is_no_confidence {
+            drep_yes += no_confidence_stake;
+        }
+    }
+
+    let drep_total = drep_total_all.saturating_sub(drep_abstain);
+
+    (drep_yes, drep_total, spo_yes, spo_abstain, cc_yes, cc_total)
+}
+
+/// Compute the voting power of a stake pool from sub-states (non-ratification fallback).
+fn compute_spo_voting_power_from(
+    pool_id: &Hash28,
+    certs: &CertSubState,
+    epochs: &EpochSubState,
+) -> u64 {
+    if let Some(ref snapshot) = epochs.snapshots.mark {
+        if let Some(stake) = snapshot.pool_stake.get(pool_id) {
+            return stake.0;
+        }
+    }
+    debug!("SPO voting power: falling back to O(n) delegation scan — snapshot not available");
+    let mut total = 0u64;
+    for (stake_cred, delegated_pool) in certs.delegations.iter() {
+        if delegated_pool == pool_id {
+            total += credential_stake_from(stake_cred, certs);
+        }
+    }
+    total
+}
+
+/// Check whether a proposal has met its voting thresholds for ratification.
+///
+/// Equivalent to `LedgerState::check_ratification` but operates on
+/// decomposed sub-states.
+#[allow(clippy::too_many_arguments)]
+fn check_ratification_impl(
+    action_id: &GovActionId,
+    state: &ProposalState,
+    _total_drep_stake: u64,
+    total_spo_stake: u64,
+    drep_power_cache: &HashMap<Hash32, u64>,
+    no_confidence_stake: u64,
+    votes_by_action: &BTreeMap<GovActionId, Vec<(Voter, VotingProcedure)>>,
+    committee_hot_keys: &HashMap<Hash32, Hash32>,
+    committee_expiration: &HashMap<Hash32, EpochNo>,
+    committee_resigned: &HashMap<Hash32, Option<Anchor>>,
+    committee_threshold: &Option<Rational>,
+    remaining_treasury: u64,
+    pool_stake_override: Option<&HashMap<Hash28, Lovelace>>,
+    vote_delegations_override: Option<&HashMap<Hash32, DRep>>,
+    epoch: EpochNo,
+    epochs: &EpochSubState,
+    certs: &CertSubState,
+    gov: &GovSubState,
+) -> bool {
+    let bootstrap = epochs.protocol_params.protocol_version_major == 9;
+
+    let (drep_yes, drep_total, spo_yes, spo_abstain, _cc_yes, _cc_total) = count_votes_by_type_impl(
+        action_id,
+        &state.procedure.gov_action,
+        drep_power_cache,
+        no_confidence_stake,
+        votes_by_action,
+        pool_stake_override,
+        vote_delegations_override,
+        bootstrap,
+        epochs.snapshots.mark.as_ref().map(|s| &s.pool_stake),
+        certs,
+        gov,
+        epochs,
+    );
+
+    let spo_denom = total_spo_stake.saturating_sub(spo_abstain);
+
+    let cc_met_fn = |aid: &GovActionId| -> bool {
+        check_cc_approval(
+            aid,
+            votes_by_action,
+            committee_hot_keys,
+            committee_expiration,
+            committee_resigned,
+            committee_threshold,
+            epoch,
+            epochs.protocol_params.committee_min_size,
+            bootstrap,
+        )
+    };
+
+    match &state.procedure.gov_action {
+        GovAction::InfoAction => false,
+        GovAction::ParameterChange {
+            protocol_param_update,
+            ..
+        } => {
+            let drep_met = if bootstrap {
+                true
+            } else {
+                pp_change_drep_all_groups_met(
+                    protocol_param_update,
+                    &epochs.protocol_params,
+                    drep_yes,
+                    drep_total,
+                )
+            };
+            let spo_met = if let Some(ref spo_threshold) =
+                pp_change_spo_threshold(protocol_param_update, &epochs.protocol_params)
+            {
+                check_threshold(spo_yes, spo_denom, spo_threshold)
+            } else {
+                true
+            };
+            let cc_met = cc_met_fn(action_id);
+            debug!(
+                action_id = %action_id.transaction_id.to_hex(),
+                bootstrap,
+                drep_yes, drep_total, drep_met,
+                spo_yes, spo_denom, spo_met,
+                cc_met,
+                "ParameterChange ratification check"
+            );
+            drep_met && spo_met && cc_met
+        }
+        GovAction::HardForkInitiation {
+            protocol_version, ..
+        } => {
+            let rational_zero = Rational {
+                numerator: 0,
+                denominator: 1,
+            };
+            let drep_threshold = if bootstrap {
+                rational_zero
+            } else {
+                epochs.protocol_params.dvt_hard_fork.clone()
+            };
+            let spo_threshold = &epochs.protocol_params.pvt_hard_fork;
+            let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+            let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
+            let cc_met = cc_met_fn(action_id);
+            debug!(
+                action_id = %action_id.transaction_id.to_hex(),
+                version = ?protocol_version,
+                bootstrap,
+                drep_yes, drep_total,
+                drep_threshold = drep_threshold.as_f64(), drep_met,
+                spo_yes, spo_denom,
+                spo_threshold = spo_threshold.as_f64(), spo_met,
+                cc_met,
+                "HardForkInitiation ratification check"
+            );
+            drep_met && spo_met && cc_met
+        }
+        GovAction::NoConfidence { .. } => {
+            let rational_zero = Rational {
+                numerator: 0,
+                denominator: 1,
+            };
+            let drep_threshold = if bootstrap {
+                rational_zero
+            } else {
+                epochs.protocol_params.dvt_no_confidence.clone()
+            };
+            let spo_threshold = &epochs.protocol_params.pvt_motion_no_confidence;
+            let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+            let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
+            debug!(
+                action_id = %action_id.transaction_id.to_hex(),
+                bootstrap,
+                drep_yes, drep_total,
+                drep_threshold = drep_threshold.as_f64(), drep_met,
+                spo_yes, spo_denom,
+                spo_threshold = spo_threshold.as_f64(), spo_met,
+                "NoConfidence ratification check"
+            );
+            drep_met && spo_met
+        }
+        GovAction::UpdateCommittee { members_to_add, .. } => {
+            let max_expiry = epoch.0 + epochs.protocol_params.committee_max_term_length;
+            if members_to_add.values().any(|&exp| exp > max_expiry) {
+                debug!(
+                    action_id = %action_id.transaction_id.to_hex(),
+                    max_expiry,
+                    "UpdateCommittee rejected: member expiry exceeds committeeMaxTermLength"
+                );
+                return false;
+            }
+
+            let rational_zero = Rational {
+                numerator: 0,
+                denominator: 1,
+            };
+            let no_confidence = gov.governance.no_confidence;
+            let (drep_threshold, spo_threshold) = if no_confidence {
+                (
+                    if bootstrap {
+                        rational_zero
+                    } else {
+                        epochs.protocol_params.dvt_committee_no_confidence.clone()
+                    },
+                    &epochs.protocol_params.pvt_committee_no_confidence,
+                )
+            } else {
+                (
+                    if bootstrap {
+                        rational_zero
+                    } else {
+                        epochs.protocol_params.dvt_committee_normal.clone()
+                    },
+                    &epochs.protocol_params.pvt_committee_normal,
+                )
+            };
+            let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+            let spo_met = check_threshold(spo_yes, spo_denom, spo_threshold);
+            drep_met && spo_met
+        }
+        GovAction::NewConstitution { .. } => {
+            let rational_zero = Rational {
+                numerator: 0,
+                denominator: 1,
+            };
+            let drep_threshold = if bootstrap {
+                rational_zero
+            } else {
+                epochs.protocol_params.dvt_constitution.clone()
+            };
+            let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+            let cc_met = cc_met_fn(action_id);
+            drep_met && cc_met
+        }
+        GovAction::TreasuryWithdrawals { withdrawals, .. } => {
+            let total: u64 = withdrawals
+                .values()
+                .fold(0u64, |acc, a| acc.saturating_add(a.0));
+            if total > remaining_treasury {
+                debug!(
+                    action_id = %action_id.transaction_id.to_hex(),
+                    total,
+                    remaining_treasury,
+                    "TreasuryWithdrawals rejected: exceeds remaining treasury"
+                );
+                return false;
+            }
+
+            let rational_zero = Rational {
+                numerator: 0,
+                denominator: 1,
+            };
+            let drep_threshold = if bootstrap {
+                rational_zero
+            } else {
+                epochs.protocol_params.dvt_treasury_withdrawal.clone()
+            };
+            let drep_met = check_threshold(drep_yes, drep_total, &drep_threshold);
+            let cc_met = cc_met_fn(action_id);
+            drep_met && cc_met
+        }
+    }
+}
+
+/// Compute total active DRep-delegated stake from sub-states.
+///
+/// Equivalent to `LedgerState::compute_total_drep_stake`.
+fn compute_total_drep_stake_from(gov: &GovSubState, certs: &CertSubState) -> u64 {
+    if !gov.governance.drep_distribution_snapshot.is_empty()
+        || gov.governance.drep_snapshot_no_confidence > 0
+        || gov.governance.drep_snapshot_abstain > 0
+    {
+        let drep_sum: u64 = gov
+            .governance
+            .drep_distribution_snapshot
+            .values()
+            .fold(0u64, |acc, v| acc.saturating_add(*v));
+        let total = drep_sum
+            .saturating_add(gov.governance.drep_snapshot_no_confidence)
+            .saturating_add(gov.governance.drep_snapshot_abstain);
+        return total.max(1);
+    }
+
+    // Fallback: compute from live state (first epoch or old snapshot).
+    let prop_deposits = proposal_deposits_from_map(&gov.governance.proposals);
+    let mut total = 0u64;
+    for (stake_cred, drep) in &gov.governance.vote_delegations {
+        let stake = credential_stake_from(stake_cred, certs)
+            + prop_deposits.get(stake_cred).copied().unwrap_or(0);
+        match drep {
+            DRep::Abstain | DRep::NoConfidence => {
+                total += stake;
+            }
+            DRep::KeyHash(h) => {
+                if gov.governance.dreps.get(h).is_some_and(|d| d.active) {
+                    total += stake;
+                }
+            }
+            DRep::ScriptHash(h) => {
+                let hash32 = h.to_hash32_padded();
+                if gov.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                    total += stake;
+                }
+            }
+        }
+    }
+    total.max(1)
+}
+
+/// Compute proposal deposits per credential from a proposals map.
+fn proposal_deposits_from_map(
+    proposals: &std::collections::BTreeMap<GovActionId, ProposalState>,
+) -> HashMap<Hash32, u64> {
+    let mut deposits: HashMap<Hash32, u64> = HashMap::new();
+    for proposal in proposals.values() {
+        let cred = LedgerState::reward_account_to_hash(&proposal.procedure.return_addr);
+        *deposits.entry(cred).or_default() += proposal.procedure.deposit.0;
+    }
+    deposits
+}
+
+/// Build DRep power cache from sub-states.
+///
+/// Equivalent to `LedgerState::build_drep_power_cache`.
+fn build_drep_power_cache_from(
+    gov: &GovSubState,
+    certs: &CertSubState,
+) -> (HashMap<Hash32, u64>, u64, u64) {
+    if !gov.governance.drep_distribution_snapshot.is_empty()
+        || gov.governance.drep_snapshot_no_confidence > 0
+        || gov.governance.drep_snapshot_abstain > 0
+    {
+        let mut cache = gov.governance.drep_distribution_snapshot.clone();
+        let mut no_confidence = gov.governance.drep_snapshot_no_confidence;
+        let mut abstain = gov.governance.drep_snapshot_abstain;
+
+        let proposals = if let Some(ref snap) = gov.governance.ratification_snapshot {
+            &snap.proposals
+        } else {
+            &gov.governance.proposals
+        };
+        let prop_deposits = proposal_deposits_from_map(proposals);
+        for (cred, deposit) in &prop_deposits {
+            if let Some(drep) = gov.governance.vote_delegations.get(cred) {
+                match drep {
+                    DRep::KeyHash(h) => {
+                        if cache.contains_key(h) {
+                            *cache.entry(*h).or_default() += deposit;
+                        }
+                    }
+                    DRep::ScriptHash(h) => {
+                        let hash32 = h.to_hash32_padded();
+                        if cache.contains_key(&hash32) {
+                            *cache.entry(hash32).or_default() += deposit;
+                        }
+                    }
+                    DRep::NoConfidence => {
+                        no_confidence += deposit;
+                    }
+                    DRep::Abstain => {
+                        abstain += deposit;
+                    }
+                }
+            }
+        }
+
+        return (cache, no_confidence, abstain);
+    }
+
+    // Fallback: compute from live state.
+    debug!("DRep power cache: using live vote_delegations (snapshot not yet populated)");
+    build_drep_power_cache_live_from(gov, certs)
+}
+
+/// Build DRep power cache from live state (fallback).
+fn build_drep_power_cache_live_from(
+    gov: &GovSubState,
+    certs: &CertSubState,
+) -> (HashMap<Hash32, u64>, u64, u64) {
+    let mut cache: HashMap<Hash32, u64> = HashMap::new();
+    let mut no_confidence_stake = 0u64;
+    let mut abstain_stake = 0u64;
+    let prop_deposits = proposal_deposits_from_map(&gov.governance.proposals);
+    for (stake_cred, drep) in &gov.governance.vote_delegations {
+        let stake = credential_stake_from(stake_cred, certs)
+            + prop_deposits.get(stake_cred).copied().unwrap_or(0);
+        match drep {
+            DRep::KeyHash(h) => {
+                if gov.governance.dreps.get(h).is_some_and(|d| d.active) {
+                    *cache.entry(*h).or_default() += stake;
+                }
+            }
+            DRep::ScriptHash(h) => {
+                let hash32 = h.to_hash32_padded();
+                if gov.governance.dreps.get(&hash32).is_some_and(|d| d.active) {
+                    *cache.entry(hash32).or_default() += stake;
+                }
+            }
+            DRep::NoConfidence => {
+                no_confidence_stake += stake;
+            }
+            DRep::Abstain => {
+                abstain_stake += stake;
+            }
+        }
+    }
+    (cache, no_confidence_stake, abstain_stake)
+}
+
+/// Compute total active SPO stake from sub-states (fallback).
+fn compute_total_spo_stake_from(certs: &CertSubState, epochs: &EpochSubState) -> u64 {
+    if let Some(ref snapshot) = epochs.snapshots.mark {
+        let total: u64 = snapshot
+            .pool_stake
+            .values()
+            .fold(0u64, |acc, s| acc.saturating_add(s.0));
+        return total.max(1);
+    }
+    let mut total = 0u64;
+    for stake_cred in certs.delegations.keys() {
+        total = total.saturating_add(credential_stake_from(stake_cred, certs));
+    }
+    total.max(1)
+}
+
+/// Enact a ratified governance action by applying its effects.
+///
+/// Equivalent to `LedgerState::enact_gov_action` but operates on
+/// decomposed sub-states.
+pub(crate) fn enact_gov_action_impl(
+    action: &GovAction,
+    epochs: &mut EpochSubState,
+    certs: &mut CertSubState,
+    gov: &mut GovSubState,
+) {
+    match action {
+        GovAction::ParameterChange {
+            protocol_param_update,
+            ..
+        } => {
+            if let Err(e) =
+                apply_protocol_param_update_impl(&mut epochs.protocol_params, protocol_param_update)
+            {
+                warn!(
+                    error = %e,
+                    "Governance protocol parameter update rejected"
+                );
+            } else {
+                debug!("Governance   protocol parameters updated");
+            }
+        }
+        GovAction::HardForkInitiation {
+            protocol_version, ..
+        } => {
+            epochs.protocol_params.protocol_version_major = protocol_version.0;
+            epochs.protocol_params.protocol_version_minor = protocol_version.1;
+            debug!(
+                "Governance   hard fork initiated (protocol version {}.{})",
+                protocol_version.0, protocol_version.1
+            );
+        }
+        GovAction::TreasuryWithdrawals { withdrawals, .. } => {
+            let total: u64 = withdrawals
+                .values()
+                .fold(0u64, |acc, a| acc.saturating_add(a.0));
+            if total > epochs.treasury.0 {
+                warn!(
+                    "Treasury withdrawal exceeds balance: requested {} but only {} available",
+                    total, epochs.treasury.0
+                );
+            }
+            epochs.treasury.0 = epochs.treasury.0.saturating_sub(total);
+            for (reward_addr, amount) in withdrawals {
+                if amount.0 > 0 && reward_addr.len() >= 29 {
+                    let key = LedgerState::reward_account_to_hash(reward_addr);
+                    *Arc::make_mut(&mut certs.reward_accounts)
+                        .entry(key)
+                        .or_insert(Lovelace(0)) += *amount;
+                }
+            }
+            debug!(
+                "Governance   treasury withdrawal: {} lovelace to {} accounts",
+                total,
+                withdrawals.len()
+            );
+        }
+        GovAction::NoConfidence { .. } => {
+            let gov_state = Arc::make_mut(&mut gov.governance);
+            gov_state.committee_hot_keys.clear();
+            gov_state.committee_expiration.clear();
+            gov_state.committee_threshold = None;
+            gov_state.no_confidence = true;
+            debug!("Governance   no confidence motion enacted, committee disbanded");
+        }
+        GovAction::UpdateCommittee {
+            members_to_remove,
+            members_to_add,
+            threshold,
+            ..
+        } => {
+            for cred in members_to_remove {
+                let key = credential_to_hash(cred);
+                Arc::make_mut(&mut gov.governance)
+                    .committee_hot_keys
+                    .remove(&key);
+                Arc::make_mut(&mut gov.governance)
+                    .committee_expiration
+                    .remove(&key);
+                Arc::make_mut(&mut gov.governance)
+                    .committee_resigned
+                    .remove(&key);
+            }
+            for (cred, expiration_epoch) in members_to_add {
+                let key = credential_to_hash(cred);
+                Arc::make_mut(&mut gov.governance)
+                    .committee_expiration
+                    .insert(key, EpochNo(*expiration_epoch));
+            }
+            Arc::make_mut(&mut gov.governance).committee_threshold = Some(threshold.clone());
+            Arc::make_mut(&mut gov.governance).no_confidence = false;
+            debug!(
+                "Governance   committee updated: {} removed, {} added, threshold={}/{}",
+                members_to_remove.len(),
+                members_to_add.len(),
+                threshold.numerator,
+                threshold.denominator,
+            );
+        }
+        GovAction::NewConstitution { constitution, .. } => {
+            Arc::make_mut(&mut gov.governance).constitution = Some(constitution.clone());
+            debug!(
+                "Governance   new constitution enacted (script_hash: {:?})",
+                constitution.script_hash.as_ref().map(|h| h.to_hex())
+            );
+        }
+        GovAction::InfoAction => {
+            debug!("Info action ratified (no on-chain effect)");
+        }
+    }
+}
+
+/// Apply a single ProtocolParamUpdate to the given protocol parameters.
+///
+/// This is the free-function equivalent of `LedgerState::apply_protocol_param_update`.
+/// Each field in the update, if Some, overwrites the corresponding parameter.
+/// Returns an error if any governance threshold is out of range [0, 1].
+fn apply_protocol_param_update_impl(
+    params: &mut ProtocolParameters,
+    update: &dugite_primitives::transaction::ProtocolParamUpdate,
+) -> Result<(), super::LedgerError> {
+    if let Some(v) = update.min_fee_a {
+        params.min_fee_a = v;
+    }
+    if let Some(v) = update.min_fee_b {
+        params.min_fee_b = v;
+    }
+    if let Some(v) = update.max_block_body_size {
+        params.max_block_body_size = v;
+    }
+    if let Some(v) = update.max_tx_size {
+        params.max_tx_size = v;
+    }
+    if let Some(v) = update.max_block_header_size {
+        params.max_block_header_size = v;
+    }
+    if let Some(v) = update.key_deposit {
+        params.key_deposit = v;
+    }
+    if let Some(v) = update.pool_deposit {
+        params.pool_deposit = v;
+    }
+    if let Some(v) = update.e_max {
+        params.e_max = v;
+    }
+    if let Some(v) = update.n_opt {
+        params.n_opt = v;
+    }
+    if let Some(ref v) = update.a0 {
+        params.a0 = v.clone();
+    }
+    if let Some(ref v) = update.rho {
+        params.rho = v.clone();
+    }
+    if let Some(ref v) = update.tau {
+        params.tau = v.clone();
+    }
+    if let Some(ref v) = update.d {
+        params.d = v.clone();
+    }
+    if let Some(v) = update.min_pool_cost {
+        params.min_pool_cost = v;
+    }
+    if let Some(v) = update.ada_per_utxo_byte {
+        params.ada_per_utxo_byte = v;
+    }
+    if let Some(ref v) = update.cost_models {
+        if let Some(ref v1) = v.plutus_v1 {
+            params.cost_models.plutus_v1 = Some(v1.clone());
+        }
+        if let Some(ref v2) = v.plutus_v2 {
+            params.cost_models.plutus_v2 = Some(v2.clone());
+        }
+        if let Some(ref v3) = v.plutus_v3 {
+            params.cost_models.plutus_v3 = Some(v3.clone());
+        }
+    }
+    if let Some(ref v) = update.execution_costs {
+        params.execution_costs = v.clone();
+    }
+    if let Some(v) = update.max_tx_ex_units {
+        params.max_tx_ex_units = v;
+    }
+    if let Some(v) = update.max_block_ex_units {
+        params.max_block_ex_units = v;
+    }
+    if let Some(v) = update.max_val_size {
+        params.max_val_size = v;
+    }
+    if let Some(v) = update.collateral_percentage {
+        params.collateral_percentage = v;
+    }
+    if let Some(v) = update.max_collateral_inputs {
+        params.max_collateral_inputs = v;
+    }
+    if let Some(v) = update.min_fee_ref_script_cost_per_byte {
+        params.min_fee_ref_script_cost_per_byte = v;
+    }
+    if let Some(v) = update.drep_deposit {
+        params.drep_deposit = v;
+    }
+    if let Some(v) = update.gov_action_lifetime {
+        params.gov_action_lifetime = v;
+    }
+    if let Some(v) = update.gov_action_deposit {
+        params.gov_action_deposit = v;
+    }
+    if let Some(ref v) = update.dvt_pp_network_group {
+        LedgerState::validate_threshold("dvt_pp_network_group", v)?;
+        params.dvt_pp_network_group = v.clone();
+    }
+    if let Some(ref v) = update.dvt_pp_economic_group {
+        LedgerState::validate_threshold("dvt_pp_economic_group", v)?;
+        params.dvt_pp_economic_group = v.clone();
+    }
+    if let Some(ref v) = update.dvt_pp_technical_group {
+        LedgerState::validate_threshold("dvt_pp_technical_group", v)?;
+        params.dvt_pp_technical_group = v.clone();
+    }
+    if let Some(ref v) = update.dvt_pp_gov_group {
+        LedgerState::validate_threshold("dvt_pp_gov_group", v)?;
+        params.dvt_pp_gov_group = v.clone();
+    }
+    if let Some(ref v) = update.dvt_hard_fork {
+        LedgerState::validate_threshold("dvt_hard_fork", v)?;
+        params.dvt_hard_fork = v.clone();
+    }
+    if let Some(ref v) = update.dvt_no_confidence {
+        LedgerState::validate_threshold("dvt_no_confidence", v)?;
+        params.dvt_no_confidence = v.clone();
+    }
+    if let Some(ref v) = update.dvt_committee_normal {
+        LedgerState::validate_threshold("dvt_committee_normal", v)?;
+        params.dvt_committee_normal = v.clone();
+    }
+    if let Some(ref v) = update.dvt_committee_no_confidence {
+        LedgerState::validate_threshold("dvt_committee_no_confidence", v)?;
+        params.dvt_committee_no_confidence = v.clone();
+    }
+    if let Some(ref v) = update.dvt_constitution {
+        LedgerState::validate_threshold("dvt_constitution", v)?;
+        params.dvt_constitution = v.clone();
+    }
+    if let Some(ref v) = update.dvt_treasury_withdrawal {
+        LedgerState::validate_threshold("dvt_treasury_withdrawal", v)?;
+        params.dvt_treasury_withdrawal = v.clone();
+    }
+    if let Some(ref v) = update.pvt_motion_no_confidence {
+        LedgerState::validate_threshold("pvt_motion_no_confidence", v)?;
+        params.pvt_motion_no_confidence = v.clone();
+    }
+    if let Some(ref v) = update.pvt_committee_normal {
+        LedgerState::validate_threshold("pvt_committee_normal", v)?;
+        params.pvt_committee_normal = v.clone();
+    }
+    if let Some(ref v) = update.pvt_committee_no_confidence {
+        LedgerState::validate_threshold("pvt_committee_no_confidence", v)?;
+        params.pvt_committee_no_confidence = v.clone();
+    }
+    if let Some(ref v) = update.pvt_hard_fork {
+        LedgerState::validate_threshold("pvt_hard_fork", v)?;
+        params.pvt_hard_fork = v.clone();
+    }
+    if let Some(ref v) = update.pvt_pp_security_group {
+        LedgerState::validate_threshold("pvt_pp_security_group", v)?;
+        params.pvt_pp_security_group = v.clone();
+    }
+    if let Some(v) = update.min_committee_size {
+        params.committee_min_size = v;
+    }
+    if let Some(v) = update.committee_term_limit {
+        params.committee_max_term_length = v;
+    }
+    if let Some(v) = update.drep_activity {
+        params.drep_activity = v;
+    }
+    if let Some(v) = update.protocol_version_major {
+        params.protocol_version_major = v;
+    }
+    if let Some(v) = update.protocol_version_minor {
+        params.protocol_version_minor = v;
+    }
+    Ok(())
+}
+
+/// The main governance ratification pipeline.
+///
+/// Equivalent to `LedgerState::ratify_proposals` but operates on
+/// decomposed sub-states, allowing it to be called from both the
+/// monolithic `LedgerState` path and the `EraRules` dispatch path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ratify_proposals_impl(
+    epoch: EpochNo,
+    epochs: &mut EpochSubState,
+    certs: &mut CertSubState,
+    gov: &mut GovSubState,
+) {
+    // Lazy forest reconstruction for backward compatibility with old snapshots
+    if gov.governance.proposal_roots == GovRelation::default()
+        && !gov.governance.proposals.is_empty()
+    {
+        let (roots, graph) = rebuild_forest_from_flat(
+            &gov.governance.proposals,
+            &gov.governance.enacted_pparam_update,
+            &gov.governance.enacted_hard_fork,
+            &gov.governance.enacted_committee,
+            &gov.governance.enacted_constitution,
+        );
+        let gov_state = Arc::make_mut(&mut gov.governance);
+        gov_state.proposal_roots = roots;
+        gov_state.proposal_graph = graph;
+    }
+
+    let total_drep_stake = compute_total_drep_stake_from(gov, certs);
+    let (drep_power_cache, no_confidence_stake, _abstain_stake) =
+        build_drep_power_cache_from(gov, certs);
+
+    // Diagnostic: DRep distribution details
+    {
+        let cache_sum: u64 = drep_power_cache.values().sum();
+        let active_dreps = gov.governance.dreps.values().filter(|d| d.active).count();
+        let total_dreps = gov.governance.dreps.len();
+        debug!(
+            epoch = epoch.0,
+            drep_cache_size = drep_power_cache.len(),
+            drep_cache_sum = cache_sum,
+            no_confidence_stake,
+            _abstain_stake,
+            total_drep_stake,
+            active_dreps,
+            total_dreps,
+            "DRep distribution for ratification"
+        );
+    }
+
+    // SPO voting power from the **set** snapshot
+    let ratify_pool_stake: Option<HashMap<Hash28, Lovelace>> =
+        epochs.snapshots.set.as_ref().map(|s| s.pool_stake.clone());
+    let ratify_pool_stake_ref = ratify_pool_stake.as_ref();
+    let total_spo_stake: u64 = ratify_pool_stake_ref
+        .map(|ps| {
+            ps.values()
+                .fold(0u64, |acc, s| acc.saturating_add(s.0))
+                .max(1)
+        })
+        .unwrap_or_else(|| compute_total_spo_stake_from(certs, epochs));
+
+    let snapshot = gov.governance.ratification_snapshot.clone();
+    let using_snapshot = snapshot.is_some();
+
+    let (
+        snap_proposals,
+        snap_votes,
+        snap_committee_hot_keys,
+        snap_committee_expiration,
+        snap_committee_resigned,
+        snap_committee_threshold,
+        _snap_no_confidence,
+        mut enacted_pparam,
+        mut enacted_hardfork,
+        mut enacted_committee_root,
+        mut enacted_constitution,
+    ) = if let Some(ref snap) = snapshot {
+        (
+            snap.proposals.clone(),
+            snap.votes_by_action.clone(),
+            snap.committee_hot_keys.clone(),
+            snap.committee_expiration.clone(),
+            snap.committee_resigned.clone(),
+            snap.committee_threshold.clone(),
+            snap.no_confidence,
+            snap.enacted_pparam_update.clone(),
+            snap.enacted_hard_fork.clone(),
+            snap.enacted_committee.clone(),
+            snap.enacted_constitution.clone(),
+        )
+    } else {
+        let g = &gov.governance;
+        (
+            g.proposals.clone(),
+            g.votes_by_action.clone(),
+            g.committee_hot_keys.clone(),
+            g.committee_expiration.clone(),
+            g.committee_resigned.clone(),
+            g.committee_threshold.clone(),
+            g.no_confidence,
+            g.enacted_pparam_update.clone(),
+            g.enacted_hard_fork.clone(),
+            g.enacted_committee.clone(),
+            g.enacted_constitution.clone(),
+        )
+    };
+
+    let snap_vote_delegations: Option<HashMap<Hash32, DRep>> = if let Some(ref snap) = snapshot {
+        if snap.vote_delegations.is_empty() {
+            None
+        } else {
+            Some(snap.vote_delegations.clone())
+        }
+    } else {
+        None
+    };
+    let snap_vote_delegations_ref = snap_vote_delegations.as_ref();
+
+    let mut candidates: Vec<(GovActionId, GovAction, EpochNo)> = snap_proposals
+        .iter()
+        .map(|(id, state)| {
+            (
+                id.clone(),
+                state.procedure.gov_action.clone(),
+                state.expires_epoch,
+            )
+        })
+        .collect();
+    candidates.sort_by_key(|(_, action, _)| gov_action_priority(action));
+
+    let bootstrap = epochs.protocol_params.protocol_version_major == 9;
+
+    debug!(
+        epoch = epoch.0,
+        active_proposals = candidates.len(),
+        total_drep_stake,
+        total_spo_stake,
+        no_confidence_stake,
+        using_snapshot,
+        bootstrap,
+        protocol_version = epochs.protocol_params.protocol_version_major,
+        cc_members = snap_committee_expiration.len(),
+        cc_hot_keys = snap_committee_hot_keys.len(),
+        cc_threshold = ?snap_committee_threshold,
+        "Governance ratification: evaluating proposals"
+    );
+
+    let mut ratified = Vec::new();
+    let mut delayed = false;
+    let mut enacted_withdrawals_total: u64 = 0;
+
+    for (action_id, action, expires) in &candidates {
+        if *expires < epoch {
+            continue;
+        }
+
+        if !prev_action_as_expected(
+            action,
+            &enacted_pparam,
+            &enacted_hardfork,
+            &enacted_committee_root,
+            &enacted_constitution,
+        ) {
+            trace!(
+                action_id = %action_id.transaction_id.to_hex(),
+                action_type = ?std::mem::discriminant(action),
+                "Governance proposal: prev_action_id chain mismatch — skipping"
+            );
+            continue;
+        }
+
+        if delayed {
+            debug!(
+                action_id = %action_id.transaction_id.to_hex(),
+                "Governance proposal: delayed by previously enacted action"
+            );
+            continue;
+        }
+
+        if let Some(state) = snap_proposals.get(action_id) {
+            let remaining_treasury = epochs.treasury.0.saturating_sub(enacted_withdrawals_total);
+            let met = check_ratification_impl(
+                action_id,
+                state,
+                total_drep_stake,
+                total_spo_stake,
+                &drep_power_cache,
+                no_confidence_stake,
+                &snap_votes,
+                &snap_committee_hot_keys,
+                &snap_committee_expiration,
+                &snap_committee_resigned,
+                &snap_committee_threshold,
+                remaining_treasury,
+                ratify_pool_stake_ref,
+                snap_vote_delegations_ref,
+                epoch,
+                epochs,
+                certs,
+                gov,
+            );
+            if met {
+                debug!(
+                    action_id = %action_id.transaction_id.to_hex(),
+                    action_type = ?std::mem::discriminant(action),
+                    "Governance proposal RATIFIED"
+                );
+                enact_gov_action_impl(action, epochs, certs, gov);
+                if let GovAction::TreasuryWithdrawals { withdrawals, .. } = action {
+                    enacted_withdrawals_total += withdrawals
+                        .values()
+                        .fold(0u64, |acc, a| acc.saturating_add(a.0));
+                }
+                update_enacted_root_local(
+                    action_id,
+                    action,
+                    &mut enacted_pparam,
+                    &mut enacted_hardfork,
+                    &mut enacted_committee_root,
+                    &mut enacted_constitution,
+                );
+                ratified.push(action_id.clone());
+                if is_delaying_action(action) {
+                    delayed = true;
+                }
+            } else if !matches!(action, GovAction::InfoAction) {
+                trace!(
+                    action_id = %action_id.transaction_id.to_hex(),
+                    action_type = ?std::mem::discriminant(action),
+                    "Governance proposal NOT ratified"
+                );
+            }
+        }
+    }
+
+    // Persist final enacted roots
+    {
+        let gov_state = Arc::make_mut(&mut gov.governance);
+        gov_state.enacted_pparam_update = enacted_pparam;
+        gov_state.enacted_hard_fork = enacted_hardfork;
+        gov_state.enacted_committee = enacted_committee_root;
+        gov_state.enacted_constitution = enacted_constitution;
+    }
+
+    // ── proposalsApplyEnactment ──────────────────────────────────────
+
+    // ── Step 1: Expire proposals with descendants ─────────────────────
+    let current_epoch = epoch;
+    let expired_ids: Vec<GovActionId> = gov
+        .governance
+        .proposals
+        .iter()
+        .filter(|(_, state)| state.expires_epoch < current_epoch)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let expired_removed = if !expired_ids.is_empty() {
+        let gov_state = Arc::make_mut(&mut gov.governance);
+        let removed = forest_remove_with_descendants(
+            &expired_ids,
+            &mut gov_state.proposals,
+            &mut gov_state.proposal_roots,
+            &mut gov_state.proposal_graph,
+            &mut gov_state.votes_by_action,
+        );
+        for (action_id, proposal_state) in &removed {
+            let deposit = proposal_state.procedure.deposit;
+            if deposit.0 > 0 {
+                let return_addr = &proposal_state.procedure.return_addr;
+                if return_addr.len() >= 29 {
+                    let key = LedgerState::reward_account_to_hash(return_addr);
+                    if certs.reward_accounts.contains_key(&key) {
+                        *Arc::make_mut(&mut certs.reward_accounts)
+                            .entry(key)
+                            .or_insert(Lovelace(0)) += deposit;
+                    } else {
+                        epochs.treasury += deposit;
+                        debug!(
+                            "Governance proposal {:?} deposit {} -> treasury \
+                             (unregistered return address)",
+                            action_id, deposit.0
+                        );
+                    }
+                }
+            }
+            debug!(
+                "Governance proposal expired: {:?} (deposit {} returned)",
+                action_id, proposal_state.procedure.deposit.0
+            );
+        }
+        if !removed.is_empty() {
+            debug!(
+                "Expired {} governance proposal(s) (incl. descendants) at epoch {}",
+                removed.len(),
+                current_epoch.0
+            );
+        }
+        removed.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    // ── Step 2: Remove enacted proposals + refund deposits ────────────
+    let mut ratified_with_state = Vec::new();
+
+    if !ratified.is_empty() {
+        for action_id in &ratified {
+            if let Some(state) = gov.governance.proposals.get(action_id) {
+                let purpose = gov_action_purpose_tag(&state.procedure.gov_action);
+                if let Some(tag) = purpose {
+                    let gov_state = Arc::make_mut(&mut gov.governance);
+                    forest_remove_node(
+                        action_id,
+                        tag,
+                        &mut gov_state.proposal_roots,
+                        &mut gov_state.proposal_graph,
+                    );
+                }
+            }
+            if let Some(proposal_state) = Arc::make_mut(&mut gov.governance)
+                .proposals
+                .remove(action_id)
+            {
+                let deposit = proposal_state.procedure.deposit;
+                if deposit.0 > 0 {
+                    let return_addr = &proposal_state.procedure.return_addr;
+                    if return_addr.len() >= 29 {
+                        let key = LedgerState::reward_account_to_hash(return_addr);
+                        if certs.reward_accounts.contains_key(&key) {
+                            *Arc::make_mut(&mut certs.reward_accounts)
+                                .entry(key)
+                                .or_insert(Lovelace(0)) += deposit;
+                        } else {
+                            epochs.treasury += deposit;
+                            debug!(
+                                "Governance proposal {:?} deposit {} -> treasury \
+                                 (unregistered return address)",
+                                action_id, deposit.0
+                            );
+                        }
+                    }
+                }
+                ratified_with_state.push((action_id.clone(), proposal_state));
+            }
+            Arc::make_mut(&mut gov.governance)
+                .votes_by_action
+                .remove(action_id);
+        }
+        debug!(
+            "Governance   {} proposal(s) ratified and enacted",
+            ratified.len()
+        );
+
+        // ── Step 3: Per-enacted sibling removal + root promotion ──────
+        for (enacted_id, enacted_state) in &ratified_with_state {
+            let enacted_action = &enacted_state.procedure.gov_action;
+            let Some(tag) = gov_action_purpose_tag(enacted_action) else {
+                continue;
+            };
+
+            let siblings: Vec<GovActionId> = {
+                let root = gov.governance.proposal_roots.get(tag);
+                root.children
+                    .iter()
+                    .filter(|id| *id != enacted_id)
+                    .cloned()
+                    .collect()
+            };
+
+            if !siblings.is_empty() {
+                let gov_state = Arc::make_mut(&mut gov.governance);
+                let removed = forest_remove_with_descendants(
+                    &siblings,
+                    &mut gov_state.proposals,
+                    &mut gov_state.proposal_roots,
+                    &mut gov_state.proposal_graph,
+                    &mut gov_state.votes_by_action,
+                );
+                for (_action_id, proposal_state) in &removed {
+                    let deposit = proposal_state.procedure.deposit;
+                    if deposit.0 > 0 {
+                        let return_addr = &proposal_state.procedure.return_addr;
+                        if return_addr.len() >= 29 {
+                            let key = LedgerState::reward_account_to_hash(return_addr);
+                            if certs.reward_accounts.contains_key(&key) {
+                                *Arc::make_mut(&mut certs.reward_accounts)
+                                    .entry(key)
+                                    .or_insert(Lovelace(0)) += deposit;
+                            } else {
+                                epochs.treasury += deposit;
+                            }
+                        }
+                    }
+                }
+                if !removed.is_empty() {
+                    debug!(
+                        "Governance   {} sibling/descendant proposal(s) removed due to enactment of {:?}",
+                        removed.len(),
+                        enacted_id
+                    );
+                }
+            }
+
+            let gov_state = Arc::make_mut(&mut gov.governance);
+            forest_promote_root(
+                enacted_id,
+                tag,
+                &mut gov_state.proposal_roots,
+                &mut gov_state.proposal_graph,
+            );
+        }
+    }
+
+    // Store ratification and expiry results
+    let gov_state = Arc::make_mut(&mut gov.governance);
+    gov_state.last_ratified = ratified_with_state;
+    gov_state.last_expired = expired_removed;
+    gov_state.last_ratify_delayed = delayed;
 }
 
 /// DRep voting group for protocol parameter classification per CIP-1694.

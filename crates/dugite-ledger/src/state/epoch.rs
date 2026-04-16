@@ -1,3 +1,7 @@
+use super::governance::{
+    capture_governance_snapshots, expire_committee_members, ratify_proposals_impl,
+    update_dormant_epochs, update_drep_activity,
+};
 use super::{LedgerState, StakeSnapshot};
 use crate::ledger_seq::EpochTransitionDelta;
 use dugite_primitives::hash::{Hash28, Hash32};
@@ -571,88 +575,20 @@ impl LedgerState {
         // cleanup after enactment, per Haskell `proposalsApplyEnactment`.
         // The ratification skip uses self.epoch (the old epoch), matching
         // Haskell's reCurrentEpoch from the DRep pulser.
-        self.ratify_proposals();
+        ratify_proposals_impl(self.epoch, &mut self.epochs, &mut self.certs, &mut self.gov);
 
         // Update dormant epoch counter per Haskell Conway.Rules.Epoch `updateNumDormantEpochs`.
-        // Only applicable during Conway era (PV >= 9).
-        if self.epochs.protocol_params.protocol_version_major >= 9 {
-            let gov = Arc::make_mut(&mut self.gov.governance);
-            if gov.proposals.is_empty() {
-                gov.num_dormant_epochs = gov.num_dormant_epochs.saturating_add(1);
-                debug!(
-                    epoch = new_epoch.0,
-                    num_dormant = gov.num_dormant_epochs,
-                    "Governance: epoch is dormant (no active proposals)"
-                );
-            }
-        }
+        update_dormant_epochs(new_epoch, &self.epochs, &mut self.gov);
 
         // Mark inactive DReps per CIP-1694.
-        //
-        // Haskell stores drepExpiry = (activity_epoch + drep_activity) - num_dormant
-        // at registration/vote time, then checks: currentEpoch > drepExpiry.
-        // We store the same value in drep.drep_expiry, so the check is simple.
-        if self.epochs.protocol_params.protocol_version_major >= 9 {
-            let mut newly_inactive = 0u64;
-            let mut reactivated = 0u64;
-            for drep in Arc::make_mut(&mut self.gov.governance).dreps.values_mut() {
-                let expired = new_epoch.0 > drep.drep_expiry.0;
-                if expired && drep.active {
-                    drep.active = false;
-                    newly_inactive += 1;
-                } else if !expired && !drep.active {
-                    drep.active = true;
-                    reactivated += 1;
-                }
-            }
-            if newly_inactive > 0 || reactivated > 0 {
-                debug!(
-                    "DRep activity update at epoch {}: {} newly inactive, {} reactivated",
-                    new_epoch.0, newly_inactive, reactivated
-                );
-            }
-        }
+        update_drep_activity(new_epoch, &self.epochs, &mut self.gov);
 
-        // Expire committee members that have passed their expiration epoch
-        let expired_members: Vec<Hash32> = self
-            .gov
-            .governance
-            .committee_expiration
-            .iter()
-            .filter(|(_, exp_epoch)| **exp_epoch <= new_epoch)
-            .map(|(hash, _)| *hash)
-            .collect();
-        if !expired_members.is_empty() {
-            for hash in &expired_members {
-                Arc::make_mut(&mut self.gov.governance)
-                    .committee_hot_keys
-                    .remove(hash);
-                Arc::make_mut(&mut self.gov.governance)
-                    .committee_expiration
-                    .remove(hash);
-            }
-            debug!(
-                "Expired {} committee members at epoch {}",
-                expired_members.len(),
-                new_epoch.0
-            );
-        }
+        // Expire committee members that have passed their expiration epoch.
+        expire_committee_members(new_epoch, &mut self.gov);
 
         // Capture the ratification snapshot AND DRep distribution for the NEXT
         // epoch boundary.
-        //
-        // Per Haskell `setFreshDRepPulsingState`, the pulser is created from the
-        // post-transition state — after ratification/expiry have pruned proposals,
-        // enacted roots have been updated, DRep activity has been updated, and
-        // committee members have been expired.  Both snapshots will be consumed at
-        // the NEXT epoch boundary: the ratification snapshot by `ratify_proposals()`
-        // (so proposals/votes submitted during the new epoch are not considered),
-        // and the DRep distribution by `build_drep_power_cache()` (matching the
-        // one-epoch-lagged DRep pulser lifecycle in Haskell).
-        if self.epochs.protocol_params.protocol_version_major >= 9 {
-            self.capture_drep_distribution_snapshot();
-            self.capture_ratification_snapshot();
-        }
+        capture_governance_snapshots(self.epoch, &self.epochs, &self.certs, &mut self.gov);
 
         // Recalculate totalObligation (deposits) from scratch, matching Haskell's
         // EPOCH rule which replaces utxosDeposited with a fresh sum.  This serves
