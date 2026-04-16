@@ -27,6 +27,20 @@ use crate::utxo_diff::UtxoDiff;
 use dugite_primitives::block::Block;
 use dugite_primitives::protocol_params::ProtocolParameters;
 
+/// Conway genesis initialization data needed by era-transition rules.
+/// Populated from conway-genesis.json at node startup.
+#[derive(Debug, Clone, Default)]
+pub struct ConwayGenesisInit {
+    /// Initial DRep registrations: (credential_hash, deposit_lovelace)
+    pub initial_dreps: Vec<(Hash28, u64)>,
+    /// Initial committee members: (credential_hash_bytes, expiry_epoch)
+    pub committee_members: Vec<([u8; 32], u64)>,
+    /// Committee threshold as (numerator, denominator)
+    pub committee_threshold: Option<(u64, u64)>,
+    /// Initial constitution
+    pub constitution: Option<dugite_primitives::transaction::Constitution>,
+}
+
 /// Read-only context available to all era rules.
 /// Assembled by the orchestrator before dispatching.
 pub struct RuleContext<'a> {
@@ -49,6 +63,8 @@ pub struct RuleContext<'a> {
     /// Index of the current transaction within the block (0-based).
     /// Used for pointer map entries during certificate processing.
     pub tx_index: u64,
+    /// Conway genesis initialization data (needed by era-transition rules).
+    pub conway_genesis: Option<&'a ConwayGenesisInit>,
 }
 
 /// Era-specific ledger rules.

@@ -824,6 +824,21 @@ impl Node {
             debug!("Seeded {} initial DReps from Conway genesis", count);
         }
 
+        // Store Conway genesis init data on ledger for era-transition rules.
+        {
+            let has_data = conway_committee_threshold.is_some()
+                || !conway_committee_members.is_empty()
+                || !conway_initial_dreps.is_empty();
+            if has_data {
+                ledger.conway_genesis_init = Some(dugite_ledger::eras::ConwayGenesisInit {
+                    initial_dreps: conway_initial_dreps,
+                    committee_members: conway_committee_members,
+                    committee_threshold: conway_committee_threshold,
+                    constitution: ledger.gov.governance.constitution.clone(),
+                });
+            }
+        }
+
         // Wire up on-disk UTxO store if LSM backend is configured
         if matches!(
             args.storage_config.utxo.backend,

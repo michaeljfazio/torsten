@@ -71,6 +71,7 @@ impl LedgerState {
             stability_window_3kf: self.stability_window_3kf,
             randomness_stabilisation_window: self.randomness_stabilisation_window,
             tx_index,
+            conway_genesis: self.conway_genesis_init.as_ref(),
         }
     }
 
@@ -151,6 +152,7 @@ impl LedgerState {
                 stability_window_3kf: self.stability_window_3kf,
                 randomness_stabilisation_window: self.randomness_stabilisation_window,
                 tx_index: 0,
+                conway_genesis: self.conway_genesis_init.as_ref(),
             };
             transition_rules.on_era_transition(
                 self.era,
@@ -316,6 +318,7 @@ impl LedgerState {
                 stability_window_3kf: self.stability_window_3kf,
                 randomness_stabilisation_window: self.randomness_stabilisation_window,
                 tx_index: 0,
+                conway_genesis: self.conway_genesis_init.as_ref(),
             };
             rules.validate_block_body(block, &body_ctx, &self.utxo)?;
         }
@@ -586,6 +589,7 @@ impl LedgerState {
                 stability_window_3kf: self.stability_window_3kf,
                 randomness_stabilisation_window: self.randomness_stabilisation_window,
                 tx_index: tx_idx as u64,
+                conway_genesis: self.conway_genesis_init.as_ref(),
             };
 
             if !tx.is_valid {
@@ -674,6 +678,7 @@ impl LedgerState {
                 stability_window_3kf: self.stability_window_3kf,
                 randomness_stabilisation_window: self.randomness_stabilisation_window,
                 tx_index: 0,
+                conway_genesis: self.conway_genesis_init.as_ref(),
             };
             rules.evolve_nonce(&block.header, &nonce_ctx, &mut self.consensus);
         }

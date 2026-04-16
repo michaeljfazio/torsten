@@ -1170,6 +1170,7 @@ mod tests {
             stability_window_3kf: 0,
             randomness_stabilisation_window: 0,
             tx_index: 0,
+            conway_genesis: None,
         }
     }
 

@@ -146,6 +146,9 @@ pub struct LedgerState {
     /// Security parameter k — maximum rollback depth.
     /// Not persisted in snapshots; set from genesis config at startup.
     pub security_param: u64,
+    /// Conway genesis initialization data (needed by era-transition rules).
+    /// Populated from conway-genesis.json at node startup; not persisted in snapshots.
+    pub conway_genesis_init: Option<crate::eras::ConwayGenesisInit>,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -707,6 +710,7 @@ impl LedgerState {
             randomness_stabilisation_window: 172800, // 4k/f on mainnet: ceil(4*2160/0.05)
             stability_window_3kf: 129600,            // 3k/f on mainnet: ceil(3*2160/0.05)
             security_param: 2160,
+            conway_genesis_init: None,
         }
     }
 
@@ -993,7 +997,8 @@ impl LedgerState {
             // Will be recalculated by set_epoch_length()
             randomness_stabilisation_window: 0,
             stability_window_3kf: 0,
-            security_param: 0, // Will be set by set_epoch_length()
+            security_param: 0,         // Will be set by set_epoch_length()
+            conway_genesis_init: None, // Will be set by caller
         }
     }
 
@@ -1039,6 +1044,7 @@ impl LedgerState {
             randomness_stabilisation_window: self.randomness_stabilisation_window,
             stability_window_3kf: self.stability_window_3kf,
             security_param: self.security_param,
+            conway_genesis_init: self.conway_genesis_init.clone(),
         }
     }
 

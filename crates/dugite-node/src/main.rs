@@ -433,6 +433,21 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         }
     }
 
+    // Build ConwayGenesisInit for era-transition rules before variables are consumed.
+    let conway_genesis_init = if conway_committee_threshold.is_some()
+        || !conway_committee_members.is_empty()
+        || !conway_initial_dreps.is_empty()
+    {
+        Some(dugite_ledger::eras::ConwayGenesisInit {
+            initial_dreps: conway_initial_dreps.clone(),
+            committee_members: conway_committee_members.clone(),
+            committee_threshold: conway_committee_threshold,
+            constitution: conway_constitution.clone(),
+        })
+    } else {
+        None
+    };
+
     // Initialize fresh ledger state from genesis params
     let mut ledger = dugite_ledger::LedgerState::new(protocol_params);
 
@@ -492,6 +507,9 @@ async fn run_dump_snapshot(args: DumpSnapshotArgs) -> Result<()> {
         }
         info!(count, "Seeded initial DReps from Conway genesis");
     }
+
+    // Store Conway genesis init data on ledger for era-transition rules.
+    ledger.conway_genesis_init = conway_genesis_init;
 
     // Apply Shelley genesis configuration (epoch length, slot config, reserves)
     // Must use set_epoch_length() (not direct field assignment) to compute the

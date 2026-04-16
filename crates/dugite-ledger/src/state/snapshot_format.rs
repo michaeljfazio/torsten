@@ -325,6 +325,7 @@ impl From<LedgerStateSnapshot> for super::LedgerState {
             randomness_stabilisation_window: s.randomness_stabilisation_window,
             stability_window_3kf: s.stability_window_3kf,
             security_param: 0, // Set from genesis config at startup via set_epoch_length()
+            conway_genesis_init: None, // Set from genesis config at startup
         }
     }
 }
