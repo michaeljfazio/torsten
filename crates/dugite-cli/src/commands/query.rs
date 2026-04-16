@@ -1208,8 +1208,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
 
                 // Strip HFC success wrapper array(1)
@@ -1386,8 +1386,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
 
                 // Strip HFC wrapper
@@ -1488,8 +1488,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
 
                 // Strip HFC wrapper
@@ -1689,8 +1689,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
                 // Strip HFC wrapper
                 let pos = decoder.position();
@@ -1761,8 +1761,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&result);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Unexpected response tag: {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
                 // Strip HFC wrapper
                 let pos = decoder.position();
@@ -1848,8 +1848,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&result);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Unexpected response tag: {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
                 // Strip HFC success wrapper
                 let pos = decoder.position();
@@ -2038,8 +2038,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
 
                 // Strip HFC wrapper
@@ -2083,8 +2083,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
 
                 // Strip HFC wrapper
@@ -2142,8 +2142,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array();
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
 
                 // Strip HFC wrapper array(1)
@@ -2427,8 +2427,8 @@ impl QueryCmd {
                 let mut decoder = minicbor::Decoder::new(&raw);
                 let _ = decoder.array(); // MsgResult outer array(2)
                 let tag = decoder.u32().unwrap_or(999);
-                if tag != 6 {
-                    anyhow::bail!("Expected MsgResult(6), got {tag}");
+                if tag != 4 {
+                    anyhow::bail!("Expected MsgResult tag 4, got {tag}");
                 }
 
                 // EraHistory is NOT wrapped in an HFC success array(1).  Decode
