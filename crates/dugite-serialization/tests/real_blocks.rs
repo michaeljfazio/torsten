@@ -116,3 +116,55 @@ fn test_decode_block_truncated() {
     let truncated = &cbor[..cbor.len() / 2];
     assert!(decode_block(truncated).is_err());
 }
+
+// ── BBODY body-size-from-cbor tests ──────────────────────────────────────────
+
+/// For each Shelley+ test vector, verify that `compute_block_body_size_from_cbor`
+/// returns the same value as the header's `body_size` field (the block producer's
+/// claim).  This confirms byte-exact agreement on real chain data.
+#[test]
+fn test_body_size_from_cbor_matches_header_shelley() {
+    body_size_cbor_check("shelley");
+}
+
+#[test]
+fn test_body_size_from_cbor_matches_header_mary() {
+    body_size_cbor_check("mary");
+}
+
+#[test]
+fn test_body_size_from_cbor_matches_header_alonzo() {
+    body_size_cbor_check("alonzo");
+}
+
+#[test]
+fn test_body_size_from_cbor_matches_header_babbage() {
+    body_size_cbor_check("babbage");
+}
+
+#[test]
+fn test_body_size_from_cbor_matches_header_conway() {
+    body_size_cbor_check("conway");
+}
+
+fn body_size_cbor_check(name: &str) {
+    let cbor = load_vector(name);
+    let block = decode_block(&cbor).unwrap();
+
+    let actual = dugite_serialization::compute_block_body_size_from_cbor(&cbor)
+        .unwrap_or_else(|| panic!("{name}: compute_block_body_size_from_cbor returned None"));
+
+    assert_eq!(
+        actual, block.header.body_size,
+        "{name}: actual body size from CBOR ({actual}) != header claim ({})",
+        block.header.body_size
+    );
+}
+
+#[test]
+fn test_body_size_from_cbor_returns_none_for_invalid() {
+    // Empty input
+    assert!(dugite_serialization::compute_block_body_size_from_cbor(&[]).is_none());
+    // Garbage
+    assert!(dugite_serialization::compute_block_body_size_from_cbor(&[0xff, 0xfe]).is_none());
+}

@@ -129,6 +129,100 @@ pub fn decode_block_minimal_with_byron_epoch_length(
     decode_block_inner(cbor, byron_epoch_length, DecodeMode::Minimal)
 }
 
+/// Compute the actual block body size from raw block CBOR bytes.
+///
+/// Cardano Shelley+ blocks are serialized as `(era_tag, [header, tx_bodies,
+/// witness_sets, aux_data_map, invalid_txs])`.  The header's `block_body_size`
+/// field records the total serialized byte count of the 4 body components
+/// (indices 1..4 of the inner array).
+///
+/// This function parses the CBOR structure to measure those 4 components from
+/// the original wire bytes, giving a byte-exact value that can be compared
+/// against the header claim for the BBODY ledger rule.
+///
+/// Returns `None` for Byron/EBB blocks (which have no body_size header field)
+/// or if the CBOR structure is unexpected.
+pub fn compute_block_body_size_from_cbor(raw_cbor: &[u8]) -> Option<u64> {
+    use crate::haskell_snapshot::cbor_utils::skip_cbor_value;
+
+    // The wire format is a 2-element CBOR array: [era_tag, inner_block].
+    // Byron blocks use era_tag 0 (main) or 1 (EBB); Shelley+ use 2..6.
+    if raw_cbor.is_empty() {
+        return None;
+    }
+
+    // Parse outer array header (should be a 2-element array: 0x82)
+    let outer_major = raw_cbor[0] >> 5;
+    if outer_major != 4 {
+        return None; // not an array
+    }
+
+    // Skip the array header
+    let info = raw_cbor[0] & 0x1f;
+    let (outer_len, mut off) = match info {
+        0..=23 => (info as u64, 1usize),
+        24 if raw_cbor.len() >= 2 => (raw_cbor[1] as u64, 2),
+        _ => return None,
+    };
+    if outer_len != 2 {
+        return None; // unexpected outer structure
+    }
+
+    // Skip the era tag (first element: a uint)
+    let era_size = skip_cbor_value(&raw_cbor[off..]).ok()?;
+    let era_major = raw_cbor[off] >> 5;
+    if era_major != 0 {
+        return None; // not a uint era tag
+    }
+    // Read era tag value to filter out Byron
+    let era_info = raw_cbor[off] & 0x1f;
+    let era_tag = match era_info {
+        0..=23 => era_info as u64,
+        24 if raw_cbor.len() > off + 1 => raw_cbor[off + 1] as u64,
+        _ => return None,
+    };
+    // Byron main blocks (tag 0) and EBBs (tag 1) don't have body_size
+    if era_tag <= 1 {
+        return None;
+    }
+    off += era_size;
+
+    // Now at the inner block array: [header, tx_bodies, witnesses, aux_data, invalid_txs]
+    // Parse the inner array header
+    if off >= raw_cbor.len() {
+        return None;
+    }
+    let inner_major = raw_cbor[off] >> 5;
+    if inner_major != 4 {
+        return None; // not an array
+    }
+    let inner_info = raw_cbor[off] & 0x1f;
+    let (inner_len, hdr_bytes) = match inner_info {
+        0..=23 => (inner_info as u64, 1usize),
+        24 if raw_cbor.len() > off + 1 => (raw_cbor[off + 1] as u64, 2),
+        _ => return None,
+    };
+    // Shelley+ blocks have 5 elements (some early eras may have 4)
+    if inner_len < 4 {
+        return None;
+    }
+    off += hdr_bytes;
+
+    // Skip the header (index 0)
+    let header_size = skip_cbor_value(&raw_cbor[off..]).ok()?;
+    off += header_size;
+
+    // Measure body components (indices 1..inner_len-1)
+    let body_start = off;
+    let body_components = inner_len - 1; // everything except the header
+    for _ in 0..body_components {
+        let item_size = skip_cbor_value(&raw_cbor[off..]).ok()?;
+        off += item_size;
+    }
+
+    Some((off - body_start) as u64)
+}
+
 /// Shared block decode implementation.
 ///
 /// `mode` controls whether witness-set fields are populated.  All callers should
