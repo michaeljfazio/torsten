@@ -139,5 +139,8 @@ fuzz_target!(|data: &[u8]| {
     // Trigger epoch transition — must never panic.
     // The transition processes: RUPD (rewards), SNAP (snapshot rotation),
     // POOLREAP (retirements), protocol param updates, nonce evolution.
-    state.process_epoch_transition(EpochNo(epoch + 1));
+    #[allow(deprecated)]
+    {
+        state.process_epoch_transition(EpochNo(epoch + 1));
+    }
 });

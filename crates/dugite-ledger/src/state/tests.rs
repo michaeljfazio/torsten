@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use super::*;
 use dugite_primitives::address::{Address, BaseAddress, ByronAddress};
 use dugite_primitives::hash::Hash28;

@@ -35,6 +35,10 @@ impl LedgerState {
     /// The first RUPD fires during epoch 0 with empty GO, ss_fee=0, empty blocks.
     /// With d>=0.8: eta=1, expansion = rho*reserves, treasury gets tau*expansion.
     /// No pool rewards (empty GO has no pools). Applied at 0→1 boundary.
+    #[deprecated(
+        note = "Use EraRulesImpl::process_epoch_transition via apply_block instead. \
+                Retained for test compatibility."
+    )]
     pub fn process_epoch_transition(&mut self, new_epoch: EpochNo) {
         debug!("Epoch transition: {} -> {}", self.epoch.0, new_epoch.0);
 
@@ -726,6 +730,11 @@ impl LedgerState {
     /// reserves, protocol_params, nonces, etc.) and incremental reward credits by
     /// diffing the reward_accounts map.  This matches `apply_epoch_transition_delta()`
     /// in `ledger_seq.rs` which sets absolute values during forward reconstruction.
+    #[deprecated(
+        note = "Use EraRulesImpl::process_epoch_transition via apply_block instead. \
+                Retained for test compatibility."
+    )]
+    #[allow(deprecated)]
     pub fn process_epoch_transition_with_delta(
         &mut self,
         new_epoch: EpochNo,
@@ -1023,6 +1032,7 @@ impl LedgerState {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::super::{
         credential_to_hash, LedgerState, PoolRegistration, StakeSnapshot, MAX_LOVELACE_SUPPLY,
