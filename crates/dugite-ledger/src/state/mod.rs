@@ -1107,11 +1107,7 @@ impl LedgerState {
             .saturating_mul(self.shelley_transition_epoch);
         if slot < byron_slots {
             // Still in Byron era
-            if self.byron_epoch_length > 0 {
-                slot / self.byron_epoch_length
-            } else {
-                0
-            }
+            slot.checked_div(self.byron_epoch_length).unwrap_or(0)
         } else {
             // Shelley era
             let shelley_slots = slot - byron_slots;

@@ -867,6 +867,7 @@ pub(super) fn run_phase1_rules(
         // Check each input has a matching witness
         for input in &body.inputs {
             if let Some(utxo) = utxo_set.lookup(input) {
+                #[allow(clippy::collapsible_match)]
                 match utxo.address.payment_credential() {
                     Some(Credential::VerificationKey(keyhash)) => {
                         if !vkey_witness_hashes.contains(keyhash) {
