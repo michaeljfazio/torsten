@@ -1823,11 +1823,7 @@ fn convert_pallas_protocol_param_update(
         max_collateral_inputs: update.max_collateral_inputs,
         min_fee_ref_script_cost_per_byte: update.minfee_refscript_cost_per_byte.as_ref().map(|r| {
             // Convert rational to integer (numerator/denominator)
-            if r.denominator > 0 {
-                r.numerator / r.denominator
-            } else {
-                15 // default
-            }
+            r.numerator.checked_div(r.denominator).unwrap_or(15)
         }),
         drep_deposit: update.drep_deposit.map(Lovelace),
         gov_action_deposit: update.governance_action_deposit.map(Lovelace),
