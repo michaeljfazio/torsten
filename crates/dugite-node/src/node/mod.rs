@@ -145,6 +145,14 @@ pub struct Node {
     pub(crate) topology: Topology,
     pub(crate) chain_db: Arc<RwLock<ChainDB>>,
     pub(crate) ledger_state: Arc<RwLock<LedgerState>>,
+    /// Volatile delta window for O(1) rollback.
+    ///
+    /// Kept in sync with `ledger_state`: after each `apply_block_with_delta`,
+    /// the delta is pushed here. On rollback, `ledger_seq.rollback(n)` discards
+    /// volatile deltas and `ledger_state` is rolled back via DiffSeq.
+    ///
+    /// **Lock ordering:** always acquire `ledger_state` before `ledger_seq`.
+    pub(crate) ledger_seq: Arc<RwLock<dugite_ledger::ledger_seq::LedgerSeq>>,
     pub(crate) consensus: OuroborosPraos,
     pub(crate) mempool: Arc<Mempool>,
     /// Connection lifecycle manager — one TCP connection per peer,
@@ -924,6 +932,20 @@ impl Node {
             Some(ledger.consensus.opcert_counters.clone())
         };
 
+        // Build LedgerSeq anchor from a lightweight clone (no UTxO data)
+        // before moving `ledger` into the Arc. The security_param comes from
+        // genesis or defaults to 2160.
+        let seq_k = shelley_genesis
+            .as_ref()
+            .map(|g| g.security_param)
+            .unwrap_or(2160);
+        let ledger_seq = Arc::new(RwLock::new(
+            dugite_ledger::ledger_seq::LedgerSeq::with_defaults(
+                ledger.clone_without_utxos(),
+                seq_k,
+            ),
+        ));
+
         let ledger_state = Arc::new(RwLock::new(ledger));
 
         let mut consensus = if let Some(ref genesis) = shelley_genesis {
@@ -1366,6 +1388,7 @@ impl Node {
             topology: args.topology,
             chain_db,
             ledger_state,
+            ledger_seq,
             consensus,
             mempool,
             // Lifecycle manager, fetch task, and fetch channel are initialized

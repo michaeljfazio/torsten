@@ -16276,3 +16276,92 @@ fn test_preview_multi_epoch_rotation_matches_ledger_states() {
         }
     }
 }
+
+// =========================================================================
+// clone_without_utxos tests (#432)
+// =========================================================================
+
+#[test]
+fn test_clone_without_utxos_has_empty_utxo_set() {
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+    state.utxo.utxo_set.insert(
+        dugite_primitives::transaction::TransactionInput {
+            transaction_id: Hash32::from_bytes([1; 32]),
+            index: 0,
+        },
+        dugite_primitives::transaction::TransactionOutput {
+            address: Address::Byron(ByronAddress {
+                payload: vec![0u8; 32],
+            }),
+            value: Value::lovelace(1_000_000),
+            datum: OutputDatum::None,
+            script_ref: None,
+            is_legacy: false,
+            raw_cbor: None,
+        },
+    );
+    assert_eq!(state.utxo.utxo_set.len(), 1);
+
+    let cloned = state.clone_without_utxos();
+    assert_eq!(cloned.utxo.utxo_set.len(), 0);
+}
+
+#[test]
+fn test_clone_without_utxos_has_empty_diff_seq() {
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+    state
+        .utxo
+        .diff_seq
+        .push(SlotNo(1), Hash32::ZERO, crate::utxo_diff::UtxoDiff::new());
+    assert_eq!(state.utxo.diff_seq.len(), 1);
+
+    let cloned = state.clone_without_utxos();
+    assert!(cloned.utxo.diff_seq.is_empty());
+}
+
+#[test]
+fn test_clone_without_utxos_preserves_tip() {
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+    state.tip = dugite_primitives::block::Tip {
+        point: dugite_primitives::block::Point::Specific(
+            SlotNo(12345),
+            Hash32::from_bytes([5; 32]),
+        ),
+        block_number: dugite_primitives::time::BlockNo(100),
+    };
+
+    let cloned = state.clone_without_utxos();
+    assert_eq!(cloned.tip.point, state.tip.point);
+    assert_eq!(cloned.tip.block_number, state.tip.block_number);
+}
+
+#[test]
+fn test_clone_without_utxos_preserves_epoch_state() {
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+    state.epoch = EpochNo(42);
+    state.epochs.treasury = Lovelace(999_999_999);
+
+    let cloned = state.clone_without_utxos();
+    assert_eq!(cloned.epoch, EpochNo(42));
+    assert_eq!(cloned.epochs.treasury, Lovelace(999_999_999));
+}
+
+#[test]
+fn test_clone_without_utxos_preserves_security_param() {
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+    state.security_param = 500;
+
+    let cloned = state.clone_without_utxos();
+    assert_eq!(cloned.security_param, 500);
+}
+
+#[test]
+fn test_clone_without_utxos_preserves_scalar_fees() {
+    let mut state = LedgerState::new(ProtocolParameters::mainnet_defaults());
+    state.utxo.epoch_fees = Lovelace(5_000_000);
+    state.utxo.pending_donations = Lovelace(100);
+
+    let cloned = state.clone_without_utxos();
+    assert_eq!(cloned.utxo.epoch_fees, Lovelace(5_000_000));
+    assert_eq!(cloned.utxo.pending_donations, Lovelace(100));
+}

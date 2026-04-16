@@ -1039,6 +1039,7 @@ impl Node {
 
         // Now apply blocks to ledger — storage is confirmed
         let mut applied_count: u64 = 0;
+        let mut collected_deltas: Vec<dugite_ledger::ledger_seq::LedgerDelta> = Vec::new();
         {
             let mut ls = self.ledger_state.write().await;
             let ledger_slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
@@ -1219,15 +1220,8 @@ impl Node {
                     BlockValidationMode::ApplyOnly
                 };
                 match ls.apply_block_with_delta(block, ledger_mode) {
-                    Ok(_delta) => {
-                        // Delta produced successfully. The ledger state has been
-                        // mutated by apply_block_with_delta (which delegates to
-                        // apply_block internally). The delta will be pushed to
-                        // LedgerSeq once it is fully wired as the authoritative
-                        // state store (Phase 4 of #308).
-                        //
-                        // TODO(#308-phase4): Push delta to LedgerSeq:
-                        //   self.ledger_seq.write().await.push(delta);
+                    Ok(delta) => {
+                        collected_deltas.push(delta);
                     }
                     Err(e) => {
                         error!(
@@ -1253,6 +1247,14 @@ impl Node {
                     }
                 }
                 applied_count += 1;
+            }
+        }
+
+        // Push collected deltas to LedgerSeq (after releasing ledger_state lock).
+        if !collected_deltas.is_empty() {
+            let mut seq = self.ledger_seq.write().await;
+            for delta in collected_deltas {
+                seq.push(delta);
             }
         }
 
@@ -1322,13 +1324,9 @@ impl Node {
                             oldest_slot,
                             oldest_block_no,
                             &mut |_slot, _hash, _block_no| {
-                                // TODO(subsystem-4): advance LedgerSeq anchor here.
-                                // For now this is a no-op; the existing flush_to_immutable
-                                // path handles immutable promotion.
-                                // When LedgerSeq is fully integrated, call seq.push(delta)
-                                // here to maintain the anchor sequence.
-                                //
-                                // Tracked in: https://github.com/dugite-project/dugite/issues/TODO
+                                // LedgerSeq anchor advance and DiffSeq flush happen
+                                // after this callback returns (below), since the
+                                // callback is sync but our locks are async.
                             },
                         )
                         .unwrap_or_else(|e| {
@@ -1348,6 +1346,10 @@ impl Node {
                     // The fragment's oldest header was promoted — pop it.
                     let mut frag = self.chain_fragment.write().await;
                     frag.pop_oldest();
+
+                    // Advance LedgerSeq anchor — the oldest volatile delta
+                    // is now immutable and can be absorbed into the anchor.
+                    self.ledger_seq.write().await.advance_anchor();
 
                     // Flush DiffSeq entries for the now-immutable block.
                     // These diffs can never be rolled back, so keeping them

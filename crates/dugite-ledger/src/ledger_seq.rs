@@ -509,11 +509,16 @@ impl LedgerSeq {
     /// Reconstruct the ledger state at the current tip by applying deltas
     /// from the nearest checkpoint.
     ///
+    /// The returned state has an **incomplete UTxO set** — it contains only
+    /// UTxOs that changed within the volatile window. N2C queries and mempool
+    /// validation should use the live `ledger_state` (which has the LSM store),
+    /// not this reconstructed state.
+    ///
     /// Cost: O(`checkpoint_interval`) delta applications — at most
     /// `checkpoint_interval` blocks regardless of how many deltas exist.
     pub fn tip_state(&self) -> LedgerState {
         if self.deltas.is_empty() {
-            return (*self.anchor).clone();
+            return (*self.anchor).clone_without_utxos();
         }
         self.state_at_index(self.deltas.len() - 1)
     }
@@ -521,7 +526,9 @@ impl LedgerSeq {
     /// Reconstruct the ledger state after applying the first `index + 1`
     /// deltas (0-indexed).
     ///
-    /// Returns `None` if `index >= deltas.len()`.
+    /// The returned state has an **incomplete UTxO set** — only UTxOs that
+    /// changed between the base state and the requested index are present.
+    /// Non-UTxO state (delegations, rewards, governance, epochs) is complete.
     pub fn state_at_index(&self, index: usize) -> LedgerState {
         debug_assert!(
             index < self.deltas.len(),
@@ -531,15 +538,10 @@ impl LedgerSeq {
         );
 
         // Find the nearest checkpoint at or before `index`.
+        // Checkpoints are lightweight (no UTxO data) — clone is cheap.
         let (start_index, base_state) = match self.checkpoints.range(..=index).next_back() {
-            Some((&cp_idx, cp_state)) => {
-                // Apply deltas from cp_idx+1 through index.
-                (cp_idx + 1, (**cp_state).clone())
-            }
-            None => {
-                // No checkpoint before this index — start from anchor.
-                (0, (*self.anchor).clone())
-            }
+            Some((&cp_idx, cp_state)) => (cp_idx + 1, (**cp_state).clone()),
+            None => (0, (*self.anchor).clone_without_utxos()),
         };
 
         // Apply deltas [start_index..=index].
@@ -1502,5 +1504,113 @@ mod tests {
         seq.reset_anchor(new_anchor);
         assert!(seq.is_empty());
         assert!(seq.checkpoints.is_empty());
+    }
+
+    // ── Lightweight checkpoints (#432) ───────────────────────────────────────
+
+    #[test]
+    fn test_checkpoint_has_empty_utxo_set() {
+        let anchor = make_anchor();
+        let mut seq = LedgerSeq::new(anchor, 300, 5);
+        for i in 1u8..=5 {
+            seq.push(make_delta(i as u64, i, (i as u64) * 1_000_000));
+        }
+        // Checkpoint created at index 4 (5th delta, interval=5)
+        assert!(seq.checkpoints.contains_key(&4));
+        let cp = &seq.checkpoints[&4];
+        assert_eq!(cp.utxo.utxo_set.len(), 0);
+    }
+
+    #[test]
+    fn test_lightweight_tip_state_preserves_epoch_fees() {
+        let anchor = make_anchor();
+        let mut seq = LedgerSeq::with_defaults(anchor, 10);
+        seq.push(make_delta(1, 1, 5_000_000));
+        seq.push(make_delta(2, 2, 3_000_000));
+
+        let tip = seq.tip_state();
+        assert_eq!(tip.utxo.epoch_fees.0, 3_000_000);
+    }
+
+    #[test]
+    fn test_state_at_index_reconstructs_non_utxo_state() {
+        let anchor = make_anchor();
+        let mut seq = LedgerSeq::with_defaults(anchor, 10);
+
+        for i in 1u8..=5 {
+            seq.push(make_delta(i as u64, i, (i as u64) * 100));
+        }
+
+        let state_2 = seq.state_at_index(2);
+        assert_eq!(state_2.utxo.epoch_fees.0, 300);
+
+        let state_4 = seq.state_at_index(4);
+        assert_eq!(state_4.utxo.epoch_fees.0, 500);
+    }
+
+    #[test]
+    fn test_rollback_and_reconstruct_non_utxo_state() {
+        let anchor = make_anchor();
+        let mut seq = LedgerSeq::with_defaults(anchor, 10);
+
+        for i in 1u8..=5 {
+            seq.push(make_delta(i as u64 * 10, i, (i as u64) * 1_000));
+        }
+        assert_eq!(seq.len(), 5);
+
+        seq.rollback(2);
+        assert_eq!(seq.len(), 3);
+
+        let tip = seq.tip_state();
+        assert_eq!(tip.utxo.epoch_fees.0, 3_000);
+    }
+
+    #[test]
+    fn test_advance_anchor_preserves_non_utxo_state() {
+        let anchor = make_anchor();
+        let mut seq = LedgerSeq::new(anchor, 5, 100);
+
+        for i in 1u8..=6 {
+            seq.push(make_delta(i as u64, i, (i as u64) * 100));
+        }
+        // k=5, pushing 6th should advance anchor once
+        assert_eq!(seq.len(), 5);
+
+        let anchor_state = seq.anchor_state();
+        assert_eq!(anchor_state.utxo.epoch_fees.0, 100);
+    }
+
+    #[test]
+    fn test_rollback_deep_to_anchor() {
+        let anchor = make_anchor();
+        let mut seq = LedgerSeq::with_defaults(anchor, 10);
+
+        for i in 1u8..=5 {
+            seq.push(make_delta(i as u64, i, (i as u64) * 1_000));
+        }
+
+        seq.rollback(5);
+        assert!(seq.is_empty());
+        let tip = seq.tip_state();
+        assert_eq!(tip.utxo.epoch_fees.0, 0);
+    }
+
+    #[test]
+    fn test_rollback_then_reapply() {
+        let anchor = make_anchor();
+        let mut seq = LedgerSeq::with_defaults(anchor, 10);
+
+        for i in 1u8..=3 {
+            seq.push(make_delta(i as u64, i, (i as u64) * 1_000));
+        }
+        seq.rollback(2);
+        assert_eq!(seq.len(), 1);
+
+        seq.push(make_delta(10, 10, 99_000));
+        seq.push(make_delta(20, 20, 88_000));
+
+        let tip = seq.tip_state();
+        assert_eq!(tip.utxo.epoch_fees.0, 88_000);
+        assert_eq!(seq.len(), 3);
     }
 }

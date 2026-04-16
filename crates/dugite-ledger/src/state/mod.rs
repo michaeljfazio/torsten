@@ -1005,6 +1005,42 @@ impl LedgerState {
         );
     }
 
+    /// Clone without UTxO data — for LedgerSeq checkpoints.
+    ///
+    /// Returns a LedgerState with an empty UtxoSet and DiffSeq. All non-UTxO
+    /// state (delegations, pools, rewards, governance, epochs, consensus) is
+    /// cloned normally. UTxO state is reconstructed from diffs during
+    /// `LedgerSeq::state_at_index()`.
+    pub fn clone_without_utxos(&self) -> Self {
+        LedgerState {
+            utxo: UtxoSubState {
+                utxo_set: UtxoSet::new(),
+                diff_seq: DiffSeq::new(),
+                epoch_fees: self.utxo.epoch_fees,
+                pending_donations: self.utxo.pending_donations,
+            },
+            certs: self.certs.clone(),
+            gov: self.gov.clone(),
+            consensus: self.consensus.clone(),
+            epochs: self.epochs.clone(),
+            tip: self.tip.clone(),
+            era: self.era,
+            pending_era_transition: self.pending_era_transition,
+            epoch: self.epoch,
+            epoch_length: self.epoch_length,
+            shelley_transition_epoch: self.shelley_transition_epoch,
+            byron_epoch_length: self.byron_epoch_length,
+            slot_config: self.slot_config,
+            genesis_hash: self.genesis_hash,
+            genesis_delegates: self.genesis_delegates.clone(),
+            update_quorum: self.update_quorum,
+            node_network: self.node_network,
+            randomness_stabilisation_window: self.randomness_stabilisation_window,
+            stability_window_3kf: self.stability_window_3kf,
+            security_param: self.security_param,
+        }
+    }
+
     /// Configure the epoch length (from Shelley genesis)
     pub fn set_epoch_length(&mut self, epoch_length: u64, security_param: u64) {
         self.epoch_length = epoch_length;
