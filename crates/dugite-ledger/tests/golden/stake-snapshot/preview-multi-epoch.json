@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Koios pool_history active_stake across 5 consecutive preview-testnet epochs — multi-epoch rotation golden vector for issue #422.",
+  "source": "https://preview.koios.rest/api/v1/pool_history?_pool_bech32=<pool>",
+  "captured_at": "2026-04-15",
+  "network": "preview",
+  "network_magic": 2,
+  "epochs": [1262, 1263, 1264, 1265, 1266],
+  "notes": [
+    "active_stake is the 'go' / reward-active stake for that epoch (two epochs after the delegation was observed).",
+    "Across 5 consecutive epochs the top-3 pools show monotonic drift (reward accrual and tip rewards). SAND is stable across the window (3 delegators, no movement).",
+    "The multi-epoch vector is the counterpart to preview-epoch-1268.json: mark/set/go from one query are the same snapshots captured at rotation boundaries. Reconstructing the rotation from pool_history ensures dugite's snapshot rotation logic matches Haskell's across more than one boundary."
+  ],
+  "pools": {
+    "6954ec11cf7097a693721104139b96c54e7f3e2a8f9e7577630f7856": {
+      "ticker": "SAND",
+      "bech32": "pool1d92wcyw0wzt6dymjzyzp8xukc488703237082amrpau9vgadcnk",
+      "history": [
+        { "epoch_no": 1262, "active_stake": "1039883628214", "delegator_cnt": 3, "block_cnt": 0 },
+        { "epoch_no": 1263, "active_stake": "1039883628214", "delegator_cnt": 3, "block_cnt": 0 },
+        { "epoch_no": 1264, "active_stake": "1039883628214", "delegator_cnt": 3, "block_cnt": 0 },
+        { "epoch_no": 1265, "active_stake": "1039883628214", "delegator_cnt": 3, "block_cnt": 0 },
+        { "epoch_no": 1266, "active_stake": "1039883628214", "delegator_cnt": 3, "block_cnt": 0 }
+      ]
+    },
+    "24d3394028c590692542c932784632147319b6c50e1c17805de044c6": {
+      "ticker": "top-by-active-stake-1",
+      "bech32": "pool1ynfnjspgckgxjf2zeye8s33jz3e3ndk9pcwp0qzaupzvvd8ukwt",
+      "history": [
+        { "epoch_no": 1262, "active_stake": "71858630199566", "delegator_cnt": 932, "block_cnt": 253 },
+        { "epoch_no": 1263, "active_stake": "71897391950573", "delegator_cnt": 932, "block_cnt": 252 },
+        { "epoch_no": 1264, "active_stake": "71938050159897", "delegator_cnt": 932, "block_cnt": 256 },
+        { "epoch_no": 1265, "active_stake": "71974235728895", "delegator_cnt": 932, "block_cnt": 246 },
+        { "epoch_no": 1266, "active_stake": "72014284847165", "delegator_cnt": 932, "block_cnt": 266 }
+      ]
+    },
+    "2afbef2f8a3a624f6f4492260fe2053f6daebd8c5ff13f6f14574417": {
+      "ticker": "top-by-active-stake-2",
+      "bech32": "pool19ta77tu28f3y7m6yjgnqlcs98ak6a0vvtlcn7mc52azpwr4l2xt",
+      "history": [
+        { "epoch_no": 1262, "active_stake": "64535205821515", "delegator_cnt": 4, "block_cnt": 217 },
+        { "epoch_no": 1263, "active_stake": "64562156483591", "delegator_cnt": 4, "block_cnt": 246 },
+        { "epoch_no": 1264, "active_stake": "64589574591204", "delegator_cnt": 4, "block_cnt": 238 },
+        { "epoch_no": 1265, "active_stake": "64615560131343", "delegator_cnt": 4, "block_cnt": 242 },
+        { "epoch_no": 1266, "active_stake": "64645001256702", "delegator_cnt": 4, "block_cnt": 222 }
+      ]
+    },
+    "e283fd58d5263defcc9d0cd9925ac19c9fe4ef1e0b75a4f6af4b0d1b": {
+      "ticker": "top-by-active-stake-3",
+      "bech32": "pool1u2pl6kx4yc77lnyapnveykkpnj07fmc7pd66fa40fvx3khw7cua",
+      "history": [
+        { "epoch_no": 1262, "active_stake": "62502385680285", "delegator_cnt": 2, "block_cnt": 227 },
+        { "epoch_no": 1263, "active_stake": "62530174750580", "delegator_cnt": 2, "block_cnt": 213 },
+        { "epoch_no": 1264, "active_stake": "62556036318847", "delegator_cnt": 2, "block_cnt": 220 },
+        { "epoch_no": 1265, "active_stake": "62583219293724", "delegator_cnt": 2, "block_cnt": 198 },
+        { "epoch_no": 1266, "active_stake": "62608710947768", "delegator_cnt": 2, "block_cnt": 218 }
+      ]
+    }
+  }
+}
