@@ -260,7 +260,7 @@ impl Node {
                                 replayed += 1;
                                 if last_log.elapsed().as_secs() >= 5 {
                                     let elapsed = replay_start.elapsed().as_secs();
-                                    let speed = if elapsed > 0 { replayed / elapsed } else { replayed };
+                                    let speed = replayed.checked_div(elapsed).unwrap_or(replayed);
                                     tracing::info!(
                                         replayed,
                                         slot = block.slot().0,

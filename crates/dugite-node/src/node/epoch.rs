@@ -218,7 +218,7 @@ impl Node {
             }
         }
         // Sort by epoch descending (newest first)
-        epoch_snapshots.sort_by(|a, b| b.0.cmp(&a.0));
+        epoch_snapshots.sort_by_key(|r| std::cmp::Reverse(r.0));
 
         // Try each epoch snapshot to find one at or before the rollback slot.
         // We need to actually load the snapshot to check its slot (epoch number alone

@@ -2226,7 +2226,7 @@ fn encode_ledger_peer_snapshot(
 
     // Sort by stake descending and filter to big peers (top 90%)
     let mut sorted: Vec<_> = peers.iter().filter(|p| p.stake > 0).collect();
-    sorted.sort_by(|a, b| b.stake.cmp(&a.stake));
+    sorted.sort_by_key(|r| std::cmp::Reverse(r.stake));
     let total_stake: u64 = sorted.iter().map(|p| p.stake).sum();
     let cutoff = total_stake * 9 / 10; // 90% threshold
     let mut acc_raw: u64 = 0;

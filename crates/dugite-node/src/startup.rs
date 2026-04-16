@@ -326,7 +326,7 @@ fn enumerate_snapshots(db_path: &Path) -> Vec<SnapshotCandidate> {
     }
 
     // Sort newest-first so the first suitable candidate can be taken directly.
-    candidates.sort_by(|a, b| b.ledger_slot.cmp(&a.ledger_slot));
+    candidates.sort_by_key(|r| std::cmp::Reverse(r.ledger_slot));
     candidates
 }
 

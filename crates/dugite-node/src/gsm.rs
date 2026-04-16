@@ -876,7 +876,7 @@ pub fn identify_big_ledger_peers(pool_stakes: &[(Vec<u8>, u64)]) -> (Vec<Vec<u8>
     let threshold = (total_stake as f64 * 0.9) as u64;
 
     let mut sorted: Vec<_> = pool_stakes.to_vec();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1)); // descending by stake
+    sorted.sort_by_key(|r| std::cmp::Reverse(r.1)); // descending by stake
 
     let mut accumulated = 0u64;
     let mut big_ledger = Vec::new();
