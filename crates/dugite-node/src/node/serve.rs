@@ -279,13 +279,30 @@ impl TxValidator for LedgerTxValidator {
         let utxo_view =
             dugite_ledger::utxo::CompositeUtxoView::new(&ledger.utxo.utxo_set, virtual_utxos);
 
-        dugite_ledger::validation::validate_transaction(
+        // Build ledger context for validation — pool re-registrations need the
+        // registered pool set to avoid charging a duplicate deposit (#436).
+        let registered_pool_ids: std::collections::HashSet<dugite_primitives::hash::Hash28> =
+            ledger.certs.pool_params.keys().copied().collect();
+
+        dugite_ledger::validation::validate_transaction_with_pools(
             &tx,
             &utxo_view,
             &ledger.epochs.protocol_params,
             current_slot,
             tx_size,
             Some(&self.slot_config),
+            Some(&registered_pool_ids),
+            None, // current_treasury
+            None, // reward_accounts
+            None, // current_epoch
+            None, // registered_dreps
+            None, // registered_vrf_keys
+            None, // node_network
+            None, // committee_members
+            None, // committee_resigned
+            None, // stake_key_deposits
+            None, // constitution_script_hash
+            None, // governance_proposals
         )
         .map_err(|errors| {
             // Increment the rejection counter so the TUI and Prometheus show it.
