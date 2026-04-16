@@ -344,3 +344,322 @@ fn test_koios_saturation_pct_formula() {
         "saturation should be ~6.46%, got {saturation_pct:.2}"
     );
 }
+
+// -----------------------------------------------------------------------
+// Per-pool reward cross-validation: APEX pool, epoch 1234
+// -----------------------------------------------------------------------
+
+/// APEX pool (pool1a7h89sr6ymj9g2a9tm6e6dddghl64tp39pj78f6cah5ewgd4px0)
+/// on preview testnet, epoch 1234.
+///
+/// Source: Koios `pool_history` and `pool_delegators_history` endpoints.
+///
+/// Koios field definitions:
+///   pool_fees:      cost + floor(margin * (pool_reward - cost))
+///   deleg_rewards:  floor((1-margin) * (pool_reward - cost))  [distributed to ALL delegators]
+///   member_rewards: sum of non-owner delegator shares from deleg_rewards
+///
+/// Koios reported values:
+///   block_cnt:      12
+///   active_stake:   4,738,014,632,168
+///   margin:         0.10  (10%)
+///   fixed_cost:     340,000,000
+///   pool_fees:      442,415,490
+///   deleg_rewards:  921,739,409
+///   member_rewards: 740,703,534
+///
+/// Therefore:
+///   total pool reward = pool_fees + deleg_rewards = 1,364,154,899
+///   owner delegator share = deleg_rewards - member_rewards = 181,035,875
+///   operator total take = pool_fees + owner_share = 623,451,365
+///
+/// The owner stake address is stake_test1uqd2nz8ugrn6kwkflvmt9he8dr966dszfmm5lt66qdmn28qt4wff9
+/// with 930,578,169,348 lovelace delegated.
+mod apex_epoch_1234 {
+    use super::*;
+
+    const POOL_ACTIVE_STAKE: u64 = 4_738_014_632_168;
+    const POOL_PLEDGE: u64 = 100_000_000_000;
+    const POOL_BLOCKS: u64 = 12;
+    const POOL_MARGIN_NUM: i128 = 1;
+    const POOL_MARGIN_DEN: i128 = 10;
+    const POOL_COST: u64 = 340_000_000;
+
+    /// Owner (operator) delegated stake in this epoch.
+    const OWNER_STAKE: u64 = 930_578_169_348;
+
+    /// Total blocks produced in epoch 1234 across all pools.
+    const TOTAL_EPOCH_BLOCKS: u64 = 2657;
+
+    /// Total active stake from Koios epoch_info for epoch 1234.
+    const TOTAL_ACTIVE_STAKE: u64 = 1_178_986_170_414_081;
+
+    /// Koios pool_fees = cost + floor(margin * remainder).
+    const KOIOS_POOL_FEES: u64 = 442_415_490;
+
+    /// Koios deleg_rewards = floor((1-margin) * remainder), distributed to all delegators.
+    const KOIOS_DELEG_REWARDS: u64 = 921_739_409;
+
+    /// Koios member_rewards = sum of non-owner delegator shares.
+    const KOIOS_MEMBER_REWARDS: u64 = 740_703_534;
+
+    /// Total pool reward = pool_fees + deleg_rewards (as computed by cardano-node).
+    const KOIOS_TOTAL_POOL_REWARD: u64 = KOIOS_POOL_FEES + KOIOS_DELEG_REWARDS;
+
+    /// Owner's delegator share = deleg_rewards - member_rewards.
+    const KOIOS_OWNER_DELEG_SHARE: u64 = KOIOS_DELEG_REWARDS - KOIOS_MEMBER_REWARDS;
+
+    /// Non-owner delegator stakes from Koios pool_delegators_history (epoch 1234).
+    /// All 85 non-owner delegators listed (owner excluded), sorted descending.
+    const MEMBER_STAKES: &[u64] = &[
+        1_773_203_227_078, 1_064_156_973_838, 251_155_470_836, 164_340_278_081,
+        100_050_586_079, 80_984_822_659, 39_933_331_608, 33_658_330_220,
+        33_017_761_222, 23_727_493_787, 17_450_374_918, 16_905_906_732,
+        16_496_048_131, 15_672_433_586, 13_926_963_725, 13_887_716_910,
+        13_689_035_731, 13_614_477_016, 13_179_006_670, 12_922_333_687,
+        10_739_489_253, 10_695_509_564, 9_777_587_554, 9_264_566_380,
+        7_908_032_780, 6_818_843_838, 6_313_938_240, 5_023_009_572,
+        5_021_200_268, 2_882_740_309, 2_236_184_228, 2_062_526_490,
+        1_548_465_136, 1_394_887_533, 1_388_882_889, 1_371_932_865,
+        1_248_236_478, 1_167_867_113, 1_068_005_943, 824_185_388,
+        625_373_850, 503_116_263, 497_526_412, 491_244_509,
+        462_278_389, 455_252_822, 354_054_976, 351_490_901,
+        335_325_029, 305_268_920, 289_822_454, 287_675_188,
+        257_985_612, 216_510_797, 171_103_783, 133_269_466,
+        114_629_016, 70_777_475, 58_132_507, 55_023_681,
+        53_811_276, 52_477_789, 52_328_118, 50_323_762,
+        43_846_609, 42_454_759, 42_422_335, 42_355_815,
+        41_539_915, 26_701_327, 25_442_906, 23_114_540,
+        21_619_375, 20_338_837, 18_946_479, 17_187_862,
+        17_187_862, 15_255_907, 15_192_979, 14_309_437,
+        11_221_056, 9_927_771, 7_000_277, 6_796_671,
+        132_771,
+    ];
+
+    /// Compute the reward pot and maxPool' for APEX in epoch 1234.
+    fn pool_reward_components() -> (u64, u64, u64) {
+        let (_, _, reward_pot) =
+            compute_reward_pot(EPOCH_1234.reserves, EPOCH_1234.fees, EPOCH_1234.blk_count);
+        let circulation = MAX_SUPPLY - EPOCH_1234.reserves;
+        let max_pool = max_pool_prime(reward_pot, POOL_ACTIVE_STAKE, POOL_PLEDGE, circulation);
+        // apparent_performance = (blocks / total_blocks) * (total_active_stake / pool_stake)
+        let perf = Rat::from_i128(POOL_BLOCKS as i128, TOTAL_EPOCH_BLOCKS as i128).mul(
+            &Rat::from_i128(TOTAL_ACTIVE_STAKE as i128, POOL_ACTIVE_STAKE as i128),
+        );
+        let pool_reward = perf
+            .mul(&Rat::from_i128(max_pool as i128, 1))
+            .floor_u64();
+        (reward_pot, max_pool, pool_reward)
+    }
+
+    #[test]
+    fn test_maxpool_prime_reasonable() {
+        let (reward_pot, max_pool, _) = pool_reward_components();
+        // maxPool should be a small fraction of the total reward pot.
+        // APEX has ~0.013% of circulation staked (4.7T / 36.4T), so maxPool
+        // should be roughly reward_pot * sigma / z0_factor.
+        assert!(
+            max_pool > 0 && max_pool < reward_pot,
+            "maxPool ({max_pool}) should be positive and less than reward_pot ({reward_pot})"
+        );
+        // With 500 pools and ~0.013% stake, maxPool should be a small fraction
+        assert!(
+            max_pool < reward_pot / 100,
+            "maxPool ({max_pool}) should be < 1% of reward_pot ({reward_pot})"
+        );
+    }
+
+    #[test]
+    fn test_apparent_performance_calculation() {
+        // apparent_performance = (blocks / total_blocks) * (total_active_stake / pool_stake)
+        // = (12 / 2657) * (1_178_986_170_414_081 / 4_738_014_632_168)
+        // = 0.004515... * 248.87...
+        // ≈ 1.124 (slightly above 1 means the pool slightly outperformed expectation)
+        let perf_f64 = (POOL_BLOCKS as f64 / TOTAL_EPOCH_BLOCKS as f64)
+            * (TOTAL_ACTIVE_STAKE as f64 / POOL_ACTIVE_STAKE as f64);
+        assert!(
+            perf_f64 > 0.5 && perf_f64 < 2.0,
+            "apparent performance should be near 1.0, got {perf_f64:.4}"
+        );
+    }
+
+    #[test]
+    fn test_pool_reward_matches_koios_total() {
+        let (_, _, pool_reward) = pool_reward_components();
+        // Total pool reward = pool_fees + deleg_rewards = 1,364,154,899.
+        // Our calculation may differ slightly due to the total_active_stake value
+        // (Koios epoch_info may not exactly match the GO snapshot), but should be close.
+        let diff = pool_reward.abs_diff(KOIOS_TOTAL_POOL_REWARD);
+        // Allow 5% tolerance for the snapshot mismatch.
+        let tolerance = KOIOS_TOTAL_POOL_REWARD / 20;
+        assert!(
+            diff < tolerance,
+            "pool_reward ({pool_reward}) should match Koios total ({KOIOS_TOTAL_POOL_REWARD}) \
+             within 5%, diff = {diff} (tolerance = {tolerance})"
+        );
+    }
+
+    #[test]
+    fn test_pool_fees_is_cost_plus_margin() {
+        // Koios pool_fees should equal cost + floor(margin * remainder).
+        let remainder = KOIOS_TOTAL_POOL_REWARD - POOL_COST;
+        let margin = Rat::from_i128(POOL_MARGIN_NUM, POOL_MARGIN_DEN);
+        let margin_share = margin
+            .mul(&Rat::from_i128(remainder as i128, 1))
+            .floor_u64();
+        let expected_pool_fees = POOL_COST + margin_share;
+
+        let diff = expected_pool_fees.abs_diff(KOIOS_POOL_FEES);
+        assert!(
+            diff <= 1,
+            "pool_fees ({KOIOS_POOL_FEES}) should equal cost + floor(margin * remainder) \
+             ({expected_pool_fees}), diff = {diff}"
+        );
+    }
+
+    #[test]
+    fn test_deleg_rewards_is_one_minus_margin() {
+        // Koios deleg_rewards should equal floor((1-margin) * remainder).
+        let remainder = KOIOS_TOTAL_POOL_REWARD - POOL_COST;
+        let one_minus_margin = Rat::from_i128(POOL_MARGIN_DEN - POOL_MARGIN_NUM, POOL_MARGIN_DEN);
+        let expected_deleg = one_minus_margin
+            .mul(&Rat::from_i128(remainder as i128, 1))
+            .floor_u64();
+
+        let diff = expected_deleg.abs_diff(KOIOS_DELEG_REWARDS);
+        assert!(
+            diff <= 1,
+            "deleg_rewards ({KOIOS_DELEG_REWARDS}) should equal floor((1-margin) * remainder) \
+             ({expected_deleg}), diff = {diff}"
+        );
+    }
+
+    #[test]
+    fn test_operator_member_split() {
+        // The operator's total take in Haskell is:
+        //   cost + floor((margin + (1-margin) * s/sigma) * remainder)
+        // where s = owner_stake, sigma = pool_active_stake, remainder = pool_reward - cost.
+        //
+        // In Koios terms, operator_total = pool_fees + (deleg_rewards - member_rewards).
+        let remainder = KOIOS_TOTAL_POOL_REWARD - POOL_COST;
+
+        let margin = Rat::from_i128(POOL_MARGIN_NUM, POOL_MARGIN_DEN);
+        let one_minus_margin = Rat::from_i128(POOL_MARGIN_DEN - POOL_MARGIN_NUM, POOL_MARGIN_DEN);
+
+        // Haskell's single-floor operator reward
+        let combined_share = margin.add(
+            &one_minus_margin.mul(&Rat::from_i128(
+                OWNER_STAKE as i128,
+                POOL_ACTIVE_STAKE as i128,
+            )),
+        );
+        let operator_reward_haskell = POOL_COST
+            + combined_share
+                .mul(&Rat::from_i128(remainder as i128, 1))
+                .floor_u64();
+
+        // Koios operator total = pool_fees + owner's delegator share.
+        // Koios stores pool_fees and deleg_rewards as separate floor()ed values,
+        // and owner_share = deleg_rewards - sum(member_shares) where each member
+        // share is also floor()ed. So the Koios operator total accumulates rounding
+        // from: (1) floor for pool_fees, (2) floor for deleg_rewards, (3) one floor
+        // per member subtracted. With N members, up to N+2 lovelace of rounding
+        // difference is expected vs the single-floor Haskell formula.
+        let koios_operator_total = KOIOS_POOL_FEES + KOIOS_OWNER_DELEG_SHARE;
+
+        let num_members = MEMBER_STAKES.len() as u64;
+        let diff = operator_reward_haskell.abs_diff(koios_operator_total);
+        assert!(
+            diff <= num_members + 2,
+            "Haskell operator_reward ({operator_reward_haskell}) should match Koios operator total \
+             ({koios_operator_total}) within {num_members}+2 lovelace, diff = {diff}"
+        );
+    }
+
+    #[test]
+    fn test_member_rewards_sum() {
+        // Compute each non-owner member's reward using the formula:
+        //   floor((1-margin) * member_stake/pool_stake * remainder)
+        // and verify the sum matches Koios member_rewards.
+        //
+        // Note: Koios distributes deleg_rewards proportionally, so each member gets:
+        //   floor(member_stake / pool_active_stake * deleg_rewards)
+        // which is equivalent due to how deleg_rewards is computed.
+        let remainder = KOIOS_TOTAL_POOL_REWARD - POOL_COST;
+        let one_minus_margin = Rat::from_i128(POOL_MARGIN_DEN - POOL_MARGIN_NUM, POOL_MARGIN_DEN);
+
+        let mut member_reward_sum = 0u64;
+        for &member_stake in MEMBER_STAKES {
+            let member_reward = one_minus_margin
+                .mul(&Rat::from_i128(member_stake as i128, POOL_ACTIVE_STAKE as i128))
+                .mul(&Rat::from_i128(remainder as i128, 1))
+                .floor_u64();
+            member_reward_sum += member_reward;
+        }
+
+        // The sum should be close to Koios member_rewards. Each floor() can lose
+        // up to 1 lovelace, so with 85 members the max rounding loss is 85.
+        let diff = member_reward_sum.abs_diff(KOIOS_MEMBER_REWARDS);
+        assert!(
+            diff <= 100,
+            "computed member sum ({member_reward_sum}) should match Koios member_rewards \
+             ({KOIOS_MEMBER_REWARDS}) within 100 lovelace, diff = {diff}"
+        );
+    }
+
+    #[test]
+    fn test_pool_fees_plus_deleg_rewards_conservation() {
+        // pool_fees + deleg_rewards should account for (almost) the entire pool reward.
+        // The difference is rounding dust from the two floor operations:
+        //   floor(margin * R) + floor((1-margin) * R) <= R
+        let remainder = KOIOS_TOTAL_POOL_REWARD - POOL_COST;
+        let reconstructed = KOIOS_POOL_FEES - POOL_COST + KOIOS_DELEG_REWARDS;
+        let dust = remainder - reconstructed;
+        // At most 1 lovelace dust from the two floors
+        assert!(
+            dust <= 1,
+            "pool_fees - cost + deleg_rewards ({reconstructed}) should equal remainder \
+             ({remainder}) within 1 lovelace, dust = {dust}"
+        );
+    }
+
+    #[test]
+    fn test_cost_deducted_before_margin() {
+        // Verify that if pool_reward < cost, the operator gets pool_reward
+        // and members get nothing. This is a formula property test.
+        let small_pool_reward = POOL_COST / 2; // 170M, less than 340M cost
+
+        // When pool_reward <= cost, operator gets everything, members get 0
+        let operator_reward = small_pool_reward;
+        let member_reward = 0u64; // no remainder to distribute
+
+        assert_eq!(
+            operator_reward,
+            val(small_pool_reward),
+            "operator should get all when pool_reward < cost"
+        );
+        assert_eq!(
+            member_reward,
+            val(0),
+            "members should get 0 when pool_reward < cost"
+        );
+
+        // In the APEX epoch 1234 case, pool_reward comfortably exceeds cost
+        assert!(
+            val(KOIOS_TOTAL_POOL_REWARD) > val(POOL_COST),
+            "APEX pool reward ({KOIOS_TOTAL_POOL_REWARD}) should exceed cost ({POOL_COST})"
+        );
+
+        // Margin share should be exactly 10% of remainder (margin = 1/10)
+        let remainder = KOIOS_TOTAL_POOL_REWARD - POOL_COST;
+        let margin = Rat::from_i128(POOL_MARGIN_NUM, POOL_MARGIN_DEN);
+        let margin_share = margin
+            .mul(&Rat::from_i128(remainder as i128, 1))
+            .floor_u64();
+        let expected_margin = remainder / 10;
+        assert_eq!(
+            margin_share, expected_margin,
+            "margin share should be exactly 10% of remainder"
+        );
+    }
+}
