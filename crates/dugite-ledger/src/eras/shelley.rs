@@ -195,12 +195,43 @@ impl EraRules for ShelleyRules {
             }
         }
 
-        // Step 2: SNAP — rotate snapshots, capture fees, update bprev.
-        //
-        // TODO: The full RUPD (reward calculation using GO snapshot + bprev + ss_fee)
-        // is not computed here because it requires `calculate_rewards_full` which
-        // operates on `&self LedgerState`. The orchestrator (Task 12) will handle
-        // wiring reward calculation before this point.
+        // Step 2: Compute and apply RUPD using GO snapshot + bprev + ss_fee.
+        if epochs.snapshots.rupd_ready {
+            if let Some(ref go) = epochs.snapshots.go {
+                let rupd = crate::compute_reward_update(
+                    ctx.params,
+                    epochs.prev_d,
+                    epochs.prev_protocol_version_major,
+                    Some(go),
+                    &epochs.snapshots.bprev_blocks_by_pool,
+                    epochs.snapshots.ss_fee,
+                    epochs.reserves,
+                    epochs.treasury,
+                    &certs.reward_accounts,
+                    ctx.epoch_length,
+                    ctx.shelley_transition_epoch,
+                );
+
+                // Apply RUPD: adjust reserves and treasury
+                epochs.reserves.0 = epochs.reserves.0.saturating_sub(rupd.delta_reserves);
+                epochs.treasury.0 = epochs.treasury.0.saturating_add(rupd.delta_treasury);
+
+                // Distribute rewards to registered accounts; unregistered → treasury
+                for (cred_hash, reward) in &rupd.rewards {
+                    if reward.0 > 0 {
+                        if certs.reward_accounts.contains_key(cred_hash) {
+                            *Arc::make_mut(&mut certs.reward_accounts)
+                                .entry(*cred_hash)
+                                .or_insert(Lovelace(0)) += *reward;
+                        } else {
+                            epochs.treasury.0 = epochs.treasury.0.saturating_add(reward.0);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 3: SNAP — rotate snapshots, capture fees, update bprev.
         let captured_fees = utxo.epoch_fees;
         epochs.snapshots.go = epochs.snapshots.set.take();
         epochs.snapshots.set = epochs.snapshots.mark.take();
@@ -1425,5 +1456,107 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(utxo.pending_donations.0, 0);
         assert_eq!(epochs.treasury.0, 105_000_000);
+    }
+
+    #[test]
+    fn test_shelley_epoch_transition_computes_rupd() {
+        // Set up state with a GO snapshot containing one pool that produced blocks.
+        // After epoch transition, reserves should decrease (indicating RUPD ran).
+        let params = ProtocolParameters::mainnet_defaults();
+        let ctx = make_shelley_ctx(&params);
+        let rules = ShelleyRules::new();
+
+        let mut utxo = make_utxo_sub(vec![]);
+        let mut certs = make_cert_sub();
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+        let mut consensus = make_consensus_sub();
+
+        let pool_id = Hash28::from_bytes([1u8; 28]);
+        let owner_key = Hash28::from_bytes([2u8; 28]);
+        let delegator_cred = Hash32::from_bytes([3u8; 32]);
+
+        // Set up pool registration with pledge met via delegator stake.
+        let pool_reg = PoolRegistration {
+            pool_id,
+            vrf_keyhash: Hash32::ZERO,
+            pledge: Lovelace(1_000_000_000), // 1000 ADA pledge
+            cost: Lovelace(340_000_000),     // 340 ADA cost
+            margin_numerator: 1,
+            margin_denominator: 100,
+            reward_account: vec![],
+            owners: vec![owner_key],
+            relays: vec![],
+            metadata_url: None,
+            metadata_hash: None,
+        };
+
+        // Register the pool and set up delegation.
+        Arc::make_mut(&mut certs.pool_params).insert(pool_id, pool_reg.clone());
+        Arc::make_mut(&mut certs.delegations).insert(delegator_cred, pool_id);
+
+        // Register a reward account for the delegator.
+        Arc::make_mut(&mut certs.reward_accounts).insert(delegator_cred, Lovelace(0));
+
+        // Build a GO snapshot with the pool having stake.
+        let mut pool_stake = HashMap::new();
+        pool_stake.insert(pool_id, Lovelace(10_000_000_000_000)); // 10M ADA
+        let mut stake_dist = HashMap::new();
+        stake_dist.insert(delegator_cred, Lovelace(10_000_000_000_000));
+
+        let go_snapshot = crate::state::StakeSnapshot {
+            epoch: EpochNo(3),
+            delegations: Arc::clone(&certs.delegations),
+            pool_stake,
+            pool_params: Arc::clone(&certs.pool_params),
+            stake_distribution: Arc::new(stake_dist),
+            epoch_fees: Lovelace(500_000_000), // 500 ADA fees
+            epoch_block_count: 100,
+            epoch_blocks_by_pool: Arc::new(HashMap::new()),
+        };
+
+        epochs.snapshots.go = Some(go_snapshot);
+        epochs.snapshots.rupd_ready = true;
+
+        // Pool produced blocks in previous epoch.
+        let mut blocks_by_pool = HashMap::new();
+        blocks_by_pool.insert(pool_id, 50);
+        epochs.snapshots.bprev_blocks_by_pool = Arc::new(blocks_by_pool);
+        epochs.snapshots.ss_fee = Lovelace(500_000_000);
+
+        // Set reserves high enough for expansion.
+        let initial_reserves = 10_000_000_000_000_000u64; // 10B ADA
+        epochs.reserves = Lovelace(initial_reserves);
+        let initial_treasury = epochs.treasury.0;
+
+        // Set d < 0.8 so decentralisation allows pool rewards.
+        epochs.prev_d = 0.5;
+
+        let result = rules.process_epoch_transition(
+            EpochNo(6),
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+            &mut consensus,
+        );
+        assert!(result.is_ok());
+
+        // Reserves should have decreased (monetary expansion distributed).
+        assert!(
+            epochs.reserves.0 < initial_reserves,
+            "Reserves should decrease after RUPD: was {}, now {}",
+            initial_reserves,
+            epochs.reserves.0
+        );
+
+        // Treasury should have increased (tau fraction of expansion).
+        assert!(
+            epochs.treasury.0 > initial_treasury,
+            "Treasury should increase after RUPD: was {}, now {}",
+            initial_treasury,
+            epochs.treasury.0
+        );
     }
 }
