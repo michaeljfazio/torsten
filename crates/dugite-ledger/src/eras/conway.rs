@@ -49,7 +49,9 @@ use tracing::debug;
 use super::common;
 use super::{EraRules, RuleContext};
 use crate::state::governance::{
-    forest_add_proposal, gov_action_purpose_tag, gov_action_raw_prev_id,
+    capture_governance_snapshots, expire_committee_members, forest_add_proposal,
+    gov_action_purpose_tag, gov_action_raw_prev_id, ratify_proposals_impl, update_dormant_epochs,
+    update_drep_activity,
 };
 use crate::state::substates::*;
 use crate::state::{
@@ -218,13 +220,59 @@ impl EraRules for ConwayRules {
         // Reference script size validation is performed during Phase-1 validation,
         // not during apply. The tiered fee check lives in validation/conway.rs.
 
-        // Step 3: validateWithdrawalsDelegated (PV >= 10, stub).
-        // TODO: When protocol version 10 is active, verify that all withdrawal
+        // Step 3: validateWithdrawalsDelegated (PV >= 10).
+        // When protocol version 10 is active, verify that all withdrawal
         // KeyHash accounts have a DRep delegation in gov.governance.vote_delegations.
+        if ctx.params.protocol_version_major >= 10 {
+            for reward_account in tx.body.withdrawals.keys() {
+                if reward_account.len() >= 29 {
+                    // Bit 4 of header: 0 = key credential, 1 = script credential.
+                    // Reward address headers: 0xe0/0xe1 = key, 0xf0/0xf1 = script.
+                    let is_script = reward_account[0] & 0x10 != 0;
+                    if !is_script {
+                        let key = common::reward_account_to_hash(reward_account);
+                        if !gov.governance.vote_delegations.contains_key(&key) {
+                            return Err(LedgerError::BlockTxValidationFailed {
+                                slot: ctx.current_slot,
+                                tx_hash: tx.hash.to_hex(),
+                                errors: format!(
+                                    "WithdrawalNotDelegated: key-hash credential {} \
+                                     has no DRep delegation (PV10 requirement)",
+                                    key.to_hex()
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
-        // Step 4: testIncompleteAndMissingWithdrawals (PV >= 10, stub).
-        // TODO: When protocol version 10 is active, verify withdrawal amounts
+        // Step 4: testIncompleteAndMissingWithdrawals (PV >= 10).
+        // When protocol version 10 is active, verify withdrawal amounts
         // exactly match reward balances.
+        if ctx.params.protocol_version_major >= 10 {
+            for (reward_account, amount) in &tx.body.withdrawals {
+                let key = common::reward_account_to_hash(reward_account);
+                let balance = certs
+                    .reward_accounts
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(Lovelace(0));
+                if *amount != balance {
+                    return Err(LedgerError::BlockTxValidationFailed {
+                        slot: ctx.current_slot,
+                        tx_hash: tx.hash.to_hex(),
+                        errors: format!(
+                            "WithdrawalAmountMismatch: withdrawal {} != reward balance {} \
+                             for account {} (PV10 requirement)",
+                            amount.0,
+                            balance.0,
+                            key.to_hex()
+                        ),
+                    });
+                }
+            }
+        }
 
         // Step 5: Update DRep activity for voting DReps in this transaction.
         update_drep_expiries_for_tx(tx, ctx.current_epoch, gov, epochs);
@@ -475,54 +523,25 @@ impl EraRules for ConwayRules {
             .retain(|_, epoch| *epoch > new_epoch);
 
         // === Step 3: DRep pulser completion ===
-        // TODO: The DRep pulser calculates voting power from the mark snapshot's
-        // vote delegations. This is complex (~200 lines in state/governance.rs)
-        // and will be wired in Task 12.
+        // The DRep distribution (voting power) is computed live within
+        // ratify_proposals_impl, matching Haskell's pulser completion that
+        // produces dpDRepDistr before ratification begins.
 
-        // === Step 4: Treasury withdrawals (enact approved withdrawals) ===
-        // TODO: Enacted TreasuryWithdrawal governance actions distribute funds.
-        // This requires the ratification pipeline from state/governance.rs.
+        // === Steps 4+5: Ratification, enactment, treasury withdrawals ===
+        ratify_proposals_impl(new_epoch, epochs, certs, gov);
 
-        // === Step 5: proposalsApplyEnactment (ratify & enact governance actions) ===
-        // TODO: Full governance ratification/enactment pipeline (~600 lines in
-        // state/governance.rs). This will be wired when the orchestrator calls
-        // the existing code in Task 12.
+        // === Step 6: Deposit returns handled by ratify_proposals_impl above ===
 
-        // === Step 6: Return deposits from expired/enacted proposals ===
-        // TODO: Return proposal deposits for enacted/expired governance actions
-        // to their return addresses' reward accounts.
-
-        // === Step 7: Update GovState (advance proposal epochs, remove enacted/expired) ===
-        // TODO: Advance proposal expiry tracking and remove enacted/expired proposals.
+        // === Step 7: GovState update handled by ratify_proposals_impl above ===
 
         // === Step 8: numDormantEpochs computation ===
-        // TODO: Track consecutive epochs with no governance activity for DRep
-        // expiry extension.
+        update_dormant_epochs(new_epoch, epochs, gov);
 
         // === Step 9: Prune expired committee members ===
-        {
-            let governance = Arc::make_mut(&mut gov.governance);
-            let expired_members: Vec<Hash32> = governance
-                .committee_expiration
-                .iter()
-                .filter_map(|(cred, exp_epoch)| {
-                    if *exp_epoch < new_epoch {
-                        Some(*cred)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for cred in &expired_members {
-                governance.committee_expiration.remove(cred);
-                governance.committee_hot_keys.remove(cred);
-                debug!(
-                    epoch = new_epoch.0,
-                    cred = %cred.to_hex(),
-                    "Conway: pruned expired committee member"
-                );
-            }
-        }
+        expire_committee_members(new_epoch, gov);
+
+        // DRep activity marking (mark inactive DReps)
+        update_drep_activity(new_epoch, epochs, gov);
 
         // === Step 10: Flush donations (pending_donations -> treasury) ===
         // Already handled above in step 1 (before snapshot rotation), matching
@@ -547,12 +566,12 @@ impl EraRules for ConwayRules {
         }
 
         // === Step 12: HARDFORK check ===
-        // TODO: If an enacted HardForkInitiation action's target version > current,
-        // trigger a protocol version bump. This is handled at the consensus layer.
+        // HardForkInitiation actions set protocol_version during enactment
+        // in ratify_proposals_impl. The consensus layer detects the version
+        // bump and triggers the actual hardfork. No additional logic needed.
 
         // === Step 13: setFreshDRepPulsingState ===
-        // TODO: Prepare the DRep pulser for the next epoch with fresh stake
-        // distribution data. This will be wired in Task 12.
+        capture_governance_snapshots(new_epoch, epochs, certs, gov);
 
         // Capture prevPParams BEFORE any PP updates.
         let old_d = 0.0; // Conway: d is always 0 (fully decentralized).
@@ -2659,5 +2678,399 @@ mod tests {
         // But steps 1 and 5 should still apply.
         assert!(epochs.ptr_stake_excluded);
         assert_eq!(utxo.pending_donations.0, 0);
+    }
+
+    /// Verify that `process_epoch_transition` calls `ratify_proposals_impl`
+    /// without panicking when there are no proposals.
+    #[test]
+    fn test_conway_epoch_transition_runs_ratification() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+        let ctx = make_conway_ctx(&params);
+        let rules = ConwayRules::new();
+
+        let mut utxo = make_utxo_sub(vec![]);
+        let mut certs = make_cert_sub();
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+        let mut consensus = make_consensus_sub();
+
+        // Empty proposals — ratification should be a no-op and not panic.
+        assert!(gov.governance.proposals.is_empty());
+
+        rules
+            .process_epoch_transition(
+                EpochNo(10),
+                &ctx,
+                &mut utxo,
+                &mut certs,
+                &mut gov,
+                &mut epochs,
+                &mut consensus,
+            )
+            .expect("epoch transition with empty proposals should not panic");
+
+        // Proposals should still be empty after ratification.
+        assert!(gov.governance.proposals.is_empty());
+    }
+
+    /// Verify that `update_dormant_epochs` is called during epoch transition:
+    /// when there are no proposals, the dormant epoch counter increments.
+    #[test]
+    fn test_conway_epoch_transition_dormant_epoch_tracking() {
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 9;
+        let ctx = make_conway_ctx(&params);
+        let rules = ConwayRules::new();
+
+        let mut utxo = make_utxo_sub(vec![]);
+        let mut certs = make_cert_sub();
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+        let mut consensus = make_consensus_sub();
+
+        // Initial dormant epoch count is 0.
+        assert_eq!(gov.governance.num_dormant_epochs, 0);
+
+        // First epoch transition with empty proposals -> dormant incremented.
+        rules
+            .process_epoch_transition(
+                EpochNo(10),
+                &ctx,
+                &mut utxo,
+                &mut certs,
+                &mut gov,
+                &mut epochs,
+                &mut consensus,
+            )
+            .expect("first epoch transition should succeed");
+        assert_eq!(gov.governance.num_dormant_epochs, 1);
+
+        // Second epoch transition still empty -> dormant incremented again.
+        rules
+            .process_epoch_transition(
+                EpochNo(11),
+                &ctx,
+                &mut utxo,
+                &mut certs,
+                &mut gov,
+                &mut epochs,
+                &mut consensus,
+            )
+            .expect("second epoch transition should succeed");
+        assert_eq!(gov.governance.num_dormant_epochs, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // PV10 withdrawal delegation and amount validation tests
+    // -----------------------------------------------------------------------
+
+    /// Build a key-hash reward address (header 0xe1 = key credential, network 1).
+    fn make_key_reward_address(cred: [u8; 28]) -> Vec<u8> {
+        let mut addr = vec![0xe1]; // key credential, network 1
+        addr.extend_from_slice(&cred);
+        addr
+    }
+
+    /// Build a script-hash reward address (header 0xf1 = script credential, network 1).
+    fn make_script_reward_address(cred: [u8; 28]) -> Vec<u8> {
+        let mut addr = vec![0xf1]; // script credential, network 1
+        addr.extend_from_slice(&cred);
+        addr
+    }
+
+    /// Build a Hash32 key for a key-hash credential (byte 28 = 0x00).
+    fn key_cred_hash(cred: [u8; 28]) -> Hash32 {
+        let mut bytes = [0u8; 32];
+        bytes[..28].copy_from_slice(&cred);
+        // bytes[28] = 0x00 for key credential (default)
+        Hash32::from_bytes(bytes)
+    }
+
+    /// Helper to build a transaction with withdrawals.
+    fn make_tx_with_withdrawals(
+        tx_id_byte: u8,
+        withdrawals: BTreeMap<Vec<u8>, Lovelace>,
+        inputs: Vec<TransactionInput>,
+        outputs: Vec<TransactionOutput>,
+        fee: u64,
+    ) -> Transaction {
+        let mut tx = make_tx(tx_id_byte, inputs, outputs, fee);
+        tx.body.withdrawals = withdrawals;
+        tx
+    }
+
+    #[test]
+    fn test_pv10_withdrawal_must_be_delegated() {
+        // PV=10, undelegated key-hash withdrawal -> error
+        let rules = ConwayRules::new();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 10;
+        let ctx = make_conway_ctx(&params);
+
+        let cred = [0xAA; 28];
+        let reward_addr = make_key_reward_address(cred);
+        let cred_hash = key_cred_hash(cred);
+
+        // Set up a reward account with some balance.
+        let mut certs = make_cert_sub();
+        Arc::make_mut(&mut certs.reward_accounts).insert(cred_hash, Lovelace(1_000_000));
+
+        // No vote delegation for this credential.
+        let mut gov = make_gov_sub();
+        // governance.vote_delegations is empty.
+
+        let mut epochs = make_epoch_sub();
+
+        let input = make_input(0x01, 0);
+        let addr = make_enterprise_address(Hash28::from_bytes([0x01; 28]));
+        let output = make_output(addr.clone(), 10_000_000);
+        let mut utxo = make_utxo_sub(vec![(input.clone(), output)]);
+
+        let mut withdrawals = BTreeMap::new();
+        withdrawals.insert(reward_addr, Lovelace(1_000_000));
+
+        let tx = make_tx_with_withdrawals(
+            0x10,
+            withdrawals,
+            vec![input],
+            vec![make_output(addr, 9_000_000)],
+            1_000_000,
+        );
+
+        let result = rules.apply_valid_tx(
+            &tx,
+            BlockValidationMode::Full,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+        );
+
+        assert!(result.is_err(), "Expected WithdrawalNotDelegated error");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("WithdrawalNotDelegated"),
+            "Error should mention WithdrawalNotDelegated, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_pv10_withdrawal_delegated_succeeds() {
+        // PV=10, delegated key-hash withdrawal -> OK
+        let rules = ConwayRules::new();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 10;
+        let ctx = make_conway_ctx(&params);
+
+        let cred = [0xBB; 28];
+        let reward_addr = make_key_reward_address(cred);
+        let cred_hash = key_cred_hash(cred);
+
+        let mut certs = make_cert_sub();
+        Arc::make_mut(&mut certs.reward_accounts).insert(cred_hash, Lovelace(500_000));
+
+        // Add vote delegation for this credential.
+        let mut gov = make_gov_sub();
+        Arc::make_mut(&mut gov.governance)
+            .vote_delegations
+            .insert(cred_hash, DRep::Abstain);
+
+        let mut epochs = make_epoch_sub();
+
+        let input = make_input(0x02, 0);
+        let addr = make_enterprise_address(Hash28::from_bytes([0x02; 28]));
+        let output = make_output(addr.clone(), 10_000_000);
+        let mut utxo = make_utxo_sub(vec![(input.clone(), output)]);
+
+        let mut withdrawals = BTreeMap::new();
+        withdrawals.insert(reward_addr, Lovelace(500_000));
+
+        let tx = make_tx_with_withdrawals(
+            0x11,
+            withdrawals,
+            vec![input],
+            vec![make_output(addr, 9_500_000)],
+            1_000_000,
+        );
+
+        let result = rules.apply_valid_tx(
+            &tx,
+            BlockValidationMode::Full,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+        );
+
+        assert!(result.is_ok(), "Delegated withdrawal should succeed: {result:?}");
+    }
+
+    #[test]
+    fn test_pv9_withdrawal_not_checked() {
+        // PV=9, undelegated key-hash withdrawal -> still succeeds (check not active)
+        let rules = ConwayRules::new();
+        let params = ProtocolParameters::mainnet_defaults(); // PV=9
+        assert!(params.protocol_version_major < 10);
+        let ctx = make_conway_ctx(&params);
+
+        let cred = [0xCC; 28];
+        let reward_addr = make_key_reward_address(cred);
+        let cred_hash = key_cred_hash(cred);
+
+        let mut certs = make_cert_sub();
+        Arc::make_mut(&mut certs.reward_accounts).insert(cred_hash, Lovelace(200_000));
+
+        // No vote delegation — but PV < 10 so check should be skipped.
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+
+        let input = make_input(0x03, 0);
+        let addr = make_enterprise_address(Hash28::from_bytes([0x03; 28]));
+        let output = make_output(addr.clone(), 10_000_000);
+        let mut utxo = make_utxo_sub(vec![(input.clone(), output)]);
+
+        let mut withdrawals = BTreeMap::new();
+        withdrawals.insert(reward_addr, Lovelace(200_000));
+
+        let tx = make_tx_with_withdrawals(
+            0x12,
+            withdrawals,
+            vec![input],
+            vec![make_output(addr, 9_800_000)],
+            1_000_000,
+        );
+
+        let result = rules.apply_valid_tx(
+            &tx,
+            BlockValidationMode::Full,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+        );
+
+        assert!(
+            result.is_ok(),
+            "PV9 should not enforce delegation check: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_pv10_withdrawal_amount_must_match_balance() {
+        // PV=10, withdrawal amount != balance -> error
+        let rules = ConwayRules::new();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 10;
+        let ctx = make_conway_ctx(&params);
+
+        let cred = [0xDD; 28];
+        let reward_addr = make_key_reward_address(cred);
+        let cred_hash = key_cred_hash(cred);
+
+        // Balance is 1_000_000 but withdrawal asks for 500_000.
+        let mut certs = make_cert_sub();
+        Arc::make_mut(&mut certs.reward_accounts).insert(cred_hash, Lovelace(1_000_000));
+
+        // Must be delegated to pass step 3.
+        let mut gov = make_gov_sub();
+        Arc::make_mut(&mut gov.governance)
+            .vote_delegations
+            .insert(cred_hash, DRep::Abstain);
+
+        let mut epochs = make_epoch_sub();
+
+        let input = make_input(0x04, 0);
+        let addr = make_enterprise_address(Hash28::from_bytes([0x04; 28]));
+        let output = make_output(addr.clone(), 10_000_000);
+        let mut utxo = make_utxo_sub(vec![(input.clone(), output)]);
+
+        let mut withdrawals = BTreeMap::new();
+        withdrawals.insert(reward_addr, Lovelace(500_000)); // mismatch!
+
+        let tx = make_tx_with_withdrawals(
+            0x13,
+            withdrawals,
+            vec![input],
+            vec![make_output(addr, 9_500_000)],
+            1_000_000,
+        );
+
+        let result = rules.apply_valid_tx(
+            &tx,
+            BlockValidationMode::Full,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+        );
+
+        assert!(result.is_err(), "Expected WithdrawalAmountMismatch error");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("WithdrawalAmountMismatch"),
+            "Error should mention WithdrawalAmountMismatch, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_pv10_script_withdrawal_not_checked() {
+        // PV=10, script credential -> delegation check skipped
+        let rules = ConwayRules::new();
+        let mut params = ProtocolParameters::mainnet_defaults();
+        params.protocol_version_major = 10;
+        let ctx = make_conway_ctx(&params);
+
+        let cred = [0xEE; 28];
+        let reward_addr = make_script_reward_address(cred);
+
+        // Build the script credential hash (byte 28 = 0x01 for script).
+        let mut script_key_bytes = [0u8; 32];
+        script_key_bytes[..28].copy_from_slice(&cred);
+        script_key_bytes[28] = 0x01; // script credential marker
+        let script_cred_hash = Hash32::from_bytes(script_key_bytes);
+
+        let mut certs = make_cert_sub();
+        Arc::make_mut(&mut certs.reward_accounts).insert(script_cred_hash, Lovelace(300_000));
+
+        // No vote delegation for this script credential — should still succeed
+        // because script credentials skip the delegation check.
+        let mut gov = make_gov_sub();
+        let mut epochs = make_epoch_sub();
+
+        let input = make_input(0x05, 0);
+        let addr = make_enterprise_address(Hash28::from_bytes([0x05; 28]));
+        let output = make_output(addr.clone(), 10_000_000);
+        let mut utxo = make_utxo_sub(vec![(input.clone(), output)]);
+
+        let mut withdrawals = BTreeMap::new();
+        withdrawals.insert(reward_addr, Lovelace(300_000));
+
+        let tx = make_tx_with_withdrawals(
+            0x14,
+            withdrawals,
+            vec![input],
+            vec![make_output(addr, 9_700_000)],
+            1_000_000,
+        );
+
+        let result = rules.apply_valid_tx(
+            &tx,
+            BlockValidationMode::Full,
+            &ctx,
+            &mut utxo,
+            &mut certs,
+            &mut gov,
+            &mut epochs,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Script credential withdrawal should skip delegation check: {result:?}"
+        );
     }
 }
