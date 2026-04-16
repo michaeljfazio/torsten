@@ -170,6 +170,7 @@ impl LedgerState {
         //
         // When multiple epochs are skipped (e.g., after offline time or Mithril
         // import), process each intermediate epoch transition individually.
+        // Dispatched through EraRulesImpl for the block's era (post-HFC).
         let block_epoch = EpochNo(self.epoch_of_slot(block.slot().0));
         if block_epoch > self.epoch {
             debug!(
@@ -180,17 +181,62 @@ impl LedgerState {
             );
             while self.epoch < block_epoch {
                 let next_epoch = EpochNo(self.epoch.0.saturating_add(1));
-                self.process_epoch_transition(next_epoch);
+                let epoch_rules = EraRulesImpl::for_era(block.era);
+                let epoch_params = self.epochs.protocol_params.clone();
+                let epoch_ctx = RuleContext {
+                    params: &epoch_params,
+                    current_slot: block.slot().0,
+                    current_epoch: self.epoch,
+                    era: block.era,
+                    slot_config: Some(&self.slot_config),
+                    node_network: self.node_network,
+                    genesis_delegates: &self.genesis_delegates,
+                    update_quorum: self.update_quorum,
+                    epoch_length: self.epoch_length,
+                    shelley_transition_epoch: self.shelley_transition_epoch,
+                    byron_epoch_length: self.byron_epoch_length,
+                    stability_window: self.randomness_stabilisation_window,
+                    stability_window_3kf: self.stability_window_3kf,
+                    randomness_stabilisation_window: self.randomness_stabilisation_window,
+                    conway_genesis: self.conway_genesis_init.as_ref(),
+                    tx_index: 0,
+                };
+                epoch_rules.process_epoch_transition(
+                    next_epoch,
+                    &epoch_ctx,
+                    &mut self.utxo,
+                    &mut self.certs,
+                    &mut self.gov,
+                    &mut self.epochs,
+                    &mut self.consensus,
+                )?;
+                self.epoch = next_epoch;
             }
         }
 
-        // Block body size check (BBODY rule): Haskell enforces
-        // `actual_body_bytes == header.body_size`. Pallas's CBOR decoder already
-        // rejects any header/body inconsistency at parse time, so the independent
-        // check here was a bogus approximation (it compared header.body_size against
-        // max_block_body_size, which is a chain-checks cap at the consensus layer,
-        // not part of BBODY). Issue #377 tracks a hardened-replay equality check
-        // using independently-computed body bytes.
+        // ── BBODY rule: block body size equality check ────────────────────
+        //
+        // Haskell enforces `actual_body_bytes == header.body_size`.  We extract the
+        // actual serialized body size from the raw CBOR wire bytes (indices 1..4 of
+        // the inner block array) and compare against the header's claim.  This only
+        // runs in ValidateAll mode and only when raw_cbor is available (i.e., blocks
+        // received from the network, not constructed in-memory).
+        // Closes #377.
+        if mode == BlockValidationMode::ValidateAll {
+            if let Some(ref raw) = block.raw_cbor {
+                if let Some(actual_body_size) =
+                    dugite_serialization::compute_block_body_size_from_cbor(raw)
+                {
+                    let claimed = block.header.body_size;
+                    if actual_body_size != claimed {
+                        return Err(LedgerError::WrongBlockBodySize {
+                            actual: actual_body_size,
+                            claimed,
+                        });
+                    }
+                }
+            }
+        }
 
         // Allocate a per-block diff to record all UTxO inserts and deletes.
         let mut block_diff = UtxoDiff::new();

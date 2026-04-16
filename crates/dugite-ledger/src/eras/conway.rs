@@ -349,7 +349,7 @@ impl EraRules for ConwayRules {
     fn process_epoch_transition(
         &self,
         new_epoch: EpochNo,
-        _ctx: &RuleContext,
+        ctx: &RuleContext,
         utxo: &mut UtxoSubState,
         certs: &mut CertSubState,
         gov: &mut GovSubState,
@@ -387,6 +387,44 @@ impl EraRules for ConwayRules {
                             .or_insert(Lovelace(0)) += *reward;
                     } else {
                         epochs.treasury.0 = epochs.treasury.0.saturating_add(reward.0);
+                    }
+                }
+            }
+        }
+
+        // Compute and apply RUPD using GO snapshot + bprev + ss_fee.
+        // Same logic as Shelley/Babbage — monetary expansion and per-pool reward
+        // distribution using the GO snapshot captured two epochs ago.
+        if epochs.snapshots.rupd_ready {
+            if let Some(ref go) = epochs.snapshots.go {
+                let rupd = crate::compute_reward_update(
+                    ctx.params,
+                    epochs.prev_d,
+                    epochs.prev_protocol_version_major,
+                    Some(go),
+                    &epochs.snapshots.bprev_blocks_by_pool,
+                    epochs.snapshots.ss_fee,
+                    epochs.reserves,
+                    epochs.treasury,
+                    &certs.reward_accounts,
+                    ctx.epoch_length,
+                    ctx.shelley_transition_epoch,
+                );
+
+                // Apply RUPD: adjust reserves and treasury
+                epochs.reserves.0 = epochs.reserves.0.saturating_sub(rupd.delta_reserves);
+                epochs.treasury.0 = epochs.treasury.0.saturating_add(rupd.delta_treasury);
+
+                // Distribute rewards to registered accounts; unregistered -> treasury
+                for (cred_hash, reward) in &rupd.rewards {
+                    if reward.0 > 0 {
+                        if certs.reward_accounts.contains_key(cred_hash) {
+                            *Arc::make_mut(&mut certs.reward_accounts)
+                                .entry(*cred_hash)
+                                .or_insert(Lovelace(0)) += *reward;
+                        } else {
+                            epochs.treasury.0 = epochs.treasury.0.saturating_add(reward.0);
+                        }
                     }
                 }
             }
@@ -528,7 +566,11 @@ impl EraRules for ConwayRules {
         // produces dpDRepDistr before ratification begins.
 
         // === Steps 4+5: Ratification, enactment, treasury withdrawals ===
-        ratify_proposals_impl(new_epoch, epochs, certs, gov);
+        // Pass the OLD epoch (ctx.current_epoch) to ratify_proposals_impl, matching
+        // Haskell's reCurrentEpoch from the DRep pulser. Proposals with
+        // expires_epoch == current_epoch are still eligible for ratification;
+        // they only expire AFTER ratification fails at this boundary.
+        ratify_proposals_impl(ctx.current_epoch, epochs, certs, gov);
 
         // === Step 6: Deposit returns handled by ratify_proposals_impl above ===
 
@@ -571,7 +613,10 @@ impl EraRules for ConwayRules {
         // bump and triggers the actual hardfork. No additional logic needed.
 
         // === Step 13: setFreshDRepPulsingState ===
-        capture_governance_snapshots(new_epoch, epochs, certs, gov);
+        // Pass the OLD epoch (ctx.current_epoch) for the snapshot label, matching
+        // the old LedgerState::process_epoch_transition which passes self.epoch
+        // (before self.epoch = new_epoch).
+        capture_governance_snapshots(ctx.current_epoch, epochs, certs, gov);
 
         // Capture prevPParams BEFORE any PP updates.
         let old_d = 0.0; // Conway: d is always 0 (fully decentralized).
