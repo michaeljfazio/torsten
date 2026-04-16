@@ -340,8 +340,8 @@ impl EraRules for ConwayRules {
     /// Implements the Conway 13-step epoch transition pipeline. Steps that
     /// share logic with Shelley/Babbage delegate to the same code. Steps
     /// specific to Conway governance are implemented where possible and
-    /// stubbed with TODO comments where the full logic is too complex to
-    /// extract (governance ratification/enactment).
+    /// stubbed with deferral notes where the full logic is too complex to
+    /// extract inline (governance ratification/enactment).
     ///
     /// The full governance ratification/enactment pipeline (~600 lines in
     /// `state/governance.rs`) will continue to be used by the old apply_block
