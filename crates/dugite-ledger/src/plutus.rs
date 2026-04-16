@@ -1222,6 +1222,317 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Test: Cross-validation — always-succeeds V2 with real cost model
+    //
+    // Verifies that evaluate_plutus_scripts succeeds when supplied with the
+    // real Vasil-era PlutusV2 cost model (178 entries).  This validates that
+    // our UPLC integration works with production cost model coefficients and
+    // that the CostModels CBOR encoding is accepted by the uplc evaluator.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_cross_validate_v2_with_real_cost_model() {
+        let script_cbor =
+            build_script_cbor("(program 1.0.0 (lam _ (lam _ (lam _ (con unit ())))))");
+        let script_hash = script_hash_v2(&script_cbor);
+        let tx_input_hash = [0x10u8; 32];
+
+        let tx_cbor = build_conway_tx_cbor(&tx_input_hash, &script_cbor, 14_000_000, 2_000_000);
+        let (utxo_set, input) = build_script_utxo_set(&tx_input_hash, &script_hash);
+
+        let mut tx = Transaction::empty_with_hash(Hash32::ZERO);
+        tx.raw_cbor = Some(tx_cbor);
+        tx.body.inputs = vec![input];
+        tx.witness_set.plutus_v2_scripts = vec![script_cbor];
+
+        let slot_config = SlotConfig::preview();
+        let cost_models = vasil_v2_cost_models_cbor();
+
+        let result = evaluate_plutus_scripts(
+            &tx,
+            &utxo_set,
+            Some(&cost_models),
+            (14_000_000, 2_000_000),
+            &slot_config,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Always-succeeds V2 with real cost model should pass Phase-2: {:?}",
+            result.err()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Cross-validation — V3 Unit-check with always-succeeds V3 script
+    //
+    // PlutusV3 requires the script to return exactly Unit (per CIP-1694 /
+    // Haskell evaluateScriptRestricting).  This test verifies that:
+    //   (a) a V3 script returning Unit passes evaluation
+    //   (b) a V3 script returning non-Unit (integer 42) is rejected
+    //
+    // The V3 script lives in witness set key 7 and uses script hash prefix
+    // 0x03.  The per-redeemer V3 check should correctly apply the Unit
+    // return-value rule.
+    // -----------------------------------------------------------------------
+
+    /// Compute the PlutusV3 script hash (blake2b_224(0x03 || script_cbor_bytes))
+    fn script_hash_v3(script_cbor: &[u8]) -> [u8; 28] {
+        let mut tagged = Vec::with_capacity(1 + script_cbor.len());
+        tagged.push(0x03u8);
+        tagged.extend_from_slice(script_cbor);
+        *dugite_primitives::hash::blake2b_224(&tagged).as_bytes()
+    }
+
+    /// Build a Conway-era CBOR transaction with a PlutusV3 script (key 7).
+    fn build_conway_tx_cbor_v3(
+        tx_input_hash: &[u8; 32],
+        script_cbor: &[u8],
+        ex_units_steps: u64,
+        ex_units_mem: u64,
+    ) -> Vec<u8> {
+        use minicbor::Encoder;
+
+        let mut buf = Vec::with_capacity(256);
+        let mut enc = Encoder::new(&mut buf);
+
+        enc.array(4).expect("infallible");
+
+        // Body: map(3) {0: [input], 1: [output], 2: fee}
+        enc.map(3).expect("infallible");
+        enc.u8(0).expect("infallible");
+        enc.array(1).expect("infallible");
+        enc.array(2).expect("infallible");
+        enc.bytes(tx_input_hash).expect("infallible");
+        enc.u8(0).expect("infallible");
+        enc.u8(1).expect("infallible");
+        enc.array(1).expect("infallible");
+        enc.map(2).expect("infallible");
+        enc.u8(0).expect("infallible");
+        enc.bytes(&{
+            let mut a = vec![0x61u8];
+            a.extend_from_slice(&[0xBBu8; 28]);
+            a
+        })
+        .expect("infallible");
+        enc.u8(1).expect("infallible");
+        enc.u32(9_000_000).expect("infallible");
+        enc.u8(2).expect("infallible");
+        enc.u32(1_000_000).expect("infallible");
+
+        // Witness set: map(2) { 5: redeemers, 7: v3_scripts }
+        enc.map(2).expect("infallible");
+
+        // key 7: PlutusV3 scripts
+        enc.u8(7).expect("infallible");
+        enc.array(1).expect("infallible");
+        enc.bytes(script_cbor).expect("infallible");
+
+        // key 5: redeemers
+        enc.u8(5).expect("infallible");
+        enc.array(1).expect("infallible");
+        enc.array(4).expect("infallible");
+        enc.u8(0).expect("infallible"); // Spend
+        enc.u8(0).expect("infallible"); // index 0
+        enc.tag(minicbor::data::Tag::new(121)).expect("infallible");
+        enc.array(0).expect("infallible"); // Unit redeemer data
+        enc.array(2).expect("infallible");
+        enc.u64(ex_units_steps).expect("infallible");
+        enc.u64(ex_units_mem).expect("infallible");
+
+        enc.bool(true).expect("infallible");
+        enc.null().expect("infallible");
+
+        buf
+    }
+
+    #[test]
+    fn test_cross_validate_v3_unit_return_succeeds() {
+        // V3 always-succeeds: returns Unit (the only valid V3 return value)
+        // PlutusV3 uses program version 1.1.0 and receives a single merged
+        // argument per CIP-0069 (datum + redeemer + context merged into one).
+        let script_cbor =
+            build_script_cbor("(program 1.1.0 (lam _ (con unit ())))");
+        let script_hash = script_hash_v3(&script_cbor);
+        let tx_input_hash = [0x11u8; 32];
+
+        let tx_cbor = build_conway_tx_cbor_v3(&tx_input_hash, &script_cbor, 14_000_000, 2_000_000);
+        let (utxo_set, input) = build_script_utxo_set(&tx_input_hash, &script_hash);
+
+        let mut tx = Transaction::empty_with_hash(Hash32::ZERO);
+        tx.raw_cbor = Some(tx_cbor);
+        tx.body.inputs = vec![input];
+        tx.witness_set.plutus_v3_scripts = vec![script_cbor];
+
+        let slot_config = SlotConfig::preview();
+        let result = evaluate_plutus_scripts(
+            &tx,
+            &utxo_set,
+            None,
+            (14_000_000, 2_000_000),
+            &slot_config,
+        );
+
+        assert!(
+            result.is_ok(),
+            "V3 script returning Unit should pass Phase-2: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_cross_validate_v3_non_unit_return_fails() {
+        // V3 script that returns integer 42 (not Unit) — must be rejected.
+        // Single-lambda per CIP-0069 (V3 scripts receive one merged argument).
+        let script_cbor =
+            build_script_cbor("(program 1.1.0 (lam _ (con integer 42)))");
+        let script_hash = script_hash_v3(&script_cbor);
+        let tx_input_hash = [0x12u8; 32];
+
+        let tx_cbor = build_conway_tx_cbor_v3(&tx_input_hash, &script_cbor, 14_000_000, 2_000_000);
+        let (utxo_set, input) = build_script_utxo_set(&tx_input_hash, &script_hash);
+
+        let mut tx = Transaction::empty_with_hash(Hash32::ZERO);
+        tx.raw_cbor = Some(tx_cbor);
+        tx.body.inputs = vec![input];
+        tx.witness_set.plutus_v3_scripts = vec![script_cbor];
+
+        let slot_config = SlotConfig::preview();
+        let result = evaluate_plutus_scripts(
+            &tx,
+            &utxo_set,
+            None,
+            (14_000_000, 2_000_000),
+            &slot_config,
+        );
+
+        assert!(
+            matches!(result, Err(PlutusError::EvalFailed(_))),
+            "V3 script returning non-Unit must be rejected: {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: CostModels CBOR encoding roundtrip
+    //
+    // Verifies that CostModels::to_cbor() produces valid CBOR that can be
+    // fed to evaluate_plutus_scripts without error.  Tests V1, V2, and V3
+    // cost models individually and together.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_cost_models_cbor_roundtrip_v2_evaluator() {
+        use dugite_primitives::transaction::CostModels;
+
+        // Build a CostModels with the real V2 cost model and verify
+        // its to_cbor() output works with the evaluator.
+        let v2_costs: Vec<i64> = vec![
+            205665, 812, 1, 1, 1000, 571, 0, 1, 1000, 24177, 4, 1, 1000, 32,
+            117366, 10475, 4, 23000, 100, 23000, 100, 23000, 100, 23000, 100,
+            23000, 100, 23000, 100, 100, 100, 23000, 100, 19537, 32, 175354,
+            32, 46417, 4, 221973, 511, 0, 1, 89141, 32, 497525, 14068, 4, 2,
+            196500, 453240, 220, 0, 1, 1, 1000, 28662, 4, 2, 245000, 216773,
+            62, 1, 1060367, 12586, 1, 208512, 421, 1, 187000, 1000, 52998, 1,
+            80436, 32, 43249, 32, 1000, 32, 80556, 1, 57667, 4, 1000, 10,
+            197145, 156, 1, 197145, 156, 1, 204924, 473, 1, 208896, 511, 1,
+            52467, 32, 64832, 32, 65493, 32, 22558, 32, 16563, 32, 76511, 32,
+            196500, 453240, 220, 0, 1, 1, 69522, 11687, 0, 1, 60091, 32,
+            196500, 453240, 220, 0, 1, 1, 196500, 453240, 220, 0, 1, 1,
+            1159724, 392670, 0, 2, 806990, 30482, 4, 1927926, 82523, 4,
+            265318, 0, 4, 0, 85931, 32, 205665, 812, 1, 1, 41182, 32, 212342,
+            32, 31220, 32, 32696, 32, 43357, 32, 32247, 32, 38314, 32,
+            20000000000, 20000000000, 9462713, 1021, 10, 20000000000, 0,
+            20000000000,
+        ];
+
+        let cm = CostModels {
+            plutus_v1: None,
+            plutus_v2: Some(v2_costs),
+            plutus_v3: None,
+        };
+
+        let cbor = cm.to_cbor().expect("CostModels::to_cbor() should produce CBOR");
+
+        // Verify the CBOR is valid by decoding the map structure
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 1, "Should have exactly 1 entry (V2)");
+
+        // Now feed it to the evaluator with a real script
+        let script_cbor =
+            build_script_cbor("(program 1.0.0 (lam _ (lam _ (lam _ (con unit ())))))");
+        let script_hash = script_hash_v2(&script_cbor);
+        let tx_input_hash = [0x13u8; 32];
+
+        let tx_cbor = build_conway_tx_cbor(&tx_input_hash, &script_cbor, 14_000_000, 2_000_000);
+        let (utxo_set, input) = build_script_utxo_set(&tx_input_hash, &script_hash);
+
+        let mut tx = Transaction::empty_with_hash(Hash32::ZERO);
+        tx.raw_cbor = Some(tx_cbor);
+        tx.body.inputs = vec![input];
+        tx.witness_set.plutus_v2_scripts = vec![script_cbor];
+
+        let slot_config = SlotConfig::preview();
+        let result = evaluate_plutus_scripts(
+            &tx,
+            &utxo_set,
+            Some(&cbor),
+            (14_000_000, 2_000_000),
+            &slot_config,
+        );
+
+        assert!(
+            result.is_ok(),
+            "CostModels::to_cbor() output should be accepted by evaluator: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_cost_models_cbor_roundtrip_all_versions() {
+        use dugite_primitives::transaction::CostModels;
+
+        // Verify that a CostModels with all three versions produces valid CBOR.
+        // We use minimal cost arrays since the evaluator only consults the
+        // version relevant to the script being evaluated.
+        let cm = CostModels {
+            plutus_v1: Some(vec![100; 166]),  // V1 has 166 cost model entries
+            plutus_v2: Some(vec![100; 178]),  // V2 has 178 cost model entries
+            plutus_v3: Some(vec![100; 251]),  // V3 has 251 cost model entries (Conway)
+        };
+
+        let cbor = cm.to_cbor().expect("CostModels::to_cbor() should produce CBOR");
+
+        // Verify structure: map with 3 entries (keys 0, 1, 2)
+        let mut dec = minicbor::Decoder::new(&cbor);
+        let map_len = dec.map().unwrap().unwrap();
+        assert_eq!(map_len, 3, "Should have 3 entries (V1, V2, V3)");
+
+        // Verify key 0 (V1) has 166 entries
+        assert_eq!(dec.u32().unwrap(), 0);
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 166);
+        for _ in 0..166 {
+            dec.i64().unwrap();
+        }
+
+        // Verify key 1 (V2) has 178 entries
+        assert_eq!(dec.u32().unwrap(), 1);
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 178);
+        for _ in 0..178 {
+            dec.i64().unwrap();
+        }
+
+        // Verify key 2 (V3) has 251 entries
+        assert_eq!(dec.u32().unwrap(), 2);
+        let arr_len = dec.array().unwrap().unwrap();
+        assert_eq!(arr_len, 251);
+        for _ in 0..251 {
+            dec.i64().unwrap();
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Test 8: Per-redeemer V3 Unit-check (regression for GH#185)
     //
     // A transaction that contains BOTH a PlutusV2 script (Spend redeemer)
