@@ -11,3 +11,4 @@
 - [project_state_2026_03_18.md](project_state_2026_03_18.md) — Soak test analysis: gap/compliance assessment, preview BP epoch 1239, ~1019 ADA
 - [capability_gaps.md](capability_gaps.md) — Known capability gaps and partial implementations
 - [dependency_status.md](dependency_status.md) — Current dependency versions and update status
+- [ledger_assessment_2026_04_16.md](ledger_assessment_2026_04_16.md) — Detailed ledger completeness assessment with per-area percentages, 2026-04-16

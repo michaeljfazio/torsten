@@ -21,7 +21,6 @@
 //! | [`process_shelley_certs`] | Shelley, Allegra, Mary, Alonzo, Babbage | Shelley-era certificate processing |
 //! | [`drain_withdrawal_accounts`] | Shelley+ | Zero reward accounts referenced by tx withdrawals |
 //! | [`compute_shelley_nonce`] | Shelley+ | VRF-based nonce evolution and block counting |
-//! | [`validate_shelley_base`] | (stub) | Phase-1 validation rules common to all Shelley+ eras |
 
 use std::sync::Arc;
 
@@ -32,7 +31,6 @@ use super::RuleContext;
 use crate::state::LedgerError;
 use dugite_primitives::credentials::{Credential, Pointer};
 use dugite_primitives::hash::{blake2b_224, blake2b_256, Hash32};
-use dugite_primitives::protocol_params::ProtocolParameters;
 use dugite_primitives::time::EpochNo;
 use dugite_primitives::transaction::{Certificate, Transaction, TransactionInput};
 use dugite_primitives::value::Lovelace;
@@ -670,61 +668,6 @@ pub(crate) fn validate_block_ex_units(block: &Block, ctx: &RuleContext) -> Resul
 }
 
 // ============================================================================
-// 7. validate_shelley_base (stub)
-// ============================================================================
-
-/// Phase-1 validation rules common to all Shelley+ eras (rules 1-10).
-///
-/// This is a stub. The existing validation code in `validation/mod.rs` and
-/// `validation/phase1.rs` is tightly coupled with the `ValidationContext`
-/// struct and the `validate_transaction_with_pools` function. Extracting it
-/// cleanly requires refactoring the validation module, which is planned for
-/// a separate task.
-///
-/// # Rules covered (when implemented)
-///
-/// 1. **InputsExist** -- all tx inputs exist in the UTxO set.
-/// 2. **FeeSufficient** -- declared fee >= min_fee(tx).
-/// 3. **TTLValid** -- transaction TTL has not expired (slot <= ttl).
-/// 4. **ValuePreserved** -- sum(inputs) = sum(outputs) + fee (+ deposits - refunds).
-/// 5. **OutputTooSmall** -- each output meets min_utxo_value / coins_per_utxo_byte.
-/// 6. **OutputBootAddress** -- Byron/Bootstrap addresses cannot carry multi-asset.
-/// 7. **TxSizeLimit** -- serialized tx size <= max_tx_size.
-/// 8. **NetworkMismatch** -- output addresses match the expected network.
-/// 9. **WitnessSetComplete** -- all required vkey witnesses are present.
-/// 10. **CollateralValid** -- collateral inputs exist and are sufficient (Alonzo+).
-///
-/// # Parameters (planned)
-///
-/// * `tx` -- the transaction to validate.
-/// * `utxo` -- read-only UTxO sub-state for input lookup.
-/// * `params` -- current protocol parameters (min_fee, max_tx_size, etc.).
-/// * `current_slot` -- the block slot for TTL checking.
-///
-/// # Returns
-///
-/// `Ok(())` if all Phase-1 rules pass, or `Err(Vec<ValidationError>)`.
-///
-/// # Status
-///
-/// **STUB** -- not yet implemented. Era rule impls should continue to call
-/// `validate_transaction_with_pools` from the validation module until this
-/// function is fleshed out.
-#[allow(dead_code)]
-pub(crate) fn validate_shelley_base(
-    _tx: &Transaction,
-    _utxo: &UtxoSubState,
-    _params: &ProtocolParameters,
-    _current_slot: u64,
-) -> Result<(), Vec<String>> {
-    // TODO: Extract Phase-1 rules 1-10 from validation/phase1.rs.
-    // The current validation module is tightly coupled with ValidationContext
-    // and validate_transaction_with_pools. This will be implemented when the
-    // validation module is refactored to work with sub-state references.
-    Ok(())
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1341,20 +1284,6 @@ mod tests {
         assert_eq!(consensus.evolving_nonce, initial_evolving);
         assert_eq!(consensus.lab_nonce, header.prev_hash);
         assert_eq!(consensus.epoch_block_count, 1);
-    }
-
-    // -----------------------------------------------------------------------
-    // 6. validate_shelley_base tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_validate_shelley_base_stub_returns_ok() {
-        let utxo = empty_utxo_sub();
-        let params = ProtocolParameters::mainnet_defaults();
-        let tx = make_tx(Hash32::from_bytes([70u8; 32]), vec![], vec![], 0);
-
-        let result = validate_shelley_base(&tx, &utxo, &params, 100);
-        assert!(result.is_ok());
     }
 
     // -----------------------------------------------------------------------
