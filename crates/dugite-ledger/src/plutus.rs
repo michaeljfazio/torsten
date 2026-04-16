@@ -1350,8 +1350,7 @@ mod tests {
         // V3 always-succeeds: returns Unit (the only valid V3 return value)
         // PlutusV3 uses program version 1.1.0 and receives a single merged
         // argument per CIP-0069 (datum + redeemer + context merged into one).
-        let script_cbor =
-            build_script_cbor("(program 1.1.0 (lam _ (con unit ())))");
+        let script_cbor = build_script_cbor("(program 1.1.0 (lam _ (con unit ())))");
         let script_hash = script_hash_v3(&script_cbor);
         let tx_input_hash = [0x11u8; 32];
 
@@ -1364,13 +1363,8 @@ mod tests {
         tx.witness_set.plutus_v3_scripts = vec![script_cbor];
 
         let slot_config = SlotConfig::preview();
-        let result = evaluate_plutus_scripts(
-            &tx,
-            &utxo_set,
-            None,
-            (14_000_000, 2_000_000),
-            &slot_config,
-        );
+        let result =
+            evaluate_plutus_scripts(&tx, &utxo_set, None, (14_000_000, 2_000_000), &slot_config);
 
         assert!(
             result.is_ok(),
@@ -1383,8 +1377,7 @@ mod tests {
     fn test_cross_validate_v3_non_unit_return_fails() {
         // V3 script that returns integer 42 (not Unit) — must be rejected.
         // Single-lambda per CIP-0069 (V3 scripts receive one merged argument).
-        let script_cbor =
-            build_script_cbor("(program 1.1.0 (lam _ (con integer 42)))");
+        let script_cbor = build_script_cbor("(program 1.1.0 (lam _ (con integer 42)))");
         let script_hash = script_hash_v3(&script_cbor);
         let tx_input_hash = [0x12u8; 32];
 
@@ -1397,13 +1390,8 @@ mod tests {
         tx.witness_set.plutus_v3_scripts = vec![script_cbor];
 
         let slot_config = SlotConfig::preview();
-        let result = evaluate_plutus_scripts(
-            &tx,
-            &utxo_set,
-            None,
-            (14_000_000, 2_000_000),
-            &slot_config,
-        );
+        let result =
+            evaluate_plutus_scripts(&tx, &utxo_set, None, (14_000_000, 2_000_000), &slot_config);
 
         assert!(
             matches!(result, Err(PlutusError::EvalFailed(_))),
@@ -1426,21 +1414,180 @@ mod tests {
         // Build a CostModels with the real V2 cost model and verify
         // its to_cbor() output works with the evaluator.
         let v2_costs: Vec<i64> = vec![
-            205665, 812, 1, 1, 1000, 571, 0, 1, 1000, 24177, 4, 1, 1000, 32,
-            117366, 10475, 4, 23000, 100, 23000, 100, 23000, 100, 23000, 100,
-            23000, 100, 23000, 100, 100, 100, 23000, 100, 19537, 32, 175354,
-            32, 46417, 4, 221973, 511, 0, 1, 89141, 32, 497525, 14068, 4, 2,
-            196500, 453240, 220, 0, 1, 1, 1000, 28662, 4, 2, 245000, 216773,
-            62, 1, 1060367, 12586, 1, 208512, 421, 1, 187000, 1000, 52998, 1,
-            80436, 32, 43249, 32, 1000, 32, 80556, 1, 57667, 4, 1000, 10,
-            197145, 156, 1, 197145, 156, 1, 204924, 473, 1, 208896, 511, 1,
-            52467, 32, 64832, 32, 65493, 32, 22558, 32, 16563, 32, 76511, 32,
-            196500, 453240, 220, 0, 1, 1, 69522, 11687, 0, 1, 60091, 32,
-            196500, 453240, 220, 0, 1, 1, 196500, 453240, 220, 0, 1, 1,
-            1159724, 392670, 0, 2, 806990, 30482, 4, 1927926, 82523, 4,
-            265318, 0, 4, 0, 85931, 32, 205665, 812, 1, 1, 41182, 32, 212342,
-            32, 31220, 32, 32696, 32, 43357, 32, 32247, 32, 38314, 32,
-            20000000000, 20000000000, 9462713, 1021, 10, 20000000000, 0,
+            205665,
+            812,
+            1,
+            1,
+            1000,
+            571,
+            0,
+            1,
+            1000,
+            24177,
+            4,
+            1,
+            1000,
+            32,
+            117366,
+            10475,
+            4,
+            23000,
+            100,
+            23000,
+            100,
+            23000,
+            100,
+            23000,
+            100,
+            23000,
+            100,
+            23000,
+            100,
+            100,
+            100,
+            23000,
+            100,
+            19537,
+            32,
+            175354,
+            32,
+            46417,
+            4,
+            221973,
+            511,
+            0,
+            1,
+            89141,
+            32,
+            497525,
+            14068,
+            4,
+            2,
+            196500,
+            453240,
+            220,
+            0,
+            1,
+            1,
+            1000,
+            28662,
+            4,
+            2,
+            245000,
+            216773,
+            62,
+            1,
+            1060367,
+            12586,
+            1,
+            208512,
+            421,
+            1,
+            187000,
+            1000,
+            52998,
+            1,
+            80436,
+            32,
+            43249,
+            32,
+            1000,
+            32,
+            80556,
+            1,
+            57667,
+            4,
+            1000,
+            10,
+            197145,
+            156,
+            1,
+            197145,
+            156,
+            1,
+            204924,
+            473,
+            1,
+            208896,
+            511,
+            1,
+            52467,
+            32,
+            64832,
+            32,
+            65493,
+            32,
+            22558,
+            32,
+            16563,
+            32,
+            76511,
+            32,
+            196500,
+            453240,
+            220,
+            0,
+            1,
+            1,
+            69522,
+            11687,
+            0,
+            1,
+            60091,
+            32,
+            196500,
+            453240,
+            220,
+            0,
+            1,
+            1,
+            196500,
+            453240,
+            220,
+            0,
+            1,
+            1,
+            1159724,
+            392670,
+            0,
+            2,
+            806990,
+            30482,
+            4,
+            1927926,
+            82523,
+            4,
+            265318,
+            0,
+            4,
+            0,
+            85931,
+            32,
+            205665,
+            812,
+            1,
+            1,
+            41182,
+            32,
+            212342,
+            32,
+            31220,
+            32,
+            32696,
+            32,
+            43357,
+            32,
+            32247,
+            32,
+            38314,
+            32,
+            20000000000,
+            20000000000,
+            9462713,
+            1021,
+            10,
+            20000000000,
+            0,
             20000000000,
         ];
 
@@ -1450,7 +1597,9 @@ mod tests {
             plutus_v3: None,
         };
 
-        let cbor = cm.to_cbor().expect("CostModels::to_cbor() should produce CBOR");
+        let cbor = cm
+            .to_cbor()
+            .expect("CostModels::to_cbor() should produce CBOR");
 
         // Verify the CBOR is valid by decoding the map structure
         let mut dec = minicbor::Decoder::new(&cbor);
@@ -1495,12 +1644,14 @@ mod tests {
         // We use minimal cost arrays since the evaluator only consults the
         // version relevant to the script being evaluated.
         let cm = CostModels {
-            plutus_v1: Some(vec![100; 166]),  // V1 has 166 cost model entries
-            plutus_v2: Some(vec![100; 178]),  // V2 has 178 cost model entries
-            plutus_v3: Some(vec![100; 251]),  // V3 has 251 cost model entries (Conway)
+            plutus_v1: Some(vec![100; 166]), // V1 has 166 cost model entries
+            plutus_v2: Some(vec![100; 178]), // V2 has 178 cost model entries
+            plutus_v3: Some(vec![100; 251]), // V3 has 251 cost model entries (Conway)
         };
 
-        let cbor = cm.to_cbor().expect("CostModels::to_cbor() should produce CBOR");
+        let cbor = cm
+            .to_cbor()
+            .expect("CostModels::to_cbor() should produce CBOR");
 
         // Verify structure: map with 3 entries (keys 0, 1, 2)
         let mut dec = minicbor::Decoder::new(&cbor);
