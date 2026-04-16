@@ -292,20 +292,25 @@ fn enumerate_snapshots(db_path: &Path) -> Vec<SnapshotCandidate> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
+        let path = entry.path();
 
-        // Accept both epoch-numbered snapshots and the "latest" convenience
-        // copy so that a node stopped immediately after a snapshot gets a fast
-        // path even before the next epoch.
+        // New format: ledger-snapshot-epoch{E}-slot{S}.bin — slot in filename.
+        if let Some(slot) = parse_slot_from_snapshot_filename(&name_str) {
+            candidates.push(SnapshotCandidate {
+                path,
+                ledger_slot: slot,
+            });
+            continue;
+        }
+
+        // Legacy format: ledger-snapshot-epoch{E}.bin or ledger-snapshot.bin.
+        // Must fully deserialize to extract the slot (backward compat).
         let is_epoch = name_str.starts_with("ledger-snapshot-epoch") && name_str.ends_with(".bin");
         let is_latest = name_str == "ledger-snapshot.bin";
         if !is_epoch && !is_latest {
             continue;
         }
 
-        let path = entry.path();
-
-        // Load just enough to get the ledger slot. Full load is unavoidable
-        // because the format is bincode-encoded LedgerState (not seekable).
         match LedgerState::load_snapshot(&path) {
             Ok(state) => {
                 let ledger_slot = state.tip.point.slot().map(|s| s.0).unwrap_or(0);
@@ -323,6 +328,16 @@ fn enumerate_snapshots(db_path: &Path) -> Vec<SnapshotCandidate> {
     // Sort newest-first so the first suitable candidate can be taken directly.
     candidates.sort_by(|a, b| b.ledger_slot.cmp(&a.ledger_slot));
     candidates
+}
+
+/// Extract the slot number from a new-format snapshot filename.
+///
+/// Matches `ledger-snapshot-epoch{E}-slot{S}.bin` and returns `S`.
+fn parse_slot_from_snapshot_filename(name: &str) -> Option<u64> {
+    let rest = name.strip_prefix("ledger-snapshot-epoch")?;
+    let rest = rest.strip_suffix(".bin")?;
+    let slot_part = rest.split("-slot").nth(1)?;
+    slot_part.parse::<u64>().ok()
 }
 
 /// Find the latest snapshot whose ledger tip is at or before `immutable_tip_slot`.
@@ -924,5 +939,88 @@ mod tests {
         // Path that does not exist — should not panic, just return empty cache.
         let cache = recover_invalid_cache(Path::new("/nonexistent/path/that/never/exists"));
         assert!(cache.is_empty());
+    }
+
+    // ── Snapshot filename parsing (#410) ─────────────────────────────────────
+
+    #[test]
+    fn parse_slot_from_filename_new_format() {
+        assert_eq!(
+            parse_slot_from_snapshot_filename("ledger-snapshot-epoch5-slot12345.bin"),
+            Some(12345)
+        );
+    }
+
+    #[test]
+    fn parse_slot_from_filename_large_values() {
+        assert_eq!(
+            parse_slot_from_snapshot_filename("ledger-snapshot-epoch999-slot87654321.bin"),
+            Some(87654321)
+        );
+    }
+
+    #[test]
+    fn parse_slot_from_filename_legacy_returns_none() {
+        assert_eq!(
+            parse_slot_from_snapshot_filename("ledger-snapshot-epoch5.bin"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_slot_from_filename_latest_returns_none() {
+        assert_eq!(
+            parse_slot_from_snapshot_filename("ledger-snapshot.bin"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_slot_from_filename_invalid_slot_returns_none() {
+        assert_eq!(
+            parse_slot_from_snapshot_filename("ledger-snapshot-epoch5-slotabc.bin"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_slot_from_filename_no_bin_extension_returns_none() {
+        assert_eq!(
+            parse_slot_from_snapshot_filename("ledger-snapshot-epoch5-slot100"),
+            None
+        );
+    }
+
+    #[test]
+    fn enumerate_snapshots_new_format_avoids_deserialization() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path();
+
+        // Create a new-format snapshot file (contents don't matter — should not be read)
+        std::fs::write(
+            db_path.join("ledger-snapshot-epoch10-slot50000.bin"),
+            b"garbage",
+        )
+        .unwrap();
+
+        let candidates = enumerate_snapshots(db_path);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].ledger_slot, 50000);
+    }
+
+    #[test]
+    fn enumerate_snapshots_sorts_newest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path();
+
+        std::fs::write(db_path.join("ledger-snapshot-epoch5-slot10000.bin"), b"x").unwrap();
+        std::fs::write(db_path.join("ledger-snapshot-epoch8-slot30000.bin"), b"x").unwrap();
+        std::fs::write(db_path.join("ledger-snapshot-epoch6-slot20000.bin"), b"x").unwrap();
+
+        let candidates = enumerate_snapshots(db_path);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].ledger_slot, 30000);
+        assert_eq!(candidates[1].ledger_slot, 20000);
+        assert_eq!(candidates[2].ledger_slot, 10000);
     }
 }

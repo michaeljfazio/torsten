@@ -1348,6 +1348,13 @@ impl Node {
                     // The fragment's oldest header was promoted — pop it.
                     let mut frag = self.chain_fragment.write().await;
                     frag.pop_oldest();
+
+                    // Flush DiffSeq entries for the now-immutable block.
+                    // These diffs can never be rolled back, so keeping them
+                    // wastes memory. Combined with push_bounded in apply_block,
+                    // this ensures DiffSeq stays at most k entries.
+                    let mut ls = self.ledger_state.write().await;
+                    ls.utxo.diff_seq.flush_up_to(gc_slot);
                 }
             }
 

@@ -324,6 +324,7 @@ impl From<LedgerStateSnapshot> for super::LedgerState {
             node_network: s.node_network,
             randomness_stabilisation_window: s.randomness_stabilisation_window,
             stability_window_3kf: s.stability_window_3kf,
+            security_param: 0, // Set from genesis config at startup via set_epoch_length()
         }
     }
 }

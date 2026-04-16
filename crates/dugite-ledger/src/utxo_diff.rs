@@ -85,6 +85,23 @@ impl DiffSeq {
         self.diffs.push_back((slot, hash, diff));
     }
 
+    /// Append a new block's diff, evicting the oldest if length would exceed `max_len`.
+    pub fn push_bounded(
+        &mut self,
+        slot: SlotNo,
+        hash: Hash32,
+        diff: UtxoDiff,
+        max_len: usize,
+    ) -> Option<(SlotNo, Hash32, UtxoDiff)> {
+        let evicted = if max_len > 0 && self.diffs.len() >= max_len {
+            self.diffs.pop_front()
+        } else {
+            None
+        };
+        self.diffs.push_back((slot, hash, diff));
+        evicted
+    }
+
     /// Remove the last n diffs (for rollback). Returns them in reverse order
     /// (most recent first) for unapplying.
     pub fn rollback(&mut self, n: usize) -> Vec<(SlotNo, Hash32, UtxoDiff)> {
@@ -340,5 +357,194 @@ mod tests {
         assert_eq!(rolled.len(), 1);
         assert!(rolled[0].2.is_empty());
         assert_eq!(seq.len(), 1);
+    }
+
+    // =========================================================================
+    // push_bounded tests (#410)
+    // =========================================================================
+
+    #[test]
+    fn test_push_bounded_under_limit() {
+        let mut seq = DiffSeq::new();
+        for i in 0..3u64 {
+            let evicted = seq.push_bounded(
+                SlotNo(i),
+                Hash32::from_bytes([i as u8; 32]),
+                UtxoDiff::new(),
+                5,
+            );
+            assert!(evicted.is_none());
+        }
+        assert_eq!(seq.len(), 3);
+    }
+
+    #[test]
+    fn test_push_bounded_at_limit_evicts_oldest() {
+        let mut seq = DiffSeq::new();
+        let max_len = 3;
+        for i in 0..3u64 {
+            seq.push_bounded(
+                SlotNo(i + 1),
+                Hash32::from_bytes([i as u8; 32]),
+                UtxoDiff::new(),
+                max_len,
+            );
+        }
+        assert_eq!(seq.len(), 3);
+
+        // Push a 4th — should evict slot 1
+        let evicted = seq.push_bounded(
+            SlotNo(4),
+            Hash32::from_bytes([4; 32]),
+            UtxoDiff::new(),
+            max_len,
+        );
+        assert!(evicted.is_some());
+        let (evicted_slot, _, _) = evicted.unwrap();
+        assert_eq!(evicted_slot, SlotNo(1));
+        assert_eq!(seq.len(), 3);
+    }
+
+    #[test]
+    fn test_push_bounded_returns_evicted_diff() {
+        let mut seq = DiffSeq::new();
+        let mut diff0 = UtxoDiff::new();
+        diff0.record_insert(make_input(1, 0), make_output(1_000_000));
+        seq.push_bounded(SlotNo(1), Hash32::from_bytes([1; 32]), diff0, 1);
+
+        let mut diff1 = UtxoDiff::new();
+        diff1.record_insert(make_input(2, 0), make_output(2_000_000));
+        let evicted = seq.push_bounded(SlotNo(2), Hash32::from_bytes([2; 32]), diff1, 1);
+
+        let (slot, _, diff) = evicted.unwrap();
+        assert_eq!(slot, SlotNo(1));
+        assert_eq!(diff.inserts.len(), 1);
+        assert_eq!(seq.len(), 1);
+    }
+
+    #[test]
+    fn test_push_bounded_maintains_chronological_order() {
+        let mut seq = DiffSeq::new();
+        let max_len = 3;
+        for i in 0..6u64 {
+            seq.push_bounded(
+                SlotNo(i + 1),
+                Hash32::from_bytes([i as u8; 32]),
+                UtxoDiff::new(),
+                max_len,
+            );
+        }
+        assert_eq!(seq.len(), 3);
+        // Remaining should be slots 4, 5, 6
+        let rolled = seq.rollback(3);
+        assert_eq!(rolled[0].0, SlotNo(6));
+        assert_eq!(rolled[1].0, SlotNo(5));
+        assert_eq!(rolled[2].0, SlotNo(4));
+    }
+
+    #[test]
+    fn test_push_bounded_with_flush_interaction() {
+        let mut seq = DiffSeq::new();
+        let max_len = 5;
+        for i in 1..=5u64 {
+            seq.push_bounded(
+                SlotNo(i * 10),
+                Hash32::from_bytes([i as u8; 32]),
+                UtxoDiff::new(),
+                max_len,
+            );
+        }
+        assert_eq!(seq.len(), 5);
+
+        // Flush first 3 (slots 10, 20, 30)
+        let flushed = seq.flush_up_to(SlotNo(30));
+        assert_eq!(flushed.len(), 3);
+        assert_eq!(seq.len(), 2);
+
+        // Push 3 more — no eviction needed since len < max_len
+        for i in 6..=8u64 {
+            let evicted = seq.push_bounded(
+                SlotNo(i * 10),
+                Hash32::from_bytes([i as u8; 32]),
+                UtxoDiff::new(),
+                max_len,
+            );
+            assert!(evicted.is_none());
+        }
+        assert_eq!(seq.len(), 5);
+    }
+
+    #[test]
+    fn test_push_bounded_zero_max_len() {
+        let mut seq = DiffSeq::new();
+        // max_len=0: no eviction possible (nothing in deque), item still added
+        let evicted = seq.push_bounded(SlotNo(1), Hash32::from_bytes([1; 32]), UtxoDiff::new(), 0);
+        assert!(evicted.is_none());
+        assert_eq!(seq.len(), 1);
+    }
+
+    #[test]
+    fn test_diff_seq_memory_bounded() {
+        let mut seq = DiffSeq::new();
+        let max_len = 100;
+        for i in 0..10_000u64 {
+            seq.push_bounded(
+                SlotNo(i),
+                Hash32::from_bytes([(i % 256) as u8; 32]),
+                UtxoDiff::new(),
+                max_len,
+            );
+            assert!(seq.len() <= max_len);
+        }
+        assert_eq!(seq.len(), max_len);
+    }
+
+    #[test]
+    fn test_diff_seq_flush_clears_immutable_diffs() {
+        let mut seq = DiffSeq::new();
+        for i in 1..=10u64 {
+            seq.push(
+                SlotNo(i * 10),
+                Hash32::from_bytes([i as u8; 32]),
+                UtxoDiff::new(),
+            );
+        }
+        assert_eq!(seq.len(), 10);
+
+        // Flush slots 10..=50
+        let flushed = seq.flush_up_to(SlotNo(50));
+        assert_eq!(flushed.len(), 5);
+        assert_eq!(seq.len(), 5);
+    }
+
+    #[test]
+    fn test_diff_seq_flush_preserves_volatile_diffs() {
+        let mut seq = DiffSeq::new();
+        for i in 1..=5u64 {
+            seq.push(
+                SlotNo(i * 100),
+                Hash32::from_bytes([i as u8; 32]),
+                UtxoDiff::new(),
+            );
+        }
+
+        seq.flush_up_to(SlotNo(300));
+        assert_eq!(seq.len(), 2);
+        // Remaining are slots 400 and 500
+        assert_eq!(seq.diffs.front().unwrap().0, SlotNo(400));
+        assert_eq!(seq.diffs.back().unwrap().0, SlotNo(500));
+    }
+
+    #[test]
+    fn test_diff_seq_clear_before_snapshot() {
+        let mut seq = DiffSeq::new();
+        for i in 0..5u64 {
+            seq.push(SlotNo(i), Hash32::ZERO, UtxoDiff::new());
+        }
+        assert_eq!(seq.len(), 5);
+
+        seq.clear();
+        assert!(seq.is_empty());
+        assert_eq!(seq.len(), 0);
     }
 }

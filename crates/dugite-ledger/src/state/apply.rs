@@ -270,9 +270,12 @@ impl LedgerState {
             }
             self.era = block.era;
 
-            self.utxo
-                .diff_seq
-                .push(block.slot(), *block.hash(), block_diff);
+            self.utxo.diff_seq.push_bounded(
+                block.slot(),
+                *block.hash(),
+                block_diff,
+                self.security_param as usize,
+            );
 
             trace!(
                 slot = block.slot().0,

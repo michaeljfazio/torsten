@@ -120,15 +120,21 @@ impl Node {
         // Consensus is the runtime owner; ledger state is the persistence vehicle.
         ls.consensus.opcert_counters = self.consensus.opcert_counters().clone();
 
+        // Free DiffSeq memory before snapshot — diffs are not persisted
+        // (#[serde(skip)]) and clearing here reclaims memory immediately.
+        ls.utxo.diff_seq.clear();
+
         // Flush UTxO store to disk FIRST (cardano-lsm has no WAL)
         if let Err(e) = ls.save_utxo_snapshot() {
             error!("Failed to save UTxO store snapshot: {e}");
         }
 
-        // Save epoch-numbered snapshot for rollback safety
+        // Save epoch-numbered snapshot for rollback safety.
+        // Filename includes slot for fast enumeration without deserialization.
+        let slot = ls.tip.point.slot().map(|s| s.0).unwrap_or(0);
         let epoch_path = self
             .database_path
-            .join(format!("ledger-snapshot-epoch{epoch}.bin"));
+            .join(format!("ledger-snapshot-epoch{epoch}-slot{slot}.bin"));
         if let Err(e) = ls.save_snapshot(&epoch_path) {
             error!("Failed to save ledger snapshot: {e}");
             return;
@@ -155,7 +161,9 @@ impl Node {
                 let name_str = name.to_string_lossy();
                 if let Some(rest) = name_str.strip_prefix("ledger-snapshot-epoch") {
                     if let Some(epoch_str) = rest.strip_suffix(".bin") {
-                        if let Ok(epoch) = epoch_str.parse::<u64>() {
+                        // Handle both "5" (legacy) and "5-slot12345" (new) formats.
+                        let epoch_part = epoch_str.split("-slot").next().unwrap_or(epoch_str);
+                        if let Ok(epoch) = epoch_part.parse::<u64>() {
                             snapshots.push((epoch, entry.path()));
                         }
                     }
@@ -201,7 +209,8 @@ impl Node {
                 let name_str = name.to_string_lossy();
                 if let Some(rest) = name_str.strip_prefix("ledger-snapshot-epoch") {
                     if let Some(epoch_str) = rest.strip_suffix(".bin") {
-                        if let Ok(epoch) = epoch_str.parse::<u64>() {
+                        let epoch_part = epoch_str.split("-slot").next().unwrap_or(epoch_str);
+                        if let Ok(epoch) = epoch_part.parse::<u64>() {
                             epoch_snapshots.push((epoch, entry.path()));
                         }
                     }

@@ -142,6 +142,9 @@ pub struct LedgerState {
     pub randomness_stabilisation_window: u64,
     /// Stability window: ceiling(3k/f) for Alonzo/Babbage (per Haskell erratum 17.3).
     pub stability_window_3kf: u64,
+    /// Security parameter k — maximum rollback depth.
+    /// Not persisted in snapshots; set from genesis config at startup.
+    pub security_param: u64,
 }
 
 /// Pending reward update matching Haskell's RUPD structure.
@@ -702,6 +705,7 @@ impl LedgerState {
             node_network: None,
             randomness_stabilisation_window: 172800, // 4k/f on mainnet: ceil(4*2160/0.05)
             stability_window_3kf: 129600,            // 3k/f on mainnet: ceil(3*2160/0.05)
+            security_param: 2160,
         }
     }
 
@@ -988,6 +992,7 @@ impl LedgerState {
             // Will be recalculated by set_epoch_length()
             randomness_stabilisation_window: 0,
             stability_window_3kf: 0,
+            security_param: 0, // Will be set by set_epoch_length()
         }
     }
 
@@ -1003,6 +1008,7 @@ impl LedgerState {
     /// Configure the epoch length (from Shelley genesis)
     pub fn set_epoch_length(&mut self, epoch_length: u64, security_param: u64) {
         self.epoch_length = epoch_length;
+        self.security_param = security_param;
         // Compute BOTH stability windows:
         //   randomness_stabilisation_window = ceiling(4k/f) — Conway+ candidate freeze
         //   stability_window_3kf            = ceiling(3k/f) — Alonzo/Babbage candidate freeze
