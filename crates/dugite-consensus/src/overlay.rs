@@ -120,10 +120,9 @@ pub fn classify_overlay_slot(
     let position = ceiling_mul(offset, d_num as i128, d_den as i128);
 
     // asc_inv = floor(1/f) = f_den / f_num (integer division = floor for positive values)
-    let asc_inv = if f_num == 0 {
-        return OBftSlot::NonActiveSlot;
-    } else {
-        (f_den / f_num) as i128
+    let asc_inv = match f_den.checked_div(f_num) {
+        Some(v) => v as i128,
+        None => return OBftSlot::NonActiveSlot,
     };
 
     if asc_inv == 0 || position % asc_inv != 0 {

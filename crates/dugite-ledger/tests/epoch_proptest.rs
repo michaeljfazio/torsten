@@ -169,7 +169,7 @@ proptest! {
         let treasury_cut: u64 = {
             let num = (total_rewards_available as u128) * (tau_num as u128);
             let den = tau_den as u128;
-            if den == 0 { 0 } else { (num / den) as u64 }
+            num.checked_div(den).unwrap_or(0) as u64
         };
 
         let reward_pot = total_rewards_available.saturating_sub(treasury_cut);
@@ -753,13 +753,13 @@ proptest! {
             // prev_d is 1.0 (genesis default), so d >= 0.8 branch applies.
             let num = (reserves as u128) * (rho_num as u128);
             let den = rho_den as u128;
-            if den == 0 { 0u64 } else { (num / den) as u64 }
+            num.checked_div(den).unwrap_or(0) as u64
         };
         let total_rewards_available = expansion.saturating_add(state.epochs.snapshots.ss_fee.0);
         let treasury_cut = {
             let num = (total_rewards_available as u128) * (tau_num as u128);
             let den = tau_den as u128;
-            if den == 0 { 0u64 } else { (num / den) as u64 }
+            num.checked_div(den).unwrap_or(0) as u64
         };
         let reward_pot = total_rewards_available.saturating_sub(treasury_cut);
 
