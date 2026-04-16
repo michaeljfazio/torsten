@@ -95,7 +95,7 @@ fn credential_to_hash(credential: &Credential) -> Hash32 {
 /// header + 28-byte credential hash).
 ///
 /// Mirrors `LedgerState::reward_account_to_hash` from `state/certificates.rs`.
-fn reward_account_to_hash(reward_account: &[u8]) -> Hash32 {
+pub(crate) fn reward_account_to_hash(reward_account: &[u8]) -> Hash32 {
     let mut key_bytes = [0u8; 32];
     if reward_account.len() >= 29 {
         // Copy exactly 28 bytes of the credential (skip the 1-byte header).

@@ -2840,7 +2840,7 @@ mod tests {
 
         let result = rules.apply_valid_tx(
             &tx,
-            BlockValidationMode::Full,
+            BlockValidationMode::ApplyOnly,
             &ctx,
             &mut utxo,
             &mut certs,
@@ -2897,7 +2897,7 @@ mod tests {
 
         let result = rules.apply_valid_tx(
             &tx,
-            BlockValidationMode::Full,
+            BlockValidationMode::ApplyOnly,
             &ctx,
             &mut utxo,
             &mut certs,
@@ -2905,7 +2905,10 @@ mod tests {
             &mut epochs,
         );
 
-        assert!(result.is_ok(), "Delegated withdrawal should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "Delegated withdrawal should succeed: {result:?}"
+        );
     }
 
     #[test]
@@ -2945,7 +2948,7 @@ mod tests {
 
         let result = rules.apply_valid_tx(
             &tx,
-            BlockValidationMode::Full,
+            BlockValidationMode::ApplyOnly,
             &ctx,
             &mut utxo,
             &mut certs,
@@ -3001,7 +3004,7 @@ mod tests {
 
         let result = rules.apply_valid_tx(
             &tx,
-            BlockValidationMode::Full,
+            BlockValidationMode::ApplyOnly,
             &ctx,
             &mut utxo,
             &mut certs,
@@ -3060,7 +3063,7 @@ mod tests {
 
         let result = rules.apply_valid_tx(
             &tx,
-            BlockValidationMode::Full,
+            BlockValidationMode::ApplyOnly,
             &ctx,
             &mut utxo,
             &mut certs,
