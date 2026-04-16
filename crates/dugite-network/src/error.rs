@@ -98,7 +98,9 @@ impl std::error::Error for BearerError {}
 impl From<io::Error> for BearerError {
     fn from(e: io::Error) -> Self {
         match e.kind() {
-            io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe => Self::ConnectionReset,
+            io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof => Self::ConnectionReset,
             io::ErrorKind::TimedOut => Self::Timeout,
             _ => Self::Io(e),
         }
@@ -405,6 +407,13 @@ mod tests {
     #[test]
     fn io_broken_pipe_maps_to_bearer_connection_reset() {
         let io_err = io::Error::new(io::ErrorKind::BrokenPipe, "broken");
+        let bearer_err: BearerError = io_err.into();
+        assert!(matches!(bearer_err, BearerError::ConnectionReset));
+    }
+
+    #[test]
+    fn io_unexpected_eof_maps_to_bearer_connection_reset() {
+        let io_err = io::Error::new(io::ErrorKind::UnexpectedEof, "early eof");
         let bearer_err: BearerError = io_err.into();
         assert!(matches!(bearer_err, BearerError::ConnectionReset));
     }
