@@ -297,6 +297,28 @@ impl NodePeerManager {
         self.local_addr = Some(addr);
     }
 
+    /// Check whether `addr` is our own listen address.
+    ///
+    /// Handles the wildcard bind case: when we listen on `0.0.0.0:P`, any
+    /// address with a loopback or unspecified IP and the same port is treated
+    /// as self (e.g. `127.0.0.1:P`, `[::1]:P`).  An exact match is also
+    /// accepted for non-wildcard binds.
+    fn is_self_addr(&self, addr: SocketAddr) -> bool {
+        let Some(local) = self.local_addr else {
+            return false;
+        };
+        if local == addr {
+            return true;
+        }
+        if local.port() == addr.port()
+            && local.ip().is_unspecified()
+            && (addr.ip().is_loopback() || addr.ip().is_unspecified())
+        {
+            return true;
+        }
+        false
+    }
+
     /// Get the diffusion mode.
     pub fn diffusion_mode(&self) -> DiffusionMode {
         self.config.diffusion_mode
@@ -304,7 +326,7 @@ impl NodePeerManager {
 
     /// Add a peer from the topology configuration.
     pub fn add_config_peer(&mut self, addr: SocketAddr) {
-        if self.local_addr == Some(addr) {
+        if self.is_self_addr(addr) {
             return;
         }
         self.inner.add_peer(addr, PeerSource::Topology);
@@ -325,7 +347,7 @@ impl NodePeerManager {
 
     /// Add a peer discovered from ledger state.
     pub fn add_ledger_peer(&mut self, addr: SocketAddr) {
-        if self.local_addr == Some(addr) {
+        if self.is_self_addr(addr) {
             return;
         }
         self.inner.add_peer(addr, PeerSource::Ledger);
@@ -334,7 +356,7 @@ impl NodePeerManager {
     /// Add a peer received via PeerSharing.
     #[allow(dead_code)] // used by networking rewrite
     pub fn add_shared_peer(&mut self, addr: SocketAddr) {
-        if self.local_addr == Some(addr) {
+        if self.is_self_addr(addr) {
             return;
         }
         if addr.ip().is_loopback() || addr.ip().is_unspecified() {
@@ -810,5 +832,42 @@ mod tests {
         assert!(!pm.is_advertisable(&fw_addr));
         assert!(pm.is_advertisable(&normal_addr));
         assert!(pm.is_advertisable(&unknown_addr)); // unknown defaults to true
+    }
+
+    #[test]
+    fn test_is_self_addr_exact_match() {
+        let mut pm = NodePeerManager::new(PeerManagerConfig::default());
+        let addr: SocketAddr = "1.2.3.4:3001".parse().unwrap();
+        pm.set_local_addr(addr);
+        assert!(pm.is_self_addr(addr));
+        assert!(!pm.is_self_addr("5.6.7.8:3001".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_self_addr_wildcard_loopback() {
+        let mut pm = NodePeerManager::new(PeerManagerConfig::default());
+        // Bind on 0.0.0.0:3001 — loopback on same port is self.
+        pm.set_local_addr("0.0.0.0:3001".parse().unwrap());
+        assert!(pm.is_self_addr("127.0.0.1:3001".parse().unwrap()));
+        assert!(pm.is_self_addr("0.0.0.0:3001".parse().unwrap()));
+        // Different port is not self.
+        assert!(!pm.is_self_addr("127.0.0.1:3002".parse().unwrap()));
+        // Non-loopback on same port is not self (could be a real peer).
+        assert!(!pm.is_self_addr("1.2.3.4:3001".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_self_addr_no_local_addr() {
+        let pm = NodePeerManager::new(PeerManagerConfig::default());
+        assert!(!pm.is_self_addr("127.0.0.1:3001".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_add_ledger_peer_rejects_self_loopback() {
+        let mut pm = NodePeerManager::new(PeerManagerConfig::default());
+        pm.set_local_addr("0.0.0.0:3001".parse().unwrap());
+        pm.add_ledger_peer("127.0.0.1:3001".parse().unwrap());
+        // Should not be added — it's us.
+        assert_eq!(pm.inner.count_by_state(PeerState::Cold), 0);
     }
 }

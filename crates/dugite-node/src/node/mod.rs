@@ -2062,6 +2062,14 @@ impl Node {
                         accept_result = tcp_listener.accept() => {
                             match accept_result {
                                 Ok((stream, peer_addr)) => {
+                                    // Reject loopback connections — these are always
+                                    // self-connections (our own outbound to 127.0.0.1:P
+                                    // arriving at our own listener).
+                                    if peer_addr.ip().is_loopback() {
+                                        debug!(%peer_addr, "N2N inbound rejected: loopback self-connection");
+                                        drop(stream);
+                                        continue;
+                                    }
                                     info!(%peer_addr, "N2N inbound connection accepted");
                                     let conn_metrics = n2n_metrics.clone();
                                     conn_metrics
