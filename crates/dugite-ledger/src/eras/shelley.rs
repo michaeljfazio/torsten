@@ -572,11 +572,15 @@ impl EraRules for ShelleyRules {
     ) -> Result<(), LedgerError> {
         match from_era {
             Era::Byron => {
-                // TODO: Initialize staking state from genesis.
-                // The full TranslateEra logic (Haskell's translateToShelleyLedgerState)
-                // initializes initial funds, staking, delegations, and genesis UTxOs.
-                // Currently handled by the existing LedgerState initialization code.
-                debug!("Byron -> Shelley era transition (staking initialization deferred to orchestrator)");
+                // Byron→Shelley: In Haskell, translateToShelleyLedgerState converts
+                // Byron UTxOs and initializes staking from ShelleyGenesis.genDelegs.
+                // In dugite:
+                // - UTxOs are already in the unified set (no conversion needed)
+                // - Genesis delegates are loaded at node startup (node/mod.rs)
+                // - Initial funds/staking from ShelleyGenesis are applied during
+                //   LedgerState construction
+                // No state transformation needed at the era boundary.
+                debug!("Byron -> Shelley era transition (no state changes)");
                 Ok(())
             }
             Era::Shelley => {
