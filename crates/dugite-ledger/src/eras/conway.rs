@@ -703,7 +703,7 @@ impl EraRules for ConwayRules {
         // Steps 2 & 4: Seed initial DRep state, committee, and constitution
         // from ConwayGenesis config (matches Haskell's TranslateEra VState +
         // ConwayGovState construction).
-        if let Some(ref genesis) = ctx.conway_genesis {
+        if let Some(genesis) = ctx.conway_genesis {
             let governance = Arc::make_mut(&mut gov.governance);
 
             // Step 2: Seed initial DReps from genesis.
@@ -721,9 +721,7 @@ impl EraRules for ConwayRules {
                     .or_insert(DRepRegistration {
                         credential: Credential::VerificationKey(*hash28),
                         deposit: Lovelace(*deposit),
-                        drep_expiry: EpochNo(
-                            ctx.current_epoch.0 + ctx.params.drep_activity,
-                        ),
+                        drep_expiry: EpochNo(ctx.current_epoch.0 + ctx.params.drep_activity),
                         anchor: None,
                         registered_epoch: ctx.current_epoch,
                         active: true,
@@ -733,16 +731,17 @@ impl EraRules for ConwayRules {
             // Step 4a: Seed committee members from genesis.
             for (cred_bytes, expiry) in &genesis.committee_members {
                 let cred = Hash32::from_bytes(*cred_bytes);
-                governance.committee_expiration.insert(cred, EpochNo(*expiry));
+                governance
+                    .committee_expiration
+                    .insert(cred, EpochNo(*expiry));
             }
 
             // Step 4b: Set committee threshold from genesis.
             if let Some((num, den)) = genesis.committee_threshold {
-                governance.committee_threshold =
-                    Some(dugite_primitives::transaction::Rational {
-                        numerator: num,
-                        denominator: den,
-                    });
+                governance.committee_threshold = Some(dugite_primitives::transaction::Rational {
+                    numerator: num,
+                    denominator: den,
+                });
             }
 
             // Step 4c: Seed constitution from genesis.
