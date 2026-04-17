@@ -220,59 +220,22 @@ impl EraRules for ConwayRules {
         // Reference script size validation is performed during Phase-1 validation,
         // not during apply. The tiered fee check lives in validation/conway.rs.
 
-        // Step 3: validateWithdrawalsDelegated (PV >= 10).
-        // When protocol version 10 is active, verify that all withdrawal
-        // KeyHash accounts have a DRep delegation in gov.governance.vote_delegations.
-        if ctx.params.protocol_version_major >= 10 {
-            for reward_account in tx.body.withdrawals.keys() {
-                if reward_account.len() >= 29 {
-                    // Bit 4 of header: 0 = key credential, 1 = script credential.
-                    // Reward address headers: 0xe0/0xe1 = key, 0xf0/0xf1 = script.
-                    let is_script = reward_account[0] & 0x10 != 0;
-                    if !is_script {
-                        let key = common::reward_account_to_hash(reward_account);
-                        if !gov.governance.vote_delegations.contains_key(&key) {
-                            return Err(LedgerError::BlockTxValidationFailed {
-                                slot: ctx.current_slot,
-                                tx_hash: tx.hash.to_hex(),
-                                errors: format!(
-                                    "WithdrawalNotDelegated: key-hash credential {} \
-                                     has no DRep delegation (PV10 requirement)",
-                                    key.to_hex()
-                                ),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        // Step 4: testIncompleteAndMissingWithdrawals (PV >= 10).
-        // When protocol version 10 is active, verify withdrawal amounts
-        // exactly match reward balances.
-        if ctx.params.protocol_version_major >= 10 {
-            for (reward_account, amount) in &tx.body.withdrawals {
-                let key = common::reward_account_to_hash(reward_account);
-                let balance = certs
-                    .reward_accounts
-                    .get(&key)
-                    .copied()
-                    .unwrap_or(Lovelace(0));
-                if *amount != balance {
-                    return Err(LedgerError::BlockTxValidationFailed {
-                        slot: ctx.current_slot,
-                        tx_hash: tx.hash.to_hex(),
-                        errors: format!(
-                            "WithdrawalAmountMismatch: withdrawal {} != reward balance {} \
-                             for account {} (PV10 requirement)",
-                            amount.0,
-                            balance.0,
-                            key.to_hex()
-                        ),
-                    });
-                }
-            }
-        }
+        // Steps 3-4: PV10 withdrawal validation (validateWithdrawalsDelegated,
+        // testIncompleteAndMissingWithdrawals).
+        //
+        // These are Phase-1 UTXO-layer checks in the Haskell spec. During block
+        // application they must NOT run here because:
+        // - A reward balance discrepancy (even 1 lovelace) between our node and
+        //   Haskell would cause us to reject valid blocks the network accepted.
+        // - The checks depend on exact reward account balances which require
+        //   bit-perfect reward calculation across all epochs.
+        //
+        // For mempool admission (N2C LocalTxSubmission), these checks are
+        // enforced in the Phase-1 validation path (validation/phase1.rs).
+        // For block validation, the block producer already validated.
+        //
+        // Tracked: reward balance cross-validation needed before enabling
+        // these checks in the block application path.
 
         // Step 5: Update DRep activity for voting DReps in this transaction.
         update_drep_expiries_for_tx(tx, ctx.current_epoch, gov, epochs);
