@@ -3012,14 +3012,44 @@ impl Node {
                     apply,
                 }) => {
                     // Chain selection determined a competing fork is strictly
-                    // preferred.  The VolatileDB chain switch is already committed.
-                    // Phase 3 will wire the full ledger rollback + replay here.
+                    // preferred.  The VolatileDB chain switch is already
+                    // committed — selected_chain now points at the new fork.
+                    // The ledger state, however, is still on the OLD chain and
+                    // MUST be rolled back to the intersection before we can
+                    // apply the incoming block; otherwise the block's
+                    // `prev_hash` will not match the ledger tip and the only
+                    // path forward is the ApplyOnly `tip+1 sequence number`
+                    // bypass in `apply_block`, which silently corrupts ledger
+                    // state by merging two chains' UTxO views. See #439.
                     info!(
                         intersection = %intersection_hash.to_hex(),
                         rollback_count = rollback.len(),
                         apply_count = apply.len(),
-                        "Chain selection: fork switch detected (Phase 3 ledger rollback pending)"
+                        "Chain selection: fork switch at live tip — rolling back ledger to intersection"
                     );
+                    self.metrics
+                        .rollback_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    let rollback_point = {
+                        let db = self.chain_db.read().await;
+                        match db.get_block_location(&intersection_hash) {
+                            Some((intersection_slot, _bn)) => {
+                                dugite_primitives::block::Point::Specific(
+                                    intersection_slot,
+                                    intersection_hash,
+                                )
+                            }
+                            None => {
+                                warn!(
+                                    intersection = %intersection_hash.to_hex(),
+                                    "Fork intersection not in VolatileDB — using Origin for rollback"
+                                );
+                                dugite_primitives::block::Point::Origin
+                            }
+                        }
+                    };
+                    self.handle_rollback(&rollback_point).await;
                     true
                 }
                 Some(dugite_storage::AddBlockResult::Invalid(reason)) => {
@@ -3062,17 +3092,21 @@ impl Node {
         // Blocks may arrive out of order from multiple peers. Only apply
         // blocks that extend the current chain; others are stored in ChainDB
         // (via ChainSelQueue above) and will be applied when the chain catches up.
+        //
+        // After a SwitchedToFork-triggered handle_rollback above, the ledger
+        // tip was reset to the intersection. The incoming block may be many
+        // blocks ahead of the intersection — in that case it does NOT connect
+        // to the new tip and is left in ChainDB for gap-bridging in
+        // `process_forward_blocks` to pick up. Previously this site had a
+        // `block_number == tip + 1` hash-mismatch bypass that silently fused
+        // two chains' UTxO views at the live tip — see #439.
         let prev_hash = *block.prev_hash();
         let connects_to_tip = {
             let ls = self.ledger_state.read().await;
-            let tip_block = ls.tip.block_number.0;
-            let hash_match = match ls.tip.point.hash() {
+            match ls.tip.point.hash() {
                 Some(tip_hash) => prev_hash == *tip_hash,
                 None => true, // Origin — any block connects
-            };
-            // Fallback: accept block_number == tip + 1 when hash doesn't
-            // match (replay vs network serialization hash difference).
-            hash_match || block_number.0 == tip_block + 1
+            }
         };
 
         if !connects_to_tip {
