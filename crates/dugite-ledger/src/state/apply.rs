@@ -100,26 +100,49 @@ impl LedgerState {
 
         // ── Step 1: Verify block connects to current tip ──────────────────
         //
-        // If the hash doesn't match but block_number is the immediate
-        // successor, accept it. This handles hash discrepancies between
-        // blocks replayed from chunk files and blocks from the network
-        // (different CBOR serialization of the same block can produce
-        // different header hashes).
+        // A block must have `prev_hash == ledger.tip.hash`; otherwise it
+        // belongs to a different chain and applying it would silently corrupt
+        // ledger state. The correct handling of a prev_hash mismatch at the
+        // live tip is CHAIN SELECTION: rollback the ledger to the common
+        // intersection and replay the winning fork. That happens in the sync
+        // loop when ChainSelQueue returns `SwitchedToFork` — it must NOT be
+        // masked here.
+        //
+        // Historical note: earlier versions of this function accepted any
+        // block whose `block_number` was `tip.block_number + 1` even when
+        // `prev_hash` did not match, on the rationale that chunk-file replay
+        // could produce different CBOR hashes from the network path. That
+        // bypass silently papered over fork switches and led to divergence
+        // between VolatileDB.selected_chain and the ledger state — including
+        // forged blocks being effectively orphaned from our own view (see
+        // issue #439). The bypass is retained ONLY for `ApplyOnly` mode
+        // (used during startup chunk-file replay, where serialization
+        // roundtrip differences are the only legitimate cause of mismatch).
+        // `ValidateAll` mode (used for every live block and every forged
+        // block) must reject mismatches unconditionally.
         if self.tip.point != Point::Origin {
             if let Some(tip_hash) = self.tip.point.hash() {
                 if block.prev_hash() != tip_hash {
-                    if block.block_number().0 == self.tip.block_number.0 + 1 {
-                        tracing::info!(
-                            block_no = block.block_number().0,
-                            tip_block = self.tip.block_number.0,
-                            "Accepting block by sequence number despite hash mismatch \
-                             (chunk file vs network serialization)"
-                        );
-                    } else {
-                        return Err(LedgerError::BlockDoesNotConnect {
-                            expected: tip_hash.to_hex(),
-                            got: block.prev_hash().to_hex(),
-                        });
+                    let is_sequential_successor =
+                        block.block_number().0 == self.tip.block_number.0 + 1;
+                    match mode {
+                        BlockValidationMode::ApplyOnly if is_sequential_successor => {
+                            tracing::info!(
+                                block_no = block.block_number().0,
+                                tip_block = self.tip.block_number.0,
+                                tip_hash = %tip_hash.to_hex(),
+                                got_prev = %block.prev_hash().to_hex(),
+                                "ApplyOnly: accepting block by sequence number despite hash \
+                                 mismatch (legitimate for chunk-file replay with differing \
+                                 CBOR serialization)"
+                            );
+                        }
+                        _ => {
+                            return Err(LedgerError::BlockDoesNotConnect {
+                                expected: tip_hash.to_hex(),
+                                got: block.prev_hash().to_hex(),
+                            });
+                        }
                     }
                 }
             }

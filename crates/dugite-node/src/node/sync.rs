@@ -388,9 +388,12 @@ impl Node {
     /// This function is also called after `SwitchedToFork` is returned from
     /// `ChainSelQueue` when the VolatileDB chain has diverged from the ledger.
     ///
-    /// TODO (Task 7): wire this directly into the MsgRollBackward handler in
-    /// `chainsync_client_task` via a shared rollback channel.
-    #[allow(dead_code)] // TODO (Task 7): call from MsgRollBackward dispatch path
+    /// Now called from two places:
+    ///   * The SwitchedToFork branch of the ChainSelQueue verdict in
+    ///     `process_forward_blocks` (this function), when the selected chain
+    ///     has diverged from the ledger after a fork switch.
+    ///   * (TODO) The MsgRollBackward handler in `chainsync_client_task` via
+    ///     a shared rollback channel.
     pub async fn handle_rollback(&self, rollback_point: &Point) {
         let rollback_slot = rollback_point.slot().map(|s| s.0).unwrap_or(0);
 
@@ -967,22 +970,62 @@ impl Node {
                             rollback,
                             apply,
                         }) => {
-                            // Chain selection switched to a longer fork.  The
-                            // VolatileDB is already on the new chain; log the
-                            // event.  Phase 3 will wire the full ledger rollback
-                            // + replay here.
+                            // Chain selection switched to a strictly-longer
+                            // fork.  The VolatileDB.selected_chain is already
+                            // on the new chain — but the ledger state is still
+                            // on the OLD chain.  To restore consistency we
+                            // must roll the ledger back to the intersection;
+                            // the gap-bridging logic further down in this
+                            // function will then replay the new fork's blocks
+                            // from ChainDB (which now returns the new chain
+                            // for `get_next_block_after_slot`).
+                            //
+                            // Before this was wired up, the ledger silently
+                            // followed the new chain via an unsafe "accept
+                            // block by sequence number despite hash mismatch"
+                            // bypass in `apply_block`.  That bypass is now
+                            // restricted to ApplyOnly replay; live blocks
+                            // require a real rollback.  See issue #439.
                             info!(
                                 intersection = %intersection_hash.to_hex(),
                                 slot = slot.0,
                                 rollback_count = rollback.len(),
                                 apply_count = apply.len(),
-                                "Chain selection: fork switch during sync (Phase 3 pending)"
+                                "Chain selection: fork switch — rolling back ledger to intersection"
                             );
-                            // Count fork switches for observability.
                             self.metrics
                                 .rollback_count
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            // Block is stored; continue to the ledger apply below.
+
+                            let rollback_point = {
+                                let db = self.chain_db.read().await;
+                                match db.get_block_location(&intersection_hash) {
+                                    Some((intersection_slot, _block_no)) => {
+                                        dugite_primitives::block::Point::Specific(
+                                            intersection_slot,
+                                            intersection_hash,
+                                        )
+                                    }
+                                    None => {
+                                        // Intersection is in ImmutableDB (deep
+                                        // rollback, unusual at tip) — fall
+                                        // back to Origin so replay restarts
+                                        // from snapshot.  handle_rollback
+                                        // will pick the best snapshot before
+                                        // the intersection.
+                                        warn!(
+                                            intersection = %intersection_hash.to_hex(),
+                                            "Fork intersection not in VolatileDB — \
+                                             using Origin point for rollback"
+                                        );
+                                        dugite_primitives::block::Point::Origin
+                                    }
+                                }
+                            };
+                            self.handle_rollback(&rollback_point).await;
+                            // Block is stored; ledger is rolled back; the
+                            // gap-bridging path further down will apply the
+                            // new fork blocks in order.
                         }
                         Some(dugite_storage::AddBlockResult::Invalid(reason)) => {
                             error!(
@@ -1549,16 +1592,26 @@ impl Node {
 
             // Announce the latest block to all connected N2N peers
             // This enables relay behavior: downstream peers waiting at tip (MsgAwaitReply)
-            // will receive MsgRollForward for blocks we synced from upstream
+            // will receive MsgRollForward for blocks we synced from upstream.
+            //
+            // `receiver_count()` is logged at debug level so we can correlate
+            // sync-path announcement fan-out with forge-path announcement
+            // fan-out when diagnosing propagation issues (#439).
             if let Some(ref tx) = self.block_announcement_tx {
                 let mut hash_bytes = [0u8; 32];
                 hash_bytes.copy_from_slice(last_block.hash().as_ref());
-                tx.send(dugite_network::BlockAnnouncement {
+                let subscribers = tx.receiver_count();
+                let _ = tx.send(dugite_network::BlockAnnouncement {
                     slot,
                     hash: hash_bytes,
                     block_number: block_no,
-                })
-                .ok();
+                });
+                tracing::debug!(
+                    slot,
+                    block = block_no,
+                    subscribers,
+                    "sync: announced upstream block to peers"
+                );
             }
         }
 

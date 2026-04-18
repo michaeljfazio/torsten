@@ -429,6 +429,17 @@ pub struct NodeMetrics {
     pub leader_checks_not_elected: AtomicU64,
     pub forge_failures: AtomicU64,
     pub blocks_announced: AtomicU64,
+    /// Forged blocks that lost a race to incoming blocks and were NOT adopted
+    /// as the selected-chain tip. These blocks are stored as fork blocks in
+    /// VolatileDB but the ledger apply + announcement were skipped to keep
+    /// the forge path correct. A persistently non-zero value here indicates
+    /// forge scheduling lag or adversarial slot battles.
+    pub forge_race_lost: AtomicU64,
+    /// Forge broadcasts where the broadcast channel had zero subscribers
+    /// at send time (no N2N peer connected). The forged block is stored
+    /// locally but WILL be orphaned — every non-zero tick here is a
+    /// propagation failure.
+    pub forge_announce_no_subscribers: AtomicU64,
     // Protocol error metrics
     pub n2n_connections_total: AtomicU64,
     pub n2c_connections_total: AtomicU64,
@@ -589,6 +600,8 @@ impl NodeMetrics {
             leader_checks_not_elected: AtomicU64::new(0),
             forge_failures: AtomicU64::new(0),
             blocks_announced: AtomicU64::new(0),
+            forge_race_lost: AtomicU64::new(0),
+            forge_announce_no_subscribers: AtomicU64::new(0),
             n2n_connections_total: AtomicU64::new(0),
             n2c_connections_total: AtomicU64::new(0),
             n2n_connections_active: AtomicU64::new(0),
@@ -1003,6 +1016,16 @@ impl NodeMetrics {
                 "dugite_blocks_announced_total",
                 "Blocks successfully announced to peers",
                 &self.blocks_announced,
+            ),
+            (
+                "dugite_forge_race_lost_total",
+                "Forged blocks that lost a race to incoming blocks (not adopted as tip)",
+                &self.forge_race_lost,
+            ),
+            (
+                "dugite_forge_announce_no_subscribers_total",
+                "Forge announcements sent with zero broadcast subscribers (propagation failures)",
+                &self.forge_announce_no_subscribers,
             ),
             (
                 "dugite_n2n_connections_total",

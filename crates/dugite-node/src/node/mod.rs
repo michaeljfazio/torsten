@@ -3166,12 +3166,18 @@ impl Node {
         if let Some(ref tx) = self.block_announcement_tx {
             let mut hash_bytes = [0u8; 32];
             hash_bytes.copy_from_slice(block.header.header_hash.as_ref());
-            tx.send(dugite_network::BlockAnnouncement {
+            let subscribers = tx.receiver_count();
+            let _ = tx.send(dugite_network::BlockAnnouncement {
                 slot: block_slot.0,
                 hash: hash_bytes,
                 block_number: block_number.0,
-            })
-            .ok();
+            });
+            debug!(
+                slot = block_slot.0,
+                block = block_number.0,
+                subscribers,
+                "live-tip: announced block to peers"
+            );
             self.metrics
                 .blocks_announced
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4036,18 +4042,26 @@ impl Node {
                 //
                 // Per the Haskell architecture, all blocks — including locally
                 // forged ones — enter the node via the same `addBlock` path.
-                // This means the ChainSelQueue receives the forged block,
-                // writes it to VolatileDB, and (once chain selection is fully
-                // wired in Phase 3) will determine whether the chain should
-                // advance.  For now the runner returns `StoredNotAdopted` or
-                // `AdoptedAsTip`; we treat both as "block is in storage" and
-                // proceed with the ledger apply below.
+                // The ChainSelQueue receives the forged block, writes it to
+                // VolatileDB, and runs chain selection. The queue returns one
+                // of: AdoptedAsTip / StoredNotAdopted / AlreadyKnown /
+                // SwitchedToFork / Invalid.
                 //
-                // If no handle is available (should not happen in practice),
-                // fall back to the direct ChainDB write path.
-                let storage_succeeded = if let Some(ref handle) = self.chain_sel_handle {
-                    // Submit via queue — cbor is moved here.
-                    let result = handle
+                // Critically, `StoredNotAdopted` is ambiguous: it is returned
+                // both when the block extended selected_chain (normal forge
+                // case — the VolatileDB's `insert_block_internal` advances the
+                // tip but the queue's fork-scan finds no strictly-longer
+                // competitor) AND when the block was stored as a fork block
+                // (we lost a race — an upstream block arrived and became tip
+                // between forge start and chain-sel processing). Relying on
+                // the enum variant alone is not enough — we must verify the
+                // forged block actually sits at the selected_chain tip before
+                // applying it to the ledger or announcing it to peers.
+                //
+                // If no handle is available (should not happen after Node::new),
+                // fall back to the direct ChainDB write path for correctness.
+                let chain_sel_verdict = if let Some(ref handle) = self.chain_sel_handle {
+                    handle
                         .submit_block(
                             *block.hash(),
                             block.slot(),
@@ -4055,66 +4069,99 @@ impl Node {
                             *block.prev_hash(),
                             cbor,
                         )
-                        .await;
-                    match result {
-                        Some(dugite_storage::AddBlockResult::AdoptedAsTip)
-                        | Some(dugite_storage::AddBlockResult::StoredNotAdopted)
-                        | Some(dugite_storage::AddBlockResult::AlreadyKnown) => true,
-                        Some(dugite_storage::AddBlockResult::SwitchedToFork {
-                            intersection_hash,
-                            rollback,
-                            apply,
-                        }) => {
-                            // A fork switch was triggered by storing our own
-                            // forged block.  This is theoretically impossible
-                            // (a freshly-forged block extends our own tip), but
-                            // handle it defensively.  The VolatileDB is already
-                            // switched; log and proceed — the ledger apply below
-                            // will restore consistency on the next sync round.
-                            warn!(
-                                intersection = %intersection_hash.to_hex(),
-                                slot = next_slot.0,
-                                rollback_count = rollback.len(),
-                                apply_count = apply.len(),
-                                "Unexpected fork switch when storing forged block"
-                            );
-                            true
-                        }
-                        Some(dugite_storage::AddBlockResult::Invalid(reason)) => {
-                            // The forged block itself was rejected by storage.
-                            // This is highly unusual and indicates a bug — log
-                            // and trace it as `TraceDidntAdoptBlock`.
-                            error!(
-                                slot = next_slot.0,
-                                block = block_number.0,
-                                reason,
-                                "TraceDidntAdoptBlock: forged block rejected by ChainSelQueue"
-                            );
-                            false
-                        }
-                        None => {
-                            // Runner exited — the block was lost. Log and fail.
-                            error!("ChainSelQueue runner exited unexpectedly — forged block not stored");
-                            false
-                        }
-                    }
+                        .await
                 } else {
-                    // No ChainSelHandle (should not happen after Node::new).
-                    // Fall back to direct ChainDB write to preserve correctness.
                     warn!("No ChainSelHandle available — storing forged block directly (fallback)");
                     let mut db = self.chain_db.write().await;
-                    db.add_block(
+                    match db.add_block(
                         *block.hash(),
                         block.slot(),
                         block.block_number(),
                         *block.prev_hash(),
                         cbor,
-                    )
-                    .is_ok()
+                    ) {
+                        Ok(()) => Some(dugite_storage::AddBlockResult::StoredNotAdopted),
+                        Err(e) => Some(dugite_storage::AddBlockResult::Invalid(e.to_string())),
+                    }
+                };
+
+                let storage_succeeded = match &chain_sel_verdict {
+                    Some(dugite_storage::AddBlockResult::AdoptedAsTip)
+                    | Some(dugite_storage::AddBlockResult::StoredNotAdopted)
+                    | Some(dugite_storage::AddBlockResult::AlreadyKnown) => true,
+                    Some(dugite_storage::AddBlockResult::SwitchedToFork {
+                        intersection_hash,
+                        rollback,
+                        apply,
+                    }) => {
+                        // A fork switch was triggered by storing our own
+                        // forged block. Theoretically impossible (our block
+                        // extends our own tip), but handle defensively —
+                        // VolatileDB is already switched; the downstream
+                        // forged_is_tip check will verify adoption.
+                        warn!(
+                            intersection = %intersection_hash.to_hex(),
+                            slot = next_slot.0,
+                            rollback_count = rollback.len(),
+                            apply_count = apply.len(),
+                            "Unexpected fork switch when storing forged block"
+                        );
+                        true
+                    }
+                    Some(dugite_storage::AddBlockResult::Invalid(reason)) => {
+                        error!(
+                            slot = next_slot.0,
+                            block = block_number.0,
+                            reason,
+                            "TraceDidntAdoptBlock: forged block rejected by ChainSelQueue"
+                        );
+                        false
+                    }
+                    None => {
+                        error!(
+                            "ChainSelQueue runner exited unexpectedly — forged block not stored"
+                        );
+                        false
+                    }
                 };
 
                 if !storage_succeeded {
                     error!("Failed to store forged block — NOT announcing");
+                    return;
+                }
+
+                // ── Forge-race verification ──────────────────────────────────
+                //
+                // Between forge start (reading ledger tip X at H-1) and
+                // chain-sel processing, an upstream block may have arrived
+                // and advanced our selected_chain past X. In that case our
+                // forged block's prev_hash no longer matches the current tip
+                // and `insert_block_internal` stored it as a fork block — it
+                // is NOT on selected_chain.
+                //
+                // Applying a fork block to the ledger would corrupt ledger
+                // state (LedgerError::BlockDoesNotConnect, or worse under the
+                // legacy hash-mismatch bypass). Announcing it would waste peer
+                // bandwidth on a block we cannot support. Abort cleanly.
+                let forged_is_tip = {
+                    let db = self.chain_db.read().await;
+                    db.get_tip_info()
+                        .map(|(_slot, hash, _bn)| hash == *block.hash())
+                        .unwrap_or(false)
+                };
+
+                if !forged_is_tip {
+                    warn!(
+                        slot = next_slot.0,
+                        block = block_number.0,
+                        hash = %block.hash().to_hex(),
+                        verdict = ?chain_sel_verdict,
+                        "Forged block NOT adopted as selected-chain tip — lost race to incoming block. \
+                         Skipping ledger apply and announcement."
+                    );
+                    self.metrics
+                        .forge_race_lost
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return;
                 }
 
@@ -4161,19 +4208,57 @@ impl Node {
                     "Block forged",
                 );
 
-                // Announce the new block to all connected peers
+                // Announce the new block to all connected peers.
+                //
+                // This is the critical propagation edge for issue #439: the
+                // broadcast wakes ChainSync server tasks that are parked on
+                // `announcement_rx.recv()` for every connected N2N peer, so
+                // each peer's next MsgRollForward carries our forged block.
+                //
+                // `receiver_count()` is checked explicitly so that a zero-
+                // subscriber broadcast (which would silently orphan the
+                // block) is loudly visible in both logs and metrics.
                 if let Some(ref tx) = self.block_announcement_tx {
                     let mut hash_bytes = [0u8; 32];
                     hash_bytes.copy_from_slice(block.header.header_hash.as_ref());
-                    tx.send(dugite_network::BlockAnnouncement {
+                    let subscribers = tx.receiver_count();
+                    let send_result = tx.send(dugite_network::BlockAnnouncement {
                         slot: next_slot.0,
                         hash: hash_bytes,
                         block_number: block_number.0,
-                    })
-                    .ok();
+                    });
+
+                    if subscribers == 0 {
+                        warn!(
+                            slot = next_slot.0,
+                            block = block_number.0,
+                            hash = %block.header.header_hash.to_hex(),
+                            "Forged block announced but NO peers are subscribed — \
+                             block will NOT propagate and will be orphaned. \
+                             Check that at least one N2N peer is connected and in hot state."
+                        );
+                        self.metrics
+                            .forge_announce_no_subscribers
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else {
+                        info!(
+                            slot = next_slot.0,
+                            block = block_number.0,
+                            hash = %block.header.header_hash.to_hex(),
+                            subscribers,
+                            delivered = send_result.as_ref().map(|n| *n).unwrap_or(0),
+                            "Announced forged block to peers"
+                        );
+                    }
                     self.metrics
                         .blocks_announced
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    warn!(
+                        slot = next_slot.0,
+                        block = block_number.0,
+                        "Forged block has no announcement channel — block will NOT propagate"
+                    );
                 }
             }
             Err(e) => {

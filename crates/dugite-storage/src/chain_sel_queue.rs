@@ -633,6 +633,128 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // 2b. Forge-path invariant: extending block becomes selected_chain tip
+    // -----------------------------------------------------------------------
+    //
+    // This is the positive case for issue #439's `forged_is_tip` check in
+    // `Node::try_forge`: when the submitted block's `prev_hash` matches the
+    // current selected_chain tip, the block MUST become the new tip. The
+    // queue returns `StoredNotAdopted` here (there is no strictly-longer
+    // fork to switch to) but the VolatileDB's tip has nonetheless advanced.
+
+    #[tokio::test]
+    async fn test_forge_path_extending_block_becomes_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_db = make_chain_db(dir.path());
+
+        let (handle, runner) = ChainSelHandle::new(Arc::clone(&chain_db));
+        let _runner_task = tokio::spawn(runner);
+
+        // Genesis block.
+        let genesis = Hash32::from_bytes([0x01; 32]);
+        handle
+            .submit_block(
+                genesis,
+                SlotNo(1),
+                BlockNo(0),
+                Hash32::ZERO,
+                fake_cbor(&genesis),
+            )
+            .await
+            .unwrap();
+
+        // Forged block extending genesis.
+        let forged = Hash32::from_bytes([0x02; 32]);
+        let result = handle
+            .submit_block(forged, SlotNo(10), BlockNo(1), genesis, fake_cbor(&forged))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            AddBlockResult::StoredNotAdopted,
+            "extending block on an unopposed chain should return StoredNotAdopted"
+        );
+
+        // Critical invariant: VolatileDB's selected-chain tip MUST be the
+        // forged block, because `insert_block_internal` advances the tip
+        // whenever `prev_hash == selected_chain.last()`.
+        let db = chain_db.read().await;
+        let (_slot, tip_hash, tip_bn) = db
+            .get_tip_info()
+            .expect("tip info should exist after forge");
+        assert_eq!(
+            tip_hash, forged,
+            "forge-path invariant: forged block MUST be selected-chain tip"
+        );
+        assert_eq!(tip_bn, BlockNo(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // 2c. Forge-path invariant: race-lost block is NOT selected_chain tip
+    // -----------------------------------------------------------------------
+    //
+    // Models the sequence behind issue #439:
+    //   1. BP starts forging against tip X at height H.
+    //   2. Upstream delivers Y at H (also extending X), becoming tip.
+    //   3. BP's forged block Z at height H+1 WITH prev_hash=X arrives at the
+    //      queue AFTER Y — so Z's prev_hash no longer matches the
+    //      selected_chain tip (which is now Y).
+    //   4. `insert_block_internal` stores Z as a FORK block (not on
+    //      selected_chain).  `forged_is_tip` must be false and the forge
+    //      path must abort without ledger-applying or announcing Z.
+
+    #[tokio::test]
+    async fn test_forge_path_race_lost_block_is_not_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_db = make_chain_db(dir.path());
+
+        let (handle, runner) = ChainSelHandle::new(Arc::clone(&chain_db));
+        let _runner_task = tokio::spawn(runner);
+
+        let x = Hash32::from_bytes([0xA0; 32]);
+        handle
+            .submit_block(x, SlotNo(1), BlockNo(0), Hash32::ZERO, fake_cbor(&x))
+            .await
+            .unwrap();
+
+        // Upstream block Y lands first — Y extends X and becomes tip.
+        let y = Hash32::from_bytes([0xB0; 32]);
+        handle
+            .submit_block(y, SlotNo(2), BlockNo(1), x, fake_cbor(&y))
+            .await
+            .unwrap();
+
+        // BP's forged block Z arrives LATE — still claims prev_hash=X but
+        // selected_chain tip is now Y. Z is stored as a fork block.
+        let z = Hash32::from_bytes([0xC0; 32]);
+        let result = handle
+            .submit_block(z, SlotNo(3), BlockNo(1), x, fake_cbor(&z))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            AddBlockResult::StoredNotAdopted,
+            "race-lost block is also StoredNotAdopted — the queue enum is ambiguous"
+        );
+
+        // Forge-path invariant: the forged block must NOT be selected-chain tip.
+        let db = chain_db.read().await;
+        let (_slot, tip_hash, _tip_bn) = db.get_tip_info().expect("tip exists");
+        assert_eq!(
+            tip_hash, y,
+            "selected-chain tip must remain at Y (the race winner) — Z lost"
+        );
+        assert_ne!(
+            tip_hash, z,
+            "forge-path invariant: race-lost Z MUST NOT be the tip; \
+             forge-path `forged_is_tip` check must detect this and abort"
+        );
+        assert!(db.has_block(&z), "Z must still be stored as a fork block");
+    }
+
+    // -----------------------------------------------------------------------
     // 3. Chain selection: SwitchedToFork returned for longer competing fork
     // -----------------------------------------------------------------------
 

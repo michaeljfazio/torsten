@@ -8773,6 +8773,128 @@ fn test_block_does_not_connect_without_ebb_advance() {
 }
 
 // ============================================================================
+// Issue #439 — hash-mismatch bypass is mode-gated
+// ============================================================================
+//
+// The forge path MUST never be advanced by a silently-accepted block from a
+// different fork.  The legacy bypass in `apply_block` accepted any block
+// whose `block_number` was `tip.block_number + 1` even when `prev_hash` did
+// not match, which produced a frankenstein ledger state whenever an upstream
+// peer delivered the next block of a competing chain.  The fix is to gate
+// the bypass on `BlockValidationMode::ApplyOnly` (used only for startup
+// chunk-file replay, where legitimate CBOR roundtrip differences can cause
+// real hash discrepancies) and to reject the mismatch under
+// `BlockValidationMode::ValidateAll` (used for every live block and every
+// forged block) — forcing callers to route fork resolution through chain
+// selection and `handle_rollback` instead.
+
+/// Under `ValidateAll`, a block whose `prev_hash` does not match the current
+/// tip hash must be rejected even when its `block_number` is exactly
+/// `tip.block_number + 1`.  This is the critical forge-correctness path:
+/// without this check, the ledger silently advances onto a competing fork
+/// whenever an upstream peer's next block arrives before ours propagates.
+#[test]
+fn test_validate_all_rejects_hash_mismatch_at_tip_plus_one() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.era = Era::Conway;
+    state.tip = Tip {
+        point: Point::Specific(SlotNo(100), Hash32::from_bytes([0xAA; 32])),
+        block_number: BlockNo(10),
+    };
+
+    // Block at exactly tip+1 but with a prev_hash that does NOT match our tip.
+    // This is the "fork block from competing chain" scenario.
+    let competing_prev = Hash32::from_bytes([0xBB; 32]);
+    let fork_block = make_test_block(101, 11, competing_prev, vec![]);
+
+    let result = state.apply_block(&fork_block, BlockValidationMode::ValidateAll);
+
+    assert!(
+        matches!(result, Err(LedgerError::BlockDoesNotConnect { .. })),
+        "ValidateAll MUST reject a hash-mismatch block at tip+1; got {result:?}. \
+         Silently accepting this corrupts forge-path state (issue #439)."
+    );
+    // Tip must NOT have advanced.
+    assert_eq!(
+        state.tip.block_number,
+        BlockNo(10),
+        "Tip must not advance when apply_block rejects the block"
+    );
+}
+
+/// Under `ApplyOnly` (chunk-file replay), the legacy behavior is preserved:
+/// a block at exactly `tip+1` with a mismatched `prev_hash` is accepted with
+/// an info-level log.  This path is exercised only by startup replay where
+/// the input blocks are known-good (they were already validated when first
+/// received) and the only source of hash mismatch is legitimate CBOR
+/// roundtrip variance.
+#[test]
+fn test_apply_only_accepts_hash_mismatch_at_tip_plus_one() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.era = Era::Conway;
+    state.tip = Tip {
+        point: Point::Specific(SlotNo(100), Hash32::from_bytes([0xAA; 32])),
+        block_number: BlockNo(10),
+    };
+
+    let different_prev = Hash32::from_bytes([0xBB; 32]);
+    let block = make_test_block(101, 11, different_prev, vec![]);
+
+    let result = state.apply_block(&block, BlockValidationMode::ApplyOnly);
+
+    assert!(
+        result.is_ok(),
+        "ApplyOnly must retain the tip+1 sequence-number bypass for chunk-file \
+         replay (different CBOR serialization → different header hash); got {result:?}"
+    );
+    assert_eq!(state.tip.block_number, BlockNo(11));
+}
+
+/// Both modes MUST reject a block whose `block_number` is NOT the immediate
+/// successor of the tip.  The bypass only applies at `tip+1`; anything else
+/// is always a connectivity error regardless of mode.
+#[test]
+fn test_both_modes_reject_hash_mismatch_at_non_successor() {
+    let params = ProtocolParameters::mainnet_defaults();
+    let mut state = LedgerState::new(params);
+    state.era = Era::Conway;
+    state.tip = Tip {
+        point: Point::Specific(SlotNo(100), Hash32::from_bytes([0xAA; 32])),
+        block_number: BlockNo(10),
+    };
+
+    let different_prev = Hash32::from_bytes([0xBB; 32]);
+    // block_number 15 is NOT tip+1 (= 11), so the bypass cannot fire.
+    let block = make_test_block(200, 15, different_prev, vec![]);
+
+    let validate_all_result = {
+        let mut s = state.clone();
+        s.apply_block(&block, BlockValidationMode::ValidateAll)
+    };
+    let apply_only_result = {
+        let mut s = state.clone();
+        s.apply_block(&block, BlockValidationMode::ApplyOnly)
+    };
+
+    assert!(
+        matches!(
+            validate_all_result,
+            Err(LedgerError::BlockDoesNotConnect { .. })
+        ),
+        "ValidateAll must reject non-successor hash mismatch; got {validate_all_result:?}"
+    );
+    assert!(
+        matches!(
+            apply_only_result,
+            Err(LedgerError::BlockDoesNotConnect { .. })
+        ),
+        "ApplyOnly must reject non-successor hash mismatch; got {apply_only_result:?}"
+    );
+}
+
+// ============================================================================
 // Conway LEDGERS rule tests
 // ============================================================================
 
