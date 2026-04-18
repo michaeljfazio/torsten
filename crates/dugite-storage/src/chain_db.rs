@@ -272,18 +272,6 @@ impl ChainDB {
         Ok(None)
     }
 
-    /// Get a block's `(slot, block_no)` by hash without decoding the CBOR.
-    ///
-    /// Used by the chain-selection fork-switch handler to construct a
-    /// rollback Point from just an intersection hash. Only the VolatileDB
-    /// carries the in-memory metadata indices; immutable lookups fall back
-    /// to CBOR decode at a higher layer if needed.
-    pub fn get_block_location(&self, hash: &BlockHeaderHash) -> Option<(SlotNo, BlockNo)> {
-        self.volatile
-            .get_block(hash)
-            .map(|b| (SlotNo(b.slot), BlockNo(b.block_no)))
-    }
-
     /// Number of blocks currently in the volatile (in-memory) database.
     ///
     /// This includes blocks that are GC-pending after a non-destructive rollback —

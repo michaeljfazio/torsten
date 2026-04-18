@@ -93,6 +93,10 @@ pub enum AddBlockResult {
     /// is found in the VolatileDB after storing this block.
     ///
     /// The fields describe the chain switch needed:
+    ///   - `intersection_hash` + `intersection_slot`: the common-ancestor Point
+    ///     (both together form a `Point::Specific(slot, hash)` — matches the
+    ///     `AF.Anchor blk` `(SlotNo, HeaderHash, BlockNo)` carried throughout
+    ///     Haskell's `AnchoredFragment` and `ChainDiff`).
     ///   - `rollback`: hashes to un-apply from the current tip, newest-first.
     ///   - `apply`: hashes to apply on the new fork, oldest-first.
     ///
@@ -102,9 +106,15 @@ pub enum AddBlockResult {
     ///
     /// This variant corresponds to Haskell's `SwitchedToFork` result from
     /// `ChainSelection.switchTo` in `ouroboros-consensus ChainSel.hs`.
+    /// Carrying the intersection slot inline mirrors Haskell's invariant that
+    /// the intersection is always reachable within the volatile window — see
+    /// `VolatileDB::switch_chain` doc for the reachability discipline.
     SwitchedToFork {
         /// Common ancestor of the old and new chains (the fork point).
         intersection_hash: BlockHeaderHash,
+        /// Slot of the intersection block, pre-resolved by VolatileDB so the
+        /// caller can build a rollback `Point` without a second lookup.
+        intersection_slot: SlotNo,
         /// Hashes of blocks on the old chain to roll back, newest-first.
         rollback: Vec<BlockHeaderHash>,
         /// Hashes of blocks on the new chain to apply, oldest-first.
@@ -423,15 +433,22 @@ async fn process_add_block(
             if let Some(plan) = db.switch_to_fork(&fork_hash) {
                 return AddBlockResult::SwitchedToFork {
                     intersection_hash: plan.intersection,
+                    intersection_slot: SlotNo(plan.intersection_slot),
                     rollback: plan.rollback,
                     apply: plan.apply,
                 };
             }
-            // `switch_to_fork` returned None: the fork hash was not reachable
-            // (should not happen, but guard defensively).
-            warn!(
+            // `switch_to_fork` returned None: the intersection is not
+            // reachable within the VolatileDB window.  Per Haskell
+            // `isReachable = Nothing` (`Paths.hs`), this is the
+            // `StoreButDontChange` case — the block stays in VolatileDB but
+            // no chain selection occurs.  We fall through to
+            // `StoredNotAdopted` so the caller does NOT attempt a ledger
+            // rollback; the block will re-enter chain selection later if
+            // its ancestry becomes complete.
+            debug!(
                 fork_hash = %fork_hash.to_hex(),
-                "chain_sel: switch_to_fork returned None for reachable fork tip"
+                "chain_sel: fork unreachable within volatile window — StoreButDontChange"
             );
         }
     }
@@ -836,6 +853,7 @@ mod tests {
         match r {
             AddBlockResult::SwitchedToFork {
                 intersection_hash: _,
+                intersection_slot: _,
                 rollback,
                 apply,
             } => {

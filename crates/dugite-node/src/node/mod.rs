@@ -3008,21 +3008,32 @@ impl Node {
                 | Some(dugite_storage::AddBlockResult::AlreadyKnown) => true,
                 Some(dugite_storage::AddBlockResult::SwitchedToFork {
                     intersection_hash,
+                    intersection_slot,
                     rollback,
                     apply,
                 }) => {
                     // Chain selection determined a competing fork is strictly
                     // preferred.  The VolatileDB chain switch is already
                     // committed — selected_chain now points at the new fork.
-                    // The ledger state, however, is still on the OLD chain and
-                    // MUST be rolled back to the intersection before we can
-                    // apply the incoming block; otherwise the block's
-                    // `prev_hash` will not match the ledger tip and the only
-                    // path forward is the ApplyOnly `tip+1 sequence number`
-                    // bypass in `apply_block`, which silently corrupts ledger
-                    // state by merging two chains' UTxO views. See #439.
+                    // The ledger state is still on the OLD chain and MUST be
+                    // rolled back to the intersection before we can apply the
+                    // incoming block; otherwise the block's `prev_hash` will
+                    // not match the ledger tip and the only path forward
+                    // would be the ApplyOnly sequence-number bypass in
+                    // `apply_block`, which silently corrupts ledger state by
+                    // merging two chains' UTxO views. See #439.
+                    //
+                    // `intersection_slot` is pre-resolved by VolatileDB so the
+                    // rollback point is a proper `Point::Specific(slot, hash)`
+                    // with no chance of a None-fallback to Origin (which would
+                    // cascade through handle_rollback's "refuse genesis reset"
+                    // safety, leaving the ledger stuck at the orphan tip).
+                    // Matches Haskell: `ChainDiff`'s anchor is always a full
+                    // `(SlotNo, HeaderHash)` Point, and the rollback count
+                    // alone drives `switchTo` in `LedgerDB.Forker`.
                     info!(
                         intersection = %intersection_hash.to_hex(),
+                        intersection_slot = intersection_slot.0,
                         rollback_count = rollback.len(),
                         apply_count = apply.len(),
                         "Chain selection: fork switch at live tip — rolling back ledger to intersection"
@@ -3031,24 +3042,10 @@ impl Node {
                         .rollback_count
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                    let rollback_point = {
-                        let db = self.chain_db.read().await;
-                        match db.get_block_location(&intersection_hash) {
-                            Some((intersection_slot, _bn)) => {
-                                dugite_primitives::block::Point::Specific(
-                                    intersection_slot,
-                                    intersection_hash,
-                                )
-                            }
-                            None => {
-                                warn!(
-                                    intersection = %intersection_hash.to_hex(),
-                                    "Fork intersection not in VolatileDB — using Origin for rollback"
-                                );
-                                dugite_primitives::block::Point::Origin
-                            }
-                        }
-                    };
+                    let rollback_point = dugite_primitives::block::Point::Specific(
+                        intersection_slot,
+                        intersection_hash,
+                    );
                     self.handle_rollback(&rollback_point).await;
                     true
                 }
@@ -4125,6 +4122,7 @@ impl Node {
                     | Some(dugite_storage::AddBlockResult::AlreadyKnown) => true,
                     Some(dugite_storage::AddBlockResult::SwitchedToFork {
                         intersection_hash,
+                        intersection_slot,
                         rollback,
                         apply,
                     }) => {
@@ -4135,6 +4133,7 @@ impl Node {
                         // forged_is_tip check will verify adoption.
                         warn!(
                             intersection = %intersection_hash.to_hex(),
+                            intersection_slot = intersection_slot.0,
                             slot = next_slot.0,
                             rollback_count = rollback.len(),
                             apply_count = apply.len(),

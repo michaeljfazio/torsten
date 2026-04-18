@@ -466,10 +466,20 @@ const GC_DELAY: Duration = Duration::from_secs(60);
 ///
 /// Computed by `switch_chain()` — describes which blocks to roll back and
 /// which to apply when atomically swapping the selected chain.
+///
+/// Matches the `ChainDiff` structure in Haskell `ouroboros-consensus`
+/// (`Storage/ChainDB/Impl/Paths.hs`). The anchor in Haskell's `AnchoredFragment`
+/// carries `(SlotNo, HeaderHash, BlockNo)` — we mirror that by carrying the
+/// intersection slot alongside the hash, so the ledger rollback target is a
+/// full `Point` without needing a second lookup.
 #[derive(Debug, Clone)]
 pub struct SwitchPlan {
     /// The common ancestor of the old and new chains.
     pub intersection: Hash32,
+    /// Slot of the intersection block. Required so callers can construct a
+    /// `Point::Specific(slot, hash)` for ledger rollback without a second
+    /// lookup that could race with further chain mutations.
+    pub intersection_slot: u64,
     /// Blocks to roll back from the old chain (most-recent first).
     pub rollback: Vec<Hash32>,
     /// Blocks to apply from the new chain (oldest first).
@@ -1182,6 +1192,20 @@ impl VolatileDB {
 
     /// Switch the selected chain to end at `new_tip_hash`.
     /// Returns a `SwitchPlan` with blocks to rollback/apply.
+    ///
+    /// Haskell invariant (from `ouroboros-consensus` `ChainSel.hs` and
+    /// `Paths.hs::isReachable`): a fork is only "reachable" if its common
+    /// ancestor with the current chain is WITHIN the VolatileDB.  If
+    /// `isReachable` returns `Nothing`, the block is stored but chain selection
+    /// does NOT attempt the switch — it emits `StoreButDontChange`.  Dugite
+    /// mirrors this: when the intersection cannot be located within the volatile
+    /// window (i.e. no common ancestor exists between `new_chain` and the
+    /// currently-selected chain that is also present in `self.blocks`), we
+    /// return `None` rather than inventing an anchor from `prev_hash` — doing
+    /// so would ask the ledger to roll back past the immutable tip, which
+    /// Haskell's `validateCandidate` explicitly declares impossible (`line
+    /// ~1273`: "impossible: we asked the LedgerDB to roll back past the
+    /// immutable tip…").
     pub fn switch_chain(&mut self, new_tip_hash: &Hash32) -> Option<SwitchPlan> {
         let new_chain = self.walk_chain_back(new_tip_hash);
         if new_chain.is_empty() {
@@ -1193,9 +1217,22 @@ impl VolatileDB {
             .iter()
             .rposition(|h| new_chain_set.contains(h));
 
-        let (intersection, rollback, apply) = match intersection_idx {
+        let (intersection, intersection_slot, rollback, apply) = match intersection_idx {
             Some(idx) => {
                 let intersection_hash = self.selected_chain[idx];
+                // The intersection is by construction in `selected_chain`, and
+                // every block on the selected chain must be in `self.blocks`.
+                // If the slot lookup fails the VolatileDB is internally
+                // inconsistent — refuse the switch rather than fabricate a slot.
+                let Some(intersection_slot) = self.blocks.get(&intersection_hash).map(|b| b.slot)
+                else {
+                    warn!(
+                        hash = %intersection_hash,
+                        "VolatileDB: intersection block present in selected_chain but \
+                         missing from blocks map — refusing switch (store but don't change)"
+                    );
+                    return None;
+                };
                 let rollback: Vec<Hash32> = self.selected_chain[(idx + 1)..]
                     .iter()
                     .rev()
@@ -1207,16 +1244,23 @@ impl VolatileDB {
                     Some(pos) => new_chain[(pos + 1)..].to_vec(),
                     None => new_chain.clone(),
                 };
-                (intersection_hash, rollback, apply)
+                (intersection_hash, intersection_slot, rollback, apply)
             }
             None => {
-                let rollback: Vec<Hash32> = self.selected_chain.iter().rev().copied().collect();
-                let anchor = self
-                    .blocks
-                    .get(&new_chain[0])
-                    .map(|b| b.prev_hash)
-                    .unwrap_or(new_chain[0]);
-                (anchor, rollback, new_chain.clone())
+                // No block of the new chain appears anywhere in our selected
+                // chain.  Per Haskell `isReachable`, this means the fork is
+                // unreachable from our volatile window — the block is stored
+                // but chain selection does NOT switch.  Returning None leaves
+                // `self.selected_chain` untouched; the block sits inert in
+                // VolatileDB until (if ever) its ancestry becomes complete.
+                debug!(
+                    new_tip = %new_tip_hash,
+                    selected_len = self.selected_chain.len(),
+                    new_chain_len = new_chain.len(),
+                    "VolatileDB: fork unreachable from current selected_chain — \
+                     store but don't change (Haskell: isReachable = Nothing)"
+                );
+                return None;
             }
         };
 
@@ -1252,6 +1296,7 @@ impl VolatileDB {
 
         Some(SwitchPlan {
             intersection,
+            intersection_slot,
             rollback,
             apply,
         })
@@ -2301,6 +2346,79 @@ mod tests {
         assert_eq!(plan.apply, vec![h(4), h(5), h(6)]);
         assert_eq!(db.get_tip(), Some((400, h(6), 40)));
         assert_eq!(db.len(), 6);
+    }
+
+    /// Regression test for #439 follow-up: `switch_chain` must return `None`
+    /// when the fork is unreachable from the current selected_chain, matching
+    /// Haskell's `Paths.hs::isReachable = Nothing` / `StoreButDontChange`
+    /// semantics. Previously this case invented an anchor from `new_chain[0]
+    /// .prev_hash` and cleared `selected_chain`, producing a switch plan whose
+    /// intersection was NOT in the volatile window — callers then tried to
+    /// rollback to a point that couldn't be looked up, cascading through a
+    /// catastrophic `Point::Origin` fallback that stalled the ledger.
+    #[test]
+    fn test_switch_chain_returns_none_for_unreachable_fork() {
+        let mut db = VolatileDB::new();
+        // Selected chain: h(1) → h(2) → h(3)
+        db.add_block(h(1), 100, 10, h(0), b"b1".to_vec());
+        db.add_block(h(2), 200, 20, h(1), b"b2".to_vec());
+        db.add_block(h(3), 300, 30, h(2), b"b3".to_vec());
+        let tip_before = db.get_tip();
+        let selected_len_before = db.selected_chain_len();
+
+        // Detached fork that does NOT share any block with the selected
+        // chain: h(99) → h(100).  `walk_chain_back(h(100))` returns
+        // [h(99), h(100)] — neither is in selected_chain — so the
+        // intersection cannot be located within the volatile window.
+        db.add_block(h(99), 400, 40, h(98), b"detached1".to_vec());
+        db.add_block(h(100), 500, 50, h(99), b"detached2".to_vec());
+
+        let plan = db.switch_chain(&h(100));
+        assert!(
+            plan.is_none(),
+            "switch_chain must return None when the fork is unreachable \
+             within the volatile window (Haskell isReachable = Nothing); \
+             got: {plan:?}"
+        );
+
+        // Selected chain and tip must be UNCHANGED — StoreButDontChange.
+        assert_eq!(
+            db.selected_chain_len(),
+            selected_len_before,
+            "unreachable fork must not truncate selected_chain"
+        );
+        assert_eq!(
+            db.get_tip(),
+            tip_before,
+            "unreachable fork must not reset the tip"
+        );
+        // The detached blocks remain in the store (they might become reachable
+        // once the missing prefix arrives).
+        assert!(db.has_block(&h(99)));
+        assert!(db.has_block(&h(100)));
+    }
+
+    /// A `SwitchPlan` returned by `switch_chain` must carry the intersection
+    /// slot — not just the hash — so callers can build a `Point::Specific(slot,
+    /// hash)` for ledger rollback without a second lookup that could miss the
+    /// block if it's been flushed to immutable storage.  Matches Haskell's
+    /// `AnchoredFragment` anchor which is always `(SlotNo, HeaderHash, BlockNo)`.
+    #[test]
+    fn test_switch_plan_carries_intersection_slot() {
+        let mut db = VolatileDB::new();
+        db.add_block(h(1), 111, 10, h(0), b"b1".to_vec()); // intersection-to-be, slot 111
+        db.add_block(h(2), 222, 20, h(1), b"a-chain".to_vec());
+        db.add_block(h(3), 333, 30, h(2), b"a-chain".to_vec());
+        db.add_block(h(4), 222, 20, h(1), b"b-chain".to_vec());
+        db.add_block(h(5), 333, 30, h(4), b"b-chain".to_vec());
+        db.add_block(h(6), 444, 40, h(5), b"b-chain-tip".to_vec());
+
+        let plan = db.switch_chain(&h(6)).expect("reachable fork");
+        assert_eq!(plan.intersection, h(1));
+        assert_eq!(
+            plan.intersection_slot, 111,
+            "intersection slot must be populated from VolatileDB.blocks[hash].slot"
+        );
     }
 
     #[test]

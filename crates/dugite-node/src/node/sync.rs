@@ -967,6 +967,7 @@ impl Node {
                         }
                         Some(dugite_storage::AddBlockResult::SwitchedToFork {
                             intersection_hash,
+                            intersection_slot,
                             rollback,
                             apply,
                         }) => {
@@ -980,14 +981,22 @@ impl Node {
                             // from ChainDB (which now returns the new chain
                             // for `get_next_block_after_slot`).
                             //
-                            // Before this was wired up, the ledger silently
-                            // followed the new chain via an unsafe "accept
-                            // block by sequence number despite hash mismatch"
-                            // bypass in `apply_block`.  That bypass is now
-                            // restricted to ApplyOnly replay; live blocks
-                            // require a real rollback.  See issue #439.
+                            // `intersection_slot` is pre-resolved by VolatileDB
+                            // so we can build a proper `Point::Specific` without
+                            // a second lookup (previously this fell back to
+                            // `Point::Origin` when the intersection wasn't in
+                            // volatile, which triggered the "refuse genesis
+                            // reset" safety in `handle_rollback` and left the
+                            // ledger stuck at the orphan tip — see #439).
+                            //
+                            // Haskell invariant (`Paths.hs::isReachable`): the
+                            // intersection is always within the volatile
+                            // window; if not, VolatileDB returns None from
+                            // `switch_chain` and the block stays inert in
+                            // volatile (`StoreButDontChange`).
                             info!(
                                 intersection = %intersection_hash.to_hex(),
+                                intersection_slot = intersection_slot.0,
                                 slot = slot.0,
                                 rollback_count = rollback.len(),
                                 apply_count = apply.len(),
@@ -997,31 +1006,10 @@ impl Node {
                                 .rollback_count
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            let rollback_point = {
-                                let db = self.chain_db.read().await;
-                                match db.get_block_location(&intersection_hash) {
-                                    Some((intersection_slot, _block_no)) => {
-                                        dugite_primitives::block::Point::Specific(
-                                            intersection_slot,
-                                            intersection_hash,
-                                        )
-                                    }
-                                    None => {
-                                        // Intersection is in ImmutableDB (deep
-                                        // rollback, unusual at tip) — fall
-                                        // back to Origin so replay restarts
-                                        // from snapshot.  handle_rollback
-                                        // will pick the best snapshot before
-                                        // the intersection.
-                                        warn!(
-                                            intersection = %intersection_hash.to_hex(),
-                                            "Fork intersection not in VolatileDB — \
-                                             using Origin point for rollback"
-                                        );
-                                        dugite_primitives::block::Point::Origin
-                                    }
-                                }
-                            };
+                            let rollback_point = dugite_primitives::block::Point::Specific(
+                                intersection_slot,
+                                intersection_hash,
+                            );
                             self.handle_rollback(&rollback_point).await;
                             // Block is stored; ledger is rolled back; the
                             // gap-bridging path further down will apply the
