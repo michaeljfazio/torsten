@@ -3052,6 +3052,17 @@ pub async fn chainsync_client_task(
                     } => {
                         outstanding = outstanding.saturating_sub(1);
 
+                        // A rollback means we are no longer at the chain tip —
+                        // the peer has new blocks to deliver on the fork branch.
+                        // Reset at_tip so the pipeline refill below is not
+                        // suppressed.  Without this reset, if outstanding == 0
+                        // when the rollback arrives (all pipelined requests were
+                        // consumed before MsgAwaitReply), the refill condition
+                        // `!at_tip && outstanding <= low_mark` evaluates false and
+                        // no MsgRequestNext is ever sent again — the peer has
+                        // nothing to respond to and the connection stalls forever.
+                        at_tip = false;
+
                         let rollback_slot = match &point {
                             CodecPoint::Origin => 0,
                             CodecPoint::Specific(s, _) => *s,
@@ -3188,12 +3199,15 @@ pub async fn chainsync_client_task(
                             }
                             debug!(%peer_addr, outstanding, "ChainSync pipeline refilled");
                         } else {
+                            // outstanding > low_mark: enough requests are still
+                            // in flight; the peer will answer them with
+                            // MsgRollForward for the fork blocks and the normal
+                            // refill logic in that arm will keep the pipeline full.
                             debug!(
                                 %peer_addr,
-                                at_tip,
                                 outstanding,
                                 low_mark,
-                                "ChainSync NOT refilling after rollback",
+                                "ChainSync post-rollback: pipeline still full, not refilling",
                             );
                         }
                     }
