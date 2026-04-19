@@ -105,7 +105,7 @@ impl LedgerState {
         // ledger state. The correct handling of a prev_hash mismatch at the
         // live tip is CHAIN SELECTION: rollback the ledger to the common
         // intersection and replay the winning fork. That happens in the sync
-        // loop when ChainSelQueue returns `SwitchedToFork` — it must NOT be
+        // loop when ChainSelQueue returns `TriggeredFork` — it must NOT be
         // masked here.
         //
         // Historical note: earlier versions of this function accepted any
