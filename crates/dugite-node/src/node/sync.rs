@@ -385,11 +385,11 @@ impl Node {
     ///    them; if they don't connect to the ledger tip the mismatch is detected
     ///    and this function is called to realign.
     ///
-    /// This function is also called after `SwitchedToFork` is returned from
+    /// This function is also called after `TriggeredFork` is returned from
     /// `ChainSelQueue` when the VolatileDB chain has diverged from the ledger.
     ///
     /// Now called from two places:
-    ///   * The SwitchedToFork branch of the ChainSelQueue verdict in
+    ///   * The TriggeredFork branch of the ChainSelQueue verdict in
     ///     `process_forward_blocks` (this function), when the selected chain
     ///     has diverged from the ledger after a fork switch.
     ///   * (TODO) The MsgRollBackward handler in `chainsync_client_task` via
@@ -960,12 +960,12 @@ impl Node {
                         .submit_block(hash, slot, block_no, prev_hash, cbor)
                         .await
                     {
-                        Some(dugite_storage::AddBlockResult::AdoptedAsTip)
-                        | Some(dugite_storage::AddBlockResult::StoredNotAdopted)
+                        Some(dugite_storage::AddBlockResult::AddedAsTip { .. })
+                        | Some(dugite_storage::AddBlockResult::StoredAsFork)
                         | Some(dugite_storage::AddBlockResult::AlreadyKnown) => {
                             // Block stored — proceed to ledger apply below.
                         }
-                        Some(dugite_storage::AddBlockResult::SwitchedToFork {
+                        Some(dugite_storage::AddBlockResult::TriggeredFork {
                             intersection_hash,
                             intersection_slot,
                             rollback,

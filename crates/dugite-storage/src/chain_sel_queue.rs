@@ -9,13 +9,13 @@
 //! * Invalid-block decisions are visible to every subsequent block immediately.
 //! * Fork tracking is deterministic and audit-able.
 //!
-//! # Current State (Phase 3 stub)
+//! # Current State
 //!
-//! Per the migration plan, this subsystem is introduced as new code *alongside*
-//! the existing block-processing paths.  Chain selection itself (Subsystem 3)
-//! will be wired in during Phase 3.  For now, `add_block_runner` writes every
-//! valid, unknown block to the VolatileDB and returns [`AddBlockResult::StoredNotAdopted`].
-//! The caller can query the VolatileDB tip to check for chain advancement.
+//! `add_block_runner` writes every valid, unknown block to the VolatileDB,
+//! runs chain selection, and returns [`AddBlockResult::AddedAsTip`] when the
+//! block extended the selected chain or [`AddBlockResult::StoredAsFork`] when
+//! it was stored as a fork block.  The caller no longer needs a post-hoc tip
+//! re-lookup to distinguish the two cases.
 //!
 //! # Haskell reference
 //!
@@ -73,43 +73,34 @@ pub enum ChainSelMessage {
 /// Result returned to the caller after `AddBlock` is processed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddBlockResult {
-    /// The block was stored and chain selection chose it as the new tip.
+    /// The block was stored and is the new selected-chain tip.
     ///
-    /// Returned when the newly-stored block extends the currently-selected
-    /// chain (i.e. it is a direct successor of the current tip).
-    AdoptedAsTip,
-    /// The block was stored in the VolatileDB but a different chain remains
-    /// preferred.  The block is a fork block that did not win chain selection.
-    StoredNotAdopted,
-    /// The block failed validation.  The reason string is human-readable.
+    /// The caller's submitted block IS the new tip iff `tip_hash` equals
+    /// the hash they submitted. If the block was stored but another block
+    /// already extended the tip in a race, this variant is NOT returned —
+    /// see `StoredAsFork`.
+    ///
+    /// Mirrors Haskell's `SuccesfullyAddedBlock (Point blk)` in
+    /// `Storage/ChainDB/API.hs` — the new tip point is always carried.
+    AddedAsTip {
+        tip_hash: BlockHeaderHash,
+        tip_slot: SlotNo,
+        tip_block_no: BlockNo,
+    },
+    /// The block was stored in the VolatileDB but is NOT on the selected
+    /// chain (a fork block with reachable ancestry but not winning chain
+    /// selection).
+    StoredAsFork,
+    /// The block failed validation. The reason string is human-readable.
     Invalid(String),
     /// The block was already present in either the VolatileDB or ImmutableDB.
     AlreadyKnown,
-    /// Chain selection detected a strictly-longer competing fork and switched
-    /// to it.  The caller must perform a ledger rollback and replay.
+    /// Chain selection switched to a strictly-longer competing fork. The
+    /// VolatileDB has already updated `selected_chain`. The caller must
+    /// rollback the ledger to `intersection_hash`/`intersection_slot`.
     ///
-    /// This corresponds to Haskell's `ChainDB.switchFork` result — returned
-    /// when a fork tip with a higher block number than the current chain tip
-    /// is found in the VolatileDB after storing this block.
-    ///
-    /// The fields describe the chain switch needed:
-    ///   - `intersection_hash` + `intersection_slot`: the common-ancestor Point
-    ///     (both together form a `Point::Specific(slot, hash)` — matches the
-    ///     `AF.Anchor blk` `(SlotNo, HeaderHash, BlockNo)` carried throughout
-    ///     Haskell's `AnchoredFragment` and `ChainDiff`).
-    ///   - `rollback`: hashes to un-apply from the current tip, newest-first.
-    ///   - `apply`: hashes to apply on the new fork, oldest-first.
-    ///
-    /// The `rollback` list is newest-first so that each element can be passed
-    /// directly to ledger rollback primitives in order.  The intersection block
-    /// is NOT included in either list.
-    ///
-    /// This variant corresponds to Haskell's `SwitchedToFork` result from
-    /// `ChainSelection.switchTo` in `ouroboros-consensus ChainSel.hs`.
-    /// Carrying the intersection slot inline mirrors Haskell's invariant that
-    /// the intersection is always reachable within the volatile window — see
-    /// `VolatileDB::switch_chain` doc for the reachability discipline.
-    SwitchedToFork {
+    /// Matches Haskell `ChainDiff` (Paths.hs:~55).
+    TriggeredFork {
         /// Common ancestor of the old and new chains (the fork point).
         intersection_hash: BlockHeaderHash,
         /// Slot of the intersection block, pre-resolved by VolatileDB so the
@@ -270,9 +261,9 @@ impl Default for InvalidBlockCache {
 ///
 /// 1. Check VolatileDB and ImmutableDB — return `AlreadyKnown` if present.
 /// 2. Check the invalid-block cache — return `Invalid` if previously rejected.
-/// 3. Write to VolatileDB.
-/// 4. (Chain selection — wired in by Subsystem 3, not yet implemented.)
-/// 5. Return `StoredNotAdopted` (until chain selection is live).
+/// 3. Write to VolatileDB (captures `extended_tip` bool from `insert_block_internal`).
+/// 4. Run chain selection — switch to any strictly-longer fork found in VolatileDB.
+/// 5. Return `AddedAsTip` if the block extended the selected chain, else `StoredAsFork`.
 ///
 /// # Arguments
 ///
@@ -364,18 +355,21 @@ async fn process_add_block(
     }
 
     // --- Step 3: Write to VolatileDB ---------------------------------------
+    let extended_tip;
     {
         let mut db = chain_db.write().await;
-        if let Err(e) = db.add_block(hash.to_owned(), slot, block_no, prev_hash, cbor) {
-            // Storage failure: log with a warning but do NOT cache as invalid
-            // — the failure is transient (e.g. I/O error), not a protocol
-            // violation.  The caller will see an error-flavoured result.
-            warn!(
-                hash = %hash.to_hex(),
-                error = %e,
-                "chain_sel: failed to write block to VolatileDB"
-            );
-            return AddBlockResult::Invalid(format!("storage write failed: {e}"));
+        match db.add_block(hash.to_owned(), slot, block_no, prev_hash, cbor) {
+            Ok(did_extend) => {
+                extended_tip = did_extend;
+            }
+            Err(e) => {
+                warn!(
+                    hash = %hash.to_hex(),
+                    error = %e,
+                    "chain_sel: failed to write block to VolatileDB"
+                );
+                return AddBlockResult::Invalid(format!("storage write failed: {e}"));
+            }
         }
     }
 
@@ -431,7 +425,7 @@ async fn process_add_block(
             );
 
             if let Some(plan) = db.switch_to_fork(&fork_hash) {
-                return AddBlockResult::SwitchedToFork {
+                return AddBlockResult::TriggeredFork {
                     intersection_hash: plan.intersection,
                     intersection_slot: SlotNo(plan.intersection_slot),
                     rollback: plan.rollback,
@@ -442,18 +436,29 @@ async fn process_add_block(
             // reachable within the VolatileDB window.  Per Haskell
             // `isReachable = Nothing` (`Paths.hs`), this is the
             // `StoreButDontChange` case — the block stays in VolatileDB but
-            // no chain selection occurs.  We fall through to
-            // `StoredNotAdopted` so the caller does NOT attempt a ledger
-            // rollback; the block will re-enter chain selection later if
-            // its ancestry becomes complete.
+            // no chain selection occurs.  We fall through so the caller does
+            // NOT attempt a ledger rollback; the block will re-enter chain
+            // selection later if its ancestry becomes complete.
             debug!(
                 fork_hash = %fork_hash.to_hex(),
-                "chain_sel: fork unreachable within volatile window — StoreButDontChange"
+                "chain_sel: fork unreachable — StoreButDontChange"
             );
         }
     }
 
-    AddBlockResult::StoredNotAdopted
+    // If the block extended our selected_chain, surface the new tip.
+    if extended_tip {
+        let db = chain_db.read().await;
+        if let Some((tip_slot, tip_hash, tip_block_no)) = db.get_tip_info() {
+            return AddBlockResult::AddedAsTip {
+                tip_hash,
+                tip_slot,
+                tip_block_no,
+            };
+        }
+    }
+
+    AddBlockResult::StoredAsFork
 }
 
 // ---------------------------------------------------------------------------
@@ -604,12 +609,15 @@ mod tests {
         let prev = Hash32::ZERO;
         let cbor = fake_cbor(&hash);
 
-        // First submission: new block → StoredNotAdopted
+        // First submission: new block extends chain → AddedAsTip
         let r1 = handle
             .submit_block(hash, slot, block_no, prev, cbor.clone())
             .await
             .expect("runner exited unexpectedly");
-        assert_eq!(r1, AddBlockResult::StoredNotAdopted);
+        assert!(
+            matches!(r1, AddBlockResult::AddedAsTip { .. }),
+            "first submission of a chain-extending block must return AddedAsTip, got {r1:?}"
+        );
 
         // Second submission with the same hash → AlreadyKnown
         let r2 = handle
@@ -620,11 +628,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 2. StoredNotAdopted: new block is stored
+    // 2. AddedAsTip: new block extends selected chain
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_add_block_stored_not_adopted() {
+    async fn test_add_block_added_as_tip() {
         let dir = tempfile::tempdir().unwrap();
         let chain_db = make_chain_db(dir.path());
 
@@ -642,7 +650,21 @@ mod tests {
             .await
             .expect("runner exited unexpectedly");
 
-        assert_eq!(result, AddBlockResult::StoredNotAdopted);
+        match result {
+            AddBlockResult::AddedAsTip {
+                tip_hash,
+                tip_slot,
+                tip_block_no,
+            } => {
+                assert_eq!(
+                    tip_hash, hash,
+                    "tip_hash must equal the submitted block hash"
+                );
+                assert_eq!(tip_slot, slot);
+                assert_eq!(tip_block_no, block_no);
+            }
+            other => panic!("expected AddedAsTip, got {other:?}"),
+        }
 
         // Verify the block actually landed in the VolatileDB.
         let db = chain_db.read().await;
@@ -653,11 +675,9 @@ mod tests {
     // 2b. Forge-path invariant: extending block becomes selected_chain tip
     // -----------------------------------------------------------------------
     //
-    // This is the positive case for issue #439's `forged_is_tip` check in
-    // `Node::try_forge`: when the submitted block's `prev_hash` matches the
-    // current selected_chain tip, the block MUST become the new tip. The
-    // queue returns `StoredNotAdopted` here (there is no strictly-longer
-    // fork to switch to) but the VolatileDB's tip has nonetheless advanced.
+    // Positive case for #439 follow-up: when the submitted block's `prev_hash`
+    // matches the current selected_chain tip, the block MUST become the new tip
+    // and `AddedAsTip` must be returned (no separate re-lookup needed).
 
     #[tokio::test]
     async fn test_forge_path_extending_block_becomes_tip() {
@@ -687,11 +707,23 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            result,
-            AddBlockResult::StoredNotAdopted,
-            "extending block on an unopposed chain should return StoredNotAdopted"
-        );
+        match result {
+            AddBlockResult::AddedAsTip {
+                tip_hash,
+                tip_slot,
+                tip_block_no,
+            } => {
+                assert_eq!(
+                    tip_hash, forged,
+                    "AddedAsTip.tip_hash must equal the forged block hash"
+                );
+                assert_eq!(tip_slot, SlotNo(10));
+                assert_eq!(tip_block_no, BlockNo(1));
+            }
+            other => panic!(
+                "extending block on an unopposed chain should return AddedAsTip, got {other:?}"
+            ),
+        }
 
         // Critical invariant: VolatileDB's selected-chain tip MUST be the
         // forged block, because `insert_block_internal` advances the tip
@@ -752,8 +784,8 @@ mod tests {
 
         assert_eq!(
             result,
-            AddBlockResult::StoredNotAdopted,
-            "race-lost block is also StoredNotAdopted — the queue enum is ambiguous"
+            AddBlockResult::StoredAsFork,
+            "race-lost block must return StoredAsFork (not AddedAsTip)"
         );
 
         // Forge-path invariant: the forged block must NOT be selected-chain tip.
@@ -772,11 +804,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 3. Chain selection: SwitchedToFork returned for longer competing fork
+    // 3. Chain selection: TriggeredFork returned for longer competing fork
     // -----------------------------------------------------------------------
 
     /// Verify that submitting two competing forks causes chain selection to
-    /// return `SwitchedToFork` for the block that makes the fork strictly longer.
+    /// return `TriggeredFork` for the block that makes the fork strictly longer.
     ///
     /// Chain layout:
     ///
@@ -784,7 +816,7 @@ mod tests {
     ///          ↘ b2 → b3 → b4    (fork, block_nos 2, 3, 4 — strictly longer)
     ///
     /// When b4 arrives, chain selection should switch to the b-fork and return
-    /// `SwitchedToFork { rollback: [a3, a2], apply: [b2, b3, b4] }`.
+    /// `TriggeredFork { rollback: [a3, a2], apply: [b2, b3, b4] }`.
     #[tokio::test]
     async fn test_chain_selection_switches_to_longer_fork() {
         let dir = tempfile::tempdir().unwrap();
@@ -812,19 +844,22 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+        assert!(
+            matches!(r, AddBlockResult::AddedAsTip { .. }),
+            "common: {r:?}"
+        );
 
         let r = handle
             .submit_block(a2, SlotNo(200), BlockNo(2), common, fake_cbor(&a2))
             .await
             .unwrap();
-        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+        assert!(matches!(r, AddBlockResult::AddedAsTip { .. }), "a2: {r:?}");
 
         let r = handle
             .submit_block(a3, SlotNo(300), BlockNo(3), a2, fake_cbor(&a3))
             .await
             .unwrap();
-        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+        assert!(matches!(r, AddBlockResult::AddedAsTip { .. }), "a3: {r:?}");
 
         // Build competing (b) fork starting from common.
         // b2 and b3 have the same block_nos as a2/a3 — no switch yet.
@@ -834,7 +869,7 @@ mod tests {
             .unwrap();
         // b2 is a fork tip with block_no=2, but selected chain tip is a3 at
         // block_no=3, so b2 does NOT trigger a switch.
-        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+        assert_eq!(r, AddBlockResult::StoredAsFork, "b2: {r:?}");
 
         let r = handle
             .submit_block(b3, SlotNo(300), BlockNo(3), b2, fake_cbor(&b3))
@@ -842,7 +877,7 @@ mod tests {
             .unwrap();
         // b3 block_no=3 == current tip a3 block_no=3.
         // Strictly-greater check: 3 > 3 is false → no switch.
-        assert_eq!(r, AddBlockResult::StoredNotAdopted);
+        assert_eq!(r, AddBlockResult::StoredAsFork, "b3: {r:?}");
 
         // b4 extends the fork to block_no=4, strictly longer than a3 (3).
         let r = handle
@@ -851,7 +886,7 @@ mod tests {
             .unwrap();
 
         match r {
-            AddBlockResult::SwitchedToFork {
+            AddBlockResult::TriggeredFork {
                 intersection_hash: _,
                 intersection_slot: _,
                 rollback,
@@ -873,7 +908,7 @@ mod tests {
                     "intersection block should not appear in rollback/apply"
                 );
             }
-            other => panic!("expected SwitchedToFork but got: {other:?}"),
+            other => panic!("expected TriggeredFork but got: {other:?}"),
         }
 
         // After the switch, the VolatileDB tip should be b4.
@@ -920,8 +955,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             r,
-            AddBlockResult::StoredNotAdopted,
-            "equal-length fork must not trigger a switch"
+            AddBlockResult::StoredAsFork,
+            "equal-length fork must not trigger a switch (b2 is a fork block)"
         );
 
         // Selected chain tip is still a2.
@@ -1100,11 +1135,11 @@ mod tests {
 
         for task in tasks {
             match task.await.unwrap() {
-                AddBlockResult::StoredNotAdopted => stored += 1,
+                AddBlockResult::AddedAsTip { .. } | AddBlockResult::StoredAsFork => stored += 1,
                 AddBlockResult::AlreadyKnown => already_known += 1,
                 // Each block has a unique block_no so chain selection may
                 // switch to a longer fork as blocks arrive out of order.
-                AddBlockResult::SwitchedToFork { .. } => switched += 1,
+                AddBlockResult::TriggeredFork { .. } => switched += 1,
                 other => panic!("unexpected result: {other:?}"),
             }
         }
@@ -1124,6 +1159,93 @@ mod tests {
             db.volatile_block_count(),
             N,
             "VolatileDB should contain {N} blocks"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. AddedAsTip / StoredAsFork disambiguation (TDD for #439 follow-up)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_extending_block_returns_added_as_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_db = make_chain_db(dir.path());
+
+        let (handle, runner) = ChainSelHandle::new(Arc::clone(&chain_db));
+        let _runner_task = tokio::spawn(runner);
+
+        let genesis = Hash32::from_bytes([0x01; 32]);
+        handle
+            .submit_block(
+                genesis,
+                SlotNo(1),
+                BlockNo(0),
+                Hash32::ZERO,
+                fake_cbor(&genesis),
+            )
+            .await
+            .unwrap();
+
+        let extending = Hash32::from_bytes([0x02; 32]);
+        let result = handle
+            .submit_block(
+                extending,
+                SlotNo(10),
+                BlockNo(1),
+                genesis,
+                fake_cbor(&extending),
+            )
+            .await
+            .unwrap();
+
+        match result {
+            AddBlockResult::AddedAsTip {
+                tip_hash,
+                tip_slot,
+                tip_block_no,
+            } => {
+                assert_eq!(tip_hash, extending);
+                assert_eq!(tip_slot, SlotNo(10));
+                assert_eq!(tip_block_no, BlockNo(1));
+            }
+            other => panic!(
+                "Extending block must return AddedAsTip, got {other:?}. \
+                 This disambiguates the normal forge path from StoredAsFork (race lost)."
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_race_lost_block_returns_stored_as_fork() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_db = make_chain_db(dir.path());
+
+        let (handle, runner) = ChainSelHandle::new(Arc::clone(&chain_db));
+        let _runner_task = tokio::spawn(runner);
+
+        let x = Hash32::from_bytes([0xA0; 32]);
+        handle
+            .submit_block(x, SlotNo(1), BlockNo(0), Hash32::ZERO, fake_cbor(&x))
+            .await
+            .unwrap();
+
+        let y = Hash32::from_bytes([0xB0; 32]);
+        handle
+            .submit_block(y, SlotNo(2), BlockNo(1), x, fake_cbor(&y))
+            .await
+            .unwrap();
+
+        // Z arrives late — still claims prev_hash = x, but selected_chain tip is Y now.
+        let z = Hash32::from_bytes([0xC0; 32]);
+        let result = handle
+            .submit_block(z, SlotNo(3), BlockNo(1), x, fake_cbor(&z))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            AddBlockResult::StoredAsFork,
+            "Race-lost block is a fork block, must return StoredAsFork (not AddedAsTip)"
         );
     }
 }

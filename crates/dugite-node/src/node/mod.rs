@@ -3003,10 +3003,10 @@ impl Node {
                 )
                 .await;
             match result {
-                Some(dugite_storage::AddBlockResult::AdoptedAsTip)
-                | Some(dugite_storage::AddBlockResult::StoredNotAdopted)
+                Some(dugite_storage::AddBlockResult::AddedAsTip { .. })
+                | Some(dugite_storage::AddBlockResult::StoredAsFork)
                 | Some(dugite_storage::AddBlockResult::AlreadyKnown) => true,
-                Some(dugite_storage::AddBlockResult::SwitchedToFork {
+                Some(dugite_storage::AddBlockResult::TriggeredFork {
                     intersection_hash,
                     intersection_slot,
                     rollback,
@@ -4111,90 +4111,92 @@ impl Node {
                         *block.prev_hash(),
                         cbor,
                     ) {
-                        Ok(()) => Some(dugite_storage::AddBlockResult::StoredNotAdopted),
+                        Ok(true) => {
+                            // Extended the selected chain — synthesise AddedAsTip.
+                            if let Some((tip_slot, tip_hash, tip_block_no)) = db.get_tip_info() {
+                                Some(dugite_storage::AddBlockResult::AddedAsTip {
+                                    tip_hash,
+                                    tip_slot,
+                                    tip_block_no,
+                                })
+                            } else {
+                                Some(dugite_storage::AddBlockResult::StoredAsFork)
+                            }
+                        }
+                        Ok(false) => Some(dugite_storage::AddBlockResult::StoredAsFork),
                         Err(e) => Some(dugite_storage::AddBlockResult::Invalid(e.to_string())),
                     }
                 };
 
+                // ── Forge-race verification ─────────────────────────────────
+                //
+                // `AddedAsTip.tip_hash == block.hash()` is the O(1) check that
+                // replaces the old post-hoc ChainDB re-lookup (`forged_is_tip`).
+                // Between forge start (reading ledger tip X at H-1) and
+                // chain-sel processing, an upstream block may have arrived and
+                // advanced our selected_chain past X. In that case
+                // `insert_block_internal` stored our block as a fork block and
+                // `AddedAsTip.tip_hash` will differ from `block.hash()` (or the
+                // result will be `StoredAsFork`).
+                //
+                // Applying a fork block to the ledger would corrupt ledger
+                // state. Announcing it would waste peer bandwidth. Abort cleanly.
                 let storage_succeeded = match &chain_sel_verdict {
-                    Some(dugite_storage::AddBlockResult::AdoptedAsTip)
-                    | Some(dugite_storage::AddBlockResult::StoredNotAdopted)
-                    | Some(dugite_storage::AddBlockResult::AlreadyKnown) => true,
-                    Some(dugite_storage::AddBlockResult::SwitchedToFork {
-                        intersection_hash,
-                        intersection_slot,
-                        rollback,
-                        apply,
-                    }) => {
-                        // A fork switch was triggered by storing our own
-                        // forged block. Theoretically impossible (our block
-                        // extends our own tip), but handle defensively —
-                        // VolatileDB is already switched; the downstream
-                        // forged_is_tip check will verify adoption.
-                        warn!(
-                            intersection = %intersection_hash.to_hex(),
-                            intersection_slot = intersection_slot.0,
-                            slot = next_slot.0,
-                            rollback_count = rollback.len(),
-                            apply_count = apply.len(),
-                            "Unexpected fork switch when storing forged block"
-                        );
+                    Some(dugite_storage::AddBlockResult::AddedAsTip { tip_hash, .. })
+                        if *tip_hash == *block.hash() =>
+                    {
                         true
+                    }
+                    Some(dugite_storage::AddBlockResult::AddedAsTip { tip_hash, .. }) => {
+                        warn!(
+                            slot = next_slot.0,
+                            block = block_number.0,
+                            forged = %block.hash().to_hex(),
+                            actual_tip = %tip_hash.to_hex(),
+                            "Forge race lost — another block extended the tip first"
+                        );
+                        self.metrics
+                            .forge_race_lost
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        false
+                    }
+                    Some(dugite_storage::AddBlockResult::StoredAsFork)
+                    | Some(dugite_storage::AddBlockResult::AlreadyKnown) => {
+                        warn!(
+                            slot = next_slot.0,
+                            block = block_number.0,
+                            forged = %block.hash().to_hex(),
+                            "Forged block stored as fork — race lost"
+                        );
+                        self.metrics
+                            .forge_race_lost
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        false
+                    }
+                    Some(dugite_storage::AddBlockResult::TriggeredFork { .. }) => {
+                        warn!(
+                            slot = next_slot.0,
+                            forged = %block.hash().to_hex(),
+                            "Forge triggered unexpected fork switch"
+                        );
+                        false
                     }
                     Some(dugite_storage::AddBlockResult::Invalid(reason)) => {
                         error!(
                             slot = next_slot.0,
                             block = block_number.0,
                             reason,
-                            "TraceDidntAdoptBlock: forged block rejected by ChainSelQueue"
+                            "Forged block rejected by ChainSelQueue"
                         );
                         false
                     }
                     None => {
-                        error!(
-                            "ChainSelQueue runner exited unexpectedly — forged block not stored"
-                        );
+                        error!("ChainSelQueue runner exited unexpectedly");
                         false
                     }
                 };
 
                 if !storage_succeeded {
-                    error!("Failed to store forged block — NOT announcing");
-                    return;
-                }
-
-                // ── Forge-race verification ──────────────────────────────────
-                //
-                // Between forge start (reading ledger tip X at H-1) and
-                // chain-sel processing, an upstream block may have arrived
-                // and advanced our selected_chain past X. In that case our
-                // forged block's prev_hash no longer matches the current tip
-                // and `insert_block_internal` stored it as a fork block — it
-                // is NOT on selected_chain.
-                //
-                // Applying a fork block to the ledger would corrupt ledger
-                // state (LedgerError::BlockDoesNotConnect, or worse under the
-                // legacy hash-mismatch bypass). Announcing it would waste peer
-                // bandwidth on a block we cannot support. Abort cleanly.
-                let forged_is_tip = {
-                    let db = self.chain_db.read().await;
-                    db.get_tip_info()
-                        .map(|(_slot, hash, _bn)| hash == *block.hash())
-                        .unwrap_or(false)
-                };
-
-                if !forged_is_tip {
-                    warn!(
-                        slot = next_slot.0,
-                        block = block_number.0,
-                        hash = %block.hash().to_hex(),
-                        verdict = ?chain_sel_verdict,
-                        "Forged block NOT adopted as selected-chain tip — lost race to incoming block. \
-                         Skipping ledger apply and announcement."
-                    );
-                    self.metrics
-                        .forge_race_lost
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return;
                 }
 

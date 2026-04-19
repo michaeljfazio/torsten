@@ -190,6 +190,11 @@ impl ChainDB {
     // -- Writes -------------------------------------------------------------
 
     /// Store a new block (goes to VolatileDB).
+    ///
+    /// Returns `Ok(true)` iff the block extended the selected chain (i.e. it
+    /// became the new selected-chain tip). Returns `Ok(false)` when the block
+    /// was stored as a fork block. Returns `Ok(false)` also when the block was
+    /// already present (duplicate check short-circuits before VolatileDB write).
     pub fn add_block(
         &mut self,
         hash: BlockHeaderHash,
@@ -197,7 +202,7 @@ impl ChainDB {
         block_no: BlockNo,
         prev_hash: BlockHeaderHash,
         cbor: Vec<u8>,
-    ) -> Result<(), ChainDBError> {
+    ) -> Result<bool, ChainDBError> {
         trace!(
             hash = %hash.to_hex(),
             slot = slot.0,
@@ -207,12 +212,13 @@ impl ChainDB {
 
         if self.has_block(&hash) {
             trace!(hash = %hash.to_hex(), "ChainDB: block already exists, skipping");
-            return Ok(());
+            return Ok(false);
         }
 
-        self.volatile
+        let extended_tip = self
+            .volatile
             .add_block(hash, slot.0, block_no.0, prev_hash, cbor);
-        Ok(())
+        Ok(extended_tip)
     }
 
     /// Store multiple blocks in a batch (all go to VolatileDB).

@@ -564,7 +564,7 @@ impl VolatileDB {
         // and will be corrected over time as blocks are re-added via
         // normal sync after the first node startup post-upgrade.
         for entry in entries {
-            db.insert_block_internal(
+            let _ = db.insert_block_internal(
                 entry.hash,
                 entry.slot,
                 entry.block_no,
@@ -599,6 +599,10 @@ impl VolatileDB {
     /// inserted into the in-memory state. The `prev_hash` is persisted in
     /// the WAL so that the successors map can be reconstructed accurately
     /// after a crash.
+    ///
+    /// Returns `true` iff the block extended `selected_chain` (i.e. it
+    /// became the new selected-chain tip). Returns `false` when the block
+    /// was stored as a fork block without advancing the selected chain.
     pub fn add_block(
         &mut self,
         hash: Hash32,
@@ -606,7 +610,7 @@ impl VolatileDB {
         block_no: u64,
         prev_hash: Hash32,
         cbor: Vec<u8>,
-    ) {
+    ) -> bool {
         // Write to WAL first (if enabled) so that prev_hash is durable
         // before the in-memory state is updated.
         if let Some(ref mut wal) = self.wal {
@@ -615,7 +619,7 @@ impl VolatileDB {
             }
         }
 
-        self.insert_block_internal(hash, slot, block_no, prev_hash, cbor);
+        self.insert_block_internal(hash, slot, block_no, prev_hash, cbor)
     }
 
     /// Internal block insertion (no WAL write).
@@ -623,6 +627,8 @@ impl VolatileDB {
     /// Stores the block in all indexes. If it extends the selected chain
     /// (prev_hash matches selected chain tip), also updates `selected_chain`,
     /// `block_no_index`, and `tip`. Otherwise stored as a fork block.
+    ///
+    /// Returns `true` iff the block extended `selected_chain`.
     fn insert_block_internal(
         &mut self,
         hash: Hash32,
@@ -630,7 +636,7 @@ impl VolatileDB {
         block_no: u64,
         prev_hash: Hash32,
         cbor: Vec<u8>,
-    ) {
+    ) -> bool {
         // Track successor relationship (all forks)
         self.successors.entry(prev_hash).or_default().insert(hash);
         // Slot index (all forks)
@@ -657,6 +663,7 @@ impl VolatileDB {
             self.block_no_index.insert(block_no, hash);
             self.tip = Some((slot, hash, block_no));
         }
+        extends
     }
 
     /// Get a block by hash.
