@@ -236,6 +236,14 @@ pub struct ConnectionLifecycleManager {
     /// Broadcast sender for rollback announcements to ChainSync servers.
     rollback_announcement_tx: broadcast::Sender<RollbackAnnouncement>,
 
+    /// Channel for ChainSync client tasks to forward `MsgRollBackward` events
+    /// to the main run loop.  The run loop calls `handle_rollback()` on receipt,
+    /// which rolls the ledger back to the given point and triggers gap-bridging.
+    ///
+    /// Multiple peers may send duplicate rollback events for the same point;
+    /// `handle_rollback` is idempotent (no-op when point >= ledger tip).
+    rollback_event_tx: mpsc::Sender<dugite_primitives::block::Point>,
+
     /// Shared peer manager for PeerSharing server to query connected peers.
     peer_manager_for_servers: Arc<RwLock<NodePeerManager>>,
 }
@@ -314,6 +322,7 @@ impl ConnectionLifecycleManager {
         gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
         block_provider: Arc<ChainDBBlockProvider>,
         rollback_announcement_tx: broadcast::Sender<RollbackAnnouncement>,
+        rollback_event_tx: mpsc::Sender<dugite_primitives::block::Point>,
         peer_manager_for_servers: Arc<RwLock<NodePeerManager>>,
     ) -> Self {
         Self {
@@ -338,6 +347,7 @@ impl ConnectionLifecycleManager {
             gsm_event_tx,
             block_provider,
             rollback_announcement_tx,
+            rollback_event_tx,
             peer_manager_for_servers,
         }
     }
@@ -839,6 +849,7 @@ impl ConnectionLifecycleManager {
         let active_slots_coeff = self.active_slots_coeff;
         let metrics = self.metrics.clone();
         let gsm_event_tx = self.gsm_event_tx.clone();
+        let rollback_event_tx = self.rollback_event_tx.clone();
 
         Box::new(move |channel, cancel| {
             Box::pin(async move {
@@ -855,6 +866,7 @@ impl ConnectionLifecycleManager {
                     metrics,
                     cancel,
                     gsm_event_tx,
+                    rollback_event_tx,
                 )
                 .await
                 {
@@ -1541,17 +1553,14 @@ impl ConnectionLifecycleManager {
         let (gsm_event_tx, _) = mpsc::channel(1);
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let chain_db =
-            dugite_storage::ChainDB::open(tmp.path()).expect("ChainDB::open in test");
+        let chain_db = dugite_storage::ChainDB::open(tmp.path()).expect("ChainDB::open in test");
 
         let ledger_state = dugite_ledger::LedgerState::new(
             dugite_primitives::protocol_params::ProtocolParameters::mainnet_defaults(),
         );
 
         let peer_manager_for_servers = Arc::new(RwLock::new(
-            super::networking::NodePeerManager::new(
-                super::networking::PeerManagerConfig::default(),
-            ),
+            super::networking::NodePeerManager::new(super::networking::PeerManagerConfig::default()),
         ));
 
         let block_provider = Arc::new(super::serve::ChainDBBlockProvider {
@@ -1563,9 +1572,10 @@ impl ConnectionLifecycleManager {
         // chain_db was moved into block_provider; open a separate one for the
         // lifecycle manager's own reference.
         let tmp2 = tempfile::tempdir().expect("tempdir2");
-        let chain_db2 =
-            dugite_storage::ChainDB::open(tmp2.path()).expect("ChainDB::open2 in test");
+        let chain_db2 = dugite_storage::ChainDB::open(tmp2.path()).expect("ChainDB::open2 in test");
 
+        let (rollback_event_tx, _rollback_event_rx) =
+            tokio::sync::mpsc::channel::<dugite_primitives::block::Point>(8);
         Self::new(
             764_824_073, // mainnet magic — arbitrary for tests
             false,
@@ -1587,6 +1597,7 @@ impl ConnectionLifecycleManager {
             gsm_event_tx,
             block_provider,
             rollback_announcement_tx,
+            rollback_event_tx,
             peer_manager_for_servers,
         )
     }
@@ -1594,8 +1605,10 @@ impl ConnectionLifecycleManager {
     /// Insert a fake connection entry so `connection_count()` reflects the
     /// insertion without starting any real protocol tasks.
     pub(crate) fn insert_fake_for_test(&mut self, addr: std::net::SocketAddr) {
-        self.connections
-            .insert(addr, super::peer_connection::PeerConnection::fake_for_test(addr));
+        self.connections.insert(
+            addr,
+            super::peer_connection::PeerConnection::fake_for_test(addr),
+        );
     }
 
     /// Remove a previously-inserted fake connection entry.

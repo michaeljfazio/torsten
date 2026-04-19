@@ -519,9 +519,17 @@ impl Node {
                                     Some(store)
                                 }
                                 Err(e) => {
+                                    // The live LSM store is still open (e.g. the process
+                                    // holds its lock file).  Opening a second instance at
+                                    // the same path is not possible.  Fall back to the
+                                    // in-memory path: detach the live store and rely on
+                                    // the bincode snapshot's in-memory UTxO set, then
+                                    // replay snapshot_slot → rollback_slot incrementally.
+                                    // This is safe for small rollbacks (1-k blocks at tip)
+                                    // and avoids an expensive full genesis reset.
                                     warn!(
-                                        "Failed to open UTxO store from snapshot for rollback: {e} \
-                                         — falling back to full reset+replay"
+                                        "Failed to open UTxO store from snapshot for rollback \
+                                         (likely lock conflict — will use in-memory fallback): {e}"
                                     );
                                     None
                                 }
@@ -536,32 +544,22 @@ impl Node {
                             // LSM mode: replace ledger state and attach the correct UTxO store.
                             *ls = snapshot_state;
                             ls.attach_utxo_store(store);
-                        } else if utxo_store_path.exists() {
-                            // LSM store path exists but snapshot open failed — do full reset.
-                            drop(ls);
-                            error!(
-                                rollback_slot,
-                                "UTxO store snapshot unavailable for rollback — \
-                                 performing full genesis reset+replay to ensure correctness"
-                            );
-                            self.reset_ledger_and_replay(rollback_slot).await;
-                            // reset_ledger_and_replay acquires the write lock internally;
-                            // we must not hold `ls` here.  Skip the replay below.
-                            // Note: this path is handled by returning early from the else branch.
-                            // The goto-style logic is unavoidable here without restructuring —
-                            // set a flag and fall through to the mempool cleanup below.
-                            //
-                            // For simplicity, we just fall through; the ledger state
-                            // will be at rollback_slot after reset_ledger_and_replay.
-                            // The replay in the block below will be a no-op since
-                            // reset_ledger_and_replay already replayed to rollback_slot.
-                            return; // exit handle_rollback entirely; caller will reconnect
                         } else {
-                            // Pure in-memory mode (no UTxO store file): the bincode snapshot
-                            // contains all UTxOs.  Detach the current (stale) store so the
-                            // snapshot's in-memory UTxOs take precedence.
+                            // In-memory fallback (covers both no-on-disk-store and lock-conflict
+                            // cases): detach the live LSM store, load the full UTxO set from
+                            // the bincode snapshot, and replay incremental blocks below.
+                            // The node continues in memory-mapped UTxO mode until the next
+                            // snapshot save re-attaches the LSM store.
                             let _ = ls.utxo.utxo_set.detach_store();
                             *ls = snapshot_state;
+                            if utxo_store_path.exists() {
+                                info!(
+                                    rollback_slot,
+                                    snapshot_slot,
+                                    "Rollback using in-memory UTxOs from bincode snapshot \
+                                     (LSM store remains open; will re-attach on next snapshot save)"
+                                );
+                            }
                         }
 
                         let replay_from = snapshot_slot;
@@ -2586,6 +2584,11 @@ pub async fn chainsync_client_task(
     // GSM event sender — emits PeerRegistered, BlockReceived, PeerTipUpdated,
     // PeerActive, PeerIdling events to the GSM actor. Uses try_send (non-blocking).
     gsm_event_tx: tokio::sync::mpsc::Sender<crate::gsm::GsmEvent>,
+    // Rollback event sender — forwards MsgRollBackward points to the main run
+    // loop so it can call handle_rollback() and advance the ledger.  Uses
+    // try_send (non-blocking); the channel is large enough that drops are
+    // rare and handle_rollback is idempotent for duplicate events.
+    rollback_event_tx: tokio::sync::mpsc::Sender<dugite_primitives::block::Point>,
 ) -> Result<()> {
     // ═══════════════════════════════════════════════════════════════════════
     // Phase 1: Build known points for intersection
@@ -3152,6 +3155,18 @@ pub async fn chainsync_client_task(
                                 entry.tip_hash = tip_hash;
                                 entry.tip_block_number = tip_block_number;
                             }
+                        }
+
+                        // Forward the rollback point to the main run loop so it
+                        // can call handle_rollback() and advance the ledger.
+                        // The main run loop is the only task that holds a mutable
+                        // reference to Node, so we must use a channel rather than
+                        // calling handle_rollback() directly here.
+                        // handle_rollback is idempotent — duplicate events from
+                        // multiple peers are no-ops when the ledger is already
+                        // at or before the rollback point.
+                        if let Err(e) = rollback_event_tx.try_send(prim_point.clone()) {
+                            debug!(%peer_addr, rollback_slot, "Rollback event dropped: {e}");
                         }
 
                         // Refill pipeline after rollback.

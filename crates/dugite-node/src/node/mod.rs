@@ -171,6 +171,11 @@ pub struct Node {
     /// Receiver for KeepAlive RTT measurements from connected peers.
     /// The main run loop uses these to update PeerManager EWMA and RTT gauges.
     keepalive_rtt_rx: Option<mpsc::Receiver<(SocketAddr, f64)>>,
+    /// Receiver for rollback events forwarded by ChainSync client tasks.
+    /// When a peer sends MsgRollBackward, the ChainSync task sends the rollback
+    /// point here so the main run loop can call handle_rollback() and then
+    /// replay the new fork's blocks via gap-bridging from ChainDB.
+    rollback_event_rx: Option<mpsc::Receiver<dugite_primitives::block::Point>>,
     pub(crate) query_handler: Arc<RwLock<QueryHandler>>,
     pub(crate) peer_manager: Arc<RwLock<NodePeerManager>>,
     pub(crate) socket_path: PathBuf,
@@ -1413,6 +1418,7 @@ impl Node {
             fetched_blocks_rx: None,
             peer_failure_rx: None,
             keepalive_rtt_rx: None,
+            rollback_event_rx: None,
             query_handler,
             peer_manager: Arc::new(RwLock::new({
                 let mut pm = NodePeerManager::new(PeerManagerConfig::default());
@@ -2299,6 +2305,12 @@ impl Node {
         let (fetched_blocks_tx, fetched_blocks_rx) = mpsc::channel::<FetchedBlock>(1000);
         let (peer_failure_tx, peer_failure_rx) = mpsc::channel::<SocketAddr>(64);
         let (keepalive_rtt_tx, keepalive_rtt_rx) = mpsc::channel::<(SocketAddr, f64)>(256);
+        // Rollback event channel: ChainSync client tasks forward MsgRollBackward
+        // points here; the main run loop processes them via handle_rollback().
+        // Channel size 64: multiple peers may send the same rollback point;
+        // handle_rollback is idempotent so extra events are harmless no-ops.
+        let (rollback_event_tx, rollback_event_rx) =
+            mpsc::channel::<dugite_primitives::block::Point>(64);
         let candidate_chains: Arc<RwLock<HashMap<SocketAddr, CandidateChainState>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
@@ -2344,12 +2356,14 @@ impl Node {
                 .as_ref()
                 .expect("rollback_announcement_tx was just set")
                 .clone(),
+            rollback_event_tx,
             peer_manager.clone(),
         );
         self.connection_lifecycle = Some(lifecycle);
         self.fetched_blocks_rx = Some(fetched_blocks_rx);
         self.peer_failure_rx = Some(peer_failure_rx);
         self.keepalive_rtt_rx = Some(keepalive_rtt_rx);
+        self.rollback_event_rx = Some(rollback_event_rx);
 
         // ─── Spawn BlockFetch Decision Task ──────────────────────────────
         //
@@ -2540,6 +2554,10 @@ impl Node {
             .keepalive_rtt_rx
             .take()
             .expect("keepalive_rtt_rx was just set");
+        let mut rollback_event_rx = self
+            .rollback_event_rx
+            .take()
+            .expect("rollback_event_rx was just set");
 
         // Forge ticker — fires every second (slot granularity) to check
         // for block production opportunities.  Only active when the node
@@ -2646,6 +2664,39 @@ impl Node {
                             .tip.point.slot().map(|s| s.0).unwrap_or(0);
                         pending_blocks.retain(|_, fb| fb.block.slot().0 > tip_slot.saturating_sub(1000));
                     }
+                }
+
+                // ── Rollback events from ChainSync client tasks ──────────
+                //
+                // When a peer sends MsgRollBackward, its ChainSync task
+                // forwards the rollback point here.  handle_rollback() is
+                // idempotent: duplicate events from multiple peers for the
+                // same slot are no-ops.
+                //
+                // After rolling the ledger back, the pending_blocks buffer is
+                // cleared of any entries that are no longer valid: buffered
+                // blocks whose prev_hash was on the old chain will never
+                // connect to the new tip.  They will be re-fetched by the
+                // BlockFetch decision task once ChainSync sends the new
+                // fork's headers.
+                Some(rollback_point) = rollback_event_rx.recv() => {
+                    let rb_slot = rollback_point.slot().map(|s| s.0).unwrap_or(0);
+                    debug!(rollback_slot = rb_slot, "Run loop: processing rollback event from ChainSync");
+                    self.handle_rollback(&rollback_point).await;
+                    // Clear buffered blocks from the old fork; they cannot
+                    // connect to the new ledger tip after rollback.
+                    pending_blocks.clear();
+                    // After gap-bridging inside handle_rollback the ledger
+                    // tip may be anywhere from the rollback point up to the
+                    // ImmutableDB tip.  Log the resulting state so operators
+                    // can track fork-switch progress.
+                    let new_slot = self.ledger_state.read().await
+                        .tip.point.slot().map(|s| s.0).unwrap_or(0);
+                    debug!(
+                        rollback_slot = rb_slot,
+                        ledger_slot = new_slot,
+                        "Run loop: rollback complete"
+                    );
                 }
 
                 // ── Governor evaluation (periodic, every 2s) ────────────
