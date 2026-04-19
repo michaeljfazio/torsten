@@ -377,6 +377,9 @@ pub async fn import_snapshot(
     let dest_dir = database_path.join("immutable");
     if let Some(ref imm) = immutable_dir {
         info!("Moving chunk files to permanent storage");
+        // Ensure the database_path parent exists so that rename succeeds even
+        // on a fresh import where db-preview/ has not been created yet.
+        fs::create_dir_all(database_path)?;
         // Remove any pre-existing immutable directory so that stale chunk files
         // from a prior run (e.g. blocks written beyond the Mithril snapshot tip)
         // cannot pollute the new import.  hash_index.dat is rebuilt automatically
