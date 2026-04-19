@@ -1248,4 +1248,129 @@ mod tests {
             "Race-lost block is a fork block, must return StoredAsFork (not AddedAsTip)"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Adversarial tests for #439 correctness fixes (items 2.3 + 2.4)
+    // -----------------------------------------------------------------------
+
+    /// Submitting a strictly-longer fork tip must produce a `TriggeredFork`
+    /// result whose `intersection_hash` maps to a block present in VolatileDB
+    /// AND whose `intersection_slot` equals the slot stored for that block.
+    ///
+    /// This invariant prevents the cd3d03a92 regression where the intersection
+    /// slot lookup via `get_block_location` failed and the code fell back to
+    /// `Point::Origin`, causing the ledger to roll back all the way to genesis.
+    ///
+    /// Chain layout:
+    ///
+    ///   common (SlotNo 100, BlockNo 1)
+    ///     ├── a2 (SlotNo 200, BlockNo 2) → a3 (SlotNo 300, BlockNo 3)
+    ///     └── b2 (SlotNo 200, BlockNo 2) → b3 (SlotNo 300, BlockNo 3)
+    ///                                         → b4 (SlotNo 400, BlockNo 4)  ← triggers fork
+    ///
+    /// When b4 arrives:
+    ///   - result is `TriggeredFork`
+    ///   - `intersection_hash` == common
+    ///   - `intersection_slot` == SlotNo(100)
+    ///   - `has_block(&intersection_hash)` is true (block is in ChainDB)
+    #[tokio::test]
+    async fn test_triggered_fork_intersection_slot_is_resolvable() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_db = make_chain_db(dir.path());
+
+        let (handle, runner) = ChainSelHandle::new(Arc::clone(&chain_db));
+        let _runner = tokio::spawn(runner);
+
+        let common = Hash32::from_bytes([0xC0; 32]);
+        let a2 = Hash32::from_bytes([0xA2; 32]);
+        let a3 = Hash32::from_bytes([0xA3; 32]);
+        let b2 = Hash32::from_bytes([0xB2; 32]);
+        let b3 = Hash32::from_bytes([0xB3; 32]);
+        let b4 = Hash32::from_bytes([0xB4; 32]);
+
+        // Build the selected (a) chain.
+        let r = handle
+            .submit_block(
+                common,
+                SlotNo(100),
+                BlockNo(1),
+                Hash32::ZERO,
+                fake_cbor(&common),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(r, AddBlockResult::AddedAsTip { .. }),
+            "common must extend tip: {r:?}"
+        );
+
+        handle
+            .submit_block(a2, SlotNo(200), BlockNo(2), common, fake_cbor(&a2))
+            .await
+            .unwrap();
+        handle
+            .submit_block(a3, SlotNo(300), BlockNo(3), a2, fake_cbor(&a3))
+            .await
+            .unwrap();
+
+        // Build the competing (b) fork — b2 and b3 at same heights, no switch yet.
+        let r = handle
+            .submit_block(b2, SlotNo(200), BlockNo(2), common, fake_cbor(&b2))
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            AddBlockResult::StoredAsFork,
+            "b2 must be stored as fork: {r:?}"
+        );
+
+        let r = handle
+            .submit_block(b3, SlotNo(300), BlockNo(3), b2, fake_cbor(&b3))
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            AddBlockResult::StoredAsFork,
+            "b3 must be stored as fork: {r:?}"
+        );
+
+        // b4 is strictly longer (BlockNo 4 > 3) — must trigger a fork switch.
+        let r = handle
+            .submit_block(b4, SlotNo(400), BlockNo(4), b3, fake_cbor(&b4))
+            .await
+            .unwrap();
+
+        match r {
+            AddBlockResult::TriggeredFork {
+                intersection_hash,
+                intersection_slot,
+                ..
+            } => {
+                // Invariant 1: intersection must be the common ancestor.
+                assert_eq!(
+                    intersection_hash, common,
+                    "intersection_hash must equal the common ancestor block (item 2.3)"
+                );
+
+                // Invariant 2: intersection slot must be resolved from the block
+                // stored in VolatileDB, NOT fabricated or defaulted.
+                assert_eq!(
+                    intersection_slot,
+                    SlotNo(100),
+                    "intersection_slot must equal the slot stored for `common` \
+                     (item 2.4: no Point::Origin fallback)"
+                );
+
+                // Invariant 3: the intersection block must be present in ChainDB
+                // so any subsequent ledger rollback lookup will succeed.
+                let db = chain_db.read().await;
+                assert!(
+                    db.has_block(&intersection_hash),
+                    "intersection block must be present in ChainDB — \
+                     a missing block would cause ledger rollback to fail (cd3d03a92 regression)"
+                );
+            }
+            other => panic!("b4 (strictly longer fork) must return TriggeredFork; got: {other:?}"),
+        }
+    }
 }

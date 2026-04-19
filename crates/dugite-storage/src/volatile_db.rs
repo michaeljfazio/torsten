@@ -2600,4 +2600,129 @@ mod tests {
         assert!(db.has_block(&h(2)));
         assert_eq!(db.get_block(&h(2)).unwrap().prev_hash, h(1));
     }
+
+    // -----------------------------------------------------------------------
+    // Adversarial tests for #439 correctness fixes (item 2.2)
+    // -----------------------------------------------------------------------
+
+    /// Deep fork unreachability: a ~100-block detached fork whose ancestry is
+    /// entirely absent from VolatileDB must NOT trigger a chain switch.
+    ///
+    /// This covers item 2.2: `VolatileDB::switch_chain` must not fabricate
+    /// anchors when the new chain's intersection with the selected chain is
+    /// outside the volatile window (Haskell `isReachable = Nothing`).
+    ///
+    /// Scenario:
+    ///   - Selected chain:  genesis → a1 → a2 → … → a100  (100 blocks)
+    ///   - Detached fork:   f1 → f2 → … → f100            (100 blocks)
+    ///     where f1.prev_hash points to a hash NEVER added to this DB.
+    ///
+    /// Hash generation uses 2-byte keys (prefix 0x00 = selected, 0x01 = fork)
+    /// in bytes [0..2] with a u16 counter to avoid any single-byte wrap
+    /// collisions between the two chains.
+    ///
+    /// `switch_chain(&f100)` must return `None` because `walk_chain_back`
+    /// produces [f1..f100], none of which appear on `selected_chain`.
+    /// The selected chain and tip must remain completely unchanged.
+    #[test]
+    fn test_switch_chain_unreachable_on_deep_fork() {
+        const N: usize = 100;
+
+        /// Build a deterministic 32-byte hash from a prefix byte and an index.
+        /// `prefix=0x00` for selected chain, `prefix=0x01` for detached fork.
+        /// Uses big-endian u16 in bytes [1..3] so indices up to 65535 are safe.
+        fn chain_hash(prefix: u8, idx: u16) -> Hash32 {
+            let mut bytes = [0u8; 32];
+            bytes[0] = prefix;
+            bytes[1] = (idx >> 8) as u8;
+            bytes[2] = (idx & 0xFF) as u8;
+            Hash32::from_bytes(bytes)
+        }
+
+        // Sentinel: an anchor outside the window (used as prev_hash for f0).
+        // Must not collide with any chain_hash(p, i) for any p or i.
+        let outside_anchor = Hash32::from_bytes({
+            let mut b = [0xFFu8; 32];
+            b[0] = 0xFE; // distinct prefix
+            b
+        });
+
+        let mut db = VolatileDB::new();
+
+        // Build the selected chain: blocks sel_0 → sel_1 → … → sel_99.
+        for i in 0u16..(N as u16) {
+            let hash = chain_hash(0x00, i);
+            let prev = if i == 0 {
+                Hash32::ZERO
+            } else {
+                chain_hash(0x00, i - 1)
+            };
+            db.add_block(hash, (i as u64 + 1) * 100, i as u64 + 1, prev, vec![0u8; 4]);
+        }
+
+        assert_eq!(
+            db.selected_chain_len(),
+            N,
+            "selected chain must have {N} blocks"
+        );
+        let tip_before = db.get_tip();
+
+        // Build the detached fork: blocks fork_0 → fork_1 → … → fork_99.
+        // fork_0.prev_hash = outside_anchor (not in the DB).
+        for i in 0u16..(N as u16) {
+            let hash = chain_hash(0x01, i);
+            let prev = if i == 0 {
+                outside_anchor
+            } else {
+                chain_hash(0x01, i - 1)
+            };
+            // Give fork blocks a higher block_no so chain selection would
+            // prefer them — this ensures that if switch_chain wrongly returns
+            // Some(...) it is because the unreachability check failed, not
+            // because the fork wasn't preferred.
+            db.add_block(
+                hash,
+                (N as u64 + i as u64 + 1) * 100,
+                N as u64 + i as u64 + 1,
+                prev,
+                vec![1u8; 4],
+            );
+        }
+
+        // The fork tip is the last fork block.
+        let fork_tip = chain_hash(0x01, N as u16 - 1);
+        assert!(
+            db.has_block(&fork_tip),
+            "fork tip must be in VolatileDB before the switch attempt"
+        );
+
+        // Attempt switch — must return None (unreachable fork).
+        let plan = db.switch_chain(&fork_tip);
+        assert!(
+            plan.is_none(),
+            "switch_chain must return None for a deep detached fork \
+             (item 2.2: no fabricated anchors); got: {plan:?}"
+        );
+
+        // Selected chain and tip must be UNCHANGED — StoreButDontChange.
+        assert_eq!(
+            db.selected_chain_len(),
+            N,
+            "selected chain length must not change after unreachable-fork attempt"
+        );
+        assert_eq!(
+            db.get_tip(),
+            tip_before,
+            "selected chain tip must not change after unreachable-fork attempt"
+        );
+
+        // All selected-chain blocks must still be present.
+        for i in 0u16..(N as u16) {
+            let hash = chain_hash(0x00, i);
+            assert!(
+                db.has_block(&hash),
+                "selected-chain block {i} must still be present after failed switch"
+            );
+        }
+    }
 }
