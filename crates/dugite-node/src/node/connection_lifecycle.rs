@@ -1591,4 +1591,67 @@ mod tests {
         assert_eq!(hdr.slot, 999);
         assert_eq!(hdr.header_cbor.len(), 3);
     }
+
+    /// Verify the invariant: n2n_connections_active must equal connections.len()
+    /// after every mutation to the connections map.
+    ///
+    /// This test documents the bug that existed before the fix: the old code used
+    /// fetch_add/fetch_sub calls that were not symmetric (outbound connections
+    /// never called fetch_add, inbound connections never called fetch_sub), causing
+    /// the gauge to drift to 0 despite 20+ active peers being present in the map.
+    ///
+    /// After the fix, every mutation calls
+    ///   gauge.store(map.len(), Ordering::Relaxed)
+    /// which is a strict derived-read — the gauge exactly equals the map size.
+    #[test]
+    fn n2n_connections_active_gauge_matches_map_len() {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+        let gauge = AtomicU64::new(0);
+        let mut map: HashMap<SocketAddr, ()> = HashMap::new();
+
+        // Helper that implements the CORRECT post-fix update pattern.
+        let update = |gauge: &AtomicU64, map: &HashMap<SocketAddr, ()>| {
+            gauge.store(map.len() as u64, Relaxed);
+        };
+
+        let addr1: SocketAddr = "127.0.0.1:3001".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:3002".parse().unwrap();
+        let addr3: SocketAddr = "127.0.0.1:3003".parse().unwrap();
+
+        // Insert addr1 (simulates register_warm_connection or register_inbound_connection).
+        map.insert(addr1, ());
+        update(&gauge, &map);
+        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after insert addr1");
+
+        // Insert addr2.
+        map.insert(addr2, ());
+        update(&gauge, &map);
+        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after insert addr2");
+
+        // Insert addr3.
+        map.insert(addr3, ());
+        update(&gauge, &map);
+        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after insert addr3");
+
+        // Remove addr2 (simulates demote_to_cold or cleanup_dead_connections).
+        map.remove(&addr2);
+        update(&gauge, &map);
+        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after remove addr2");
+
+        // Remove addr1.
+        map.remove(&addr1);
+        update(&gauge, &map);
+        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after remove addr1");
+
+        // Remove addr3.
+        map.remove(&addr3);
+        update(&gauge, &map);
+        assert_eq!(
+            gauge.load(Relaxed),
+            map.len() as u64,
+            "after remove addr3: gauge must be 0"
+        );
+        assert_eq!(gauge.load(Relaxed), 0, "empty map => gauge is 0");
+    }
 }

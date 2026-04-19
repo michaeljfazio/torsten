@@ -2815,9 +2815,9 @@ impl Node {
                                 match lifecycle.register_inbound_connection(addr, conn, rtt_ms, &mut pm) {
                                     Ok(()) => {
                                         info!(%addr, rtt_ms = format_args!("{rtt_ms:.0}"), "inbound connection registered");
-                                        self.metrics
-                                            .n2n_connections_active
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        // Update all peer metrics (including n2n_connections_active)
+                                        // via the derived-read helper rather than a bare fetch_add.
+                                        self.update_peer_metrics(&pm);
                                     }
                                     Err(e) => {
                                         debug!(%addr, "inbound registration failed: {e}");
@@ -2961,6 +2961,20 @@ impl Node {
         self.metrics
             .peers_duplex
             .store(pm.duplex_peer_count() as u64, Relaxed);
+
+        // Derive n2n_connections_active from the authoritative connections HashMap
+        // rather than maintaining it via ad-hoc fetch_add/fetch_sub calls that drift.
+        //
+        // The invariant is strict: gauge == connections.len() after every call.
+        // Matches Haskell ouroboros-network where peer-count metrics are sourced
+        // from PeerManagerState rather than parallel counters.
+        let active = self
+            .connection_lifecycle
+            .as_ref()
+            .map_or(0, |lc| lc.connection_count());
+        self.metrics
+            .n2n_connections_active
+            .store(active as u64, Relaxed);
     }
 
     // ─── apply_fetched_block() ──────────────────────────────────────────────

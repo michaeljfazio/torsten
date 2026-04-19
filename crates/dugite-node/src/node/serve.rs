@@ -627,14 +627,13 @@ impl dugite_network::ConnectionMetrics for N2NConnectionMetrics {
         self.metrics
             .n2n_connections_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.metrics
-            .n2n_connections_active
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // n2n_connections_active is NOT updated here — it is a derived metric
+        // sourced from ConnectionLifecycleManager::connection_count() via
+        // update_peer_metrics(). Maintaining it via fetch_add/fetch_sub causes
+        // drift (outbound paths were never increment-paired with decrements).
     }
     fn on_disconnect(&self) {
-        self.metrics
-            .n2n_connections_active
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // n2n_connections_active is NOT updated here — see on_connect comment.
     }
     fn on_error(&self, label: &str) {
         self.metrics.record_protocol_error(label);
