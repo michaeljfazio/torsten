@@ -3005,6 +3005,10 @@ impl Node {
         );
 
         // Store in ChainDB via ChainSelQueue.
+        // `fork_replayed` is set to true when the TriggeredFork path has already
+        // applied all fork blocks to the ledger; in that case the single-block
+        // apply path below is skipped.
+        let mut fork_replayed = false;
         let storage_succeeded = if let Some(ref handle) = self.chain_sel_handle {
             let cbor = block.raw_cbor.clone().unwrap_or_default();
             let result = handle
@@ -3030,21 +3034,15 @@ impl Node {
                     // preferred.  The VolatileDB chain switch is already
                     // committed — selected_chain now points at the new fork.
                     // The ledger state is still on the OLD chain and MUST be
-                    // rolled back to the intersection before we can apply the
-                    // incoming block; otherwise the block's `prev_hash` will
-                    // not match the ledger tip and the only path forward
-                    // would be the ApplyOnly sequence-number bypass in
-                    // `apply_block`, which silently corrupts ledger state by
-                    // merging two chains' UTxO views. See #439.
+                    // rolled back to the intersection before the new fork's
+                    // blocks can be applied.
                     //
                     // `intersection_slot` is pre-resolved by VolatileDB so the
                     // rollback point is a proper `Point::Specific(slot, hash)`
-                    // with no chance of a None-fallback to Origin (which would
-                    // cascade through handle_rollback's "refuse genesis reset"
-                    // safety, leaving the ledger stuck at the orphan tip).
+                    // with no chance of a None-fallback to Origin.
                     // Matches Haskell: `ChainDiff`'s anchor is always a full
-                    // `(SlotNo, HeaderHash)` Point, and the rollback count
-                    // alone drives `switchTo` in `LedgerDB.Forker`.
+                    // `(SlotNo, HeaderHash)` Point, and `forkerCommit` atomically
+                    // replays the new fork's blocks after the rollback.
                     info!(
                         intersection = %intersection_hash.to_hex(),
                         intersection_slot = intersection_slot.0,
@@ -3061,6 +3059,130 @@ impl Node {
                         intersection_hash,
                     );
                     self.handle_rollback(&rollback_point).await;
+
+                    // Replay the new fork's blocks from VolatileDB onto the ledger,
+                    // matching Haskell's `forkerCommit` behaviour.  The `apply` list
+                    // is ordered oldest-first and every hash is already present in
+                    // the VolatileDB (they were stored as part of the competing fork
+                    // before chain selection switched the tip).
+                    let validation_mode = if self.validate_all_blocks {
+                        BlockValidationMode::ValidateAll
+                    } else {
+                        BlockValidationMode::ApplyOnly
+                    };
+                    for fork_hash in &apply {
+                        let cbor_opt = {
+                            let db = self.chain_db.read().await;
+                            db.get_block(fork_hash)
+                                .unwrap_or(None)
+                        };
+                        match cbor_opt {
+                            Some(cbor) => {
+                                match dugite_serialization::multi_era::decode_block_minimal_with_byron_epoch_length(
+                                    &cbor,
+                                    self.byron_epoch_length,
+                                ) {
+                                    Ok(fork_block) => {
+                                        let fork_slot = fork_block.slot();
+                                        let fork_block_no = fork_block.block_number();
+                                        let fork_hash_hex = fork_block.header.header_hash.to_hex();
+                                        {
+                                            let mut ls = self.ledger_state.write().await;
+                                            if let Err(e) = ls.apply_block(&fork_block, validation_mode) {
+                                                warn!(
+                                                    slot = fork_slot.0,
+                                                    block = fork_block_no.0,
+                                                    "Fork replay: ledger apply failed: {e} — \
+                                                     clearing volatile and resyncing"
+                                                );
+                                                // Drop the write lock before acquiring the write
+                                                // lock on chain_db.
+                                                drop(ls);
+                                                let mut db = self.chain_db.write().await;
+                                                db.clear_volatile();
+                                                return;
+                                            }
+                                            // Propagate era transitions discovered during fork replay.
+                                            if let Some((prev_era, new_era, epoch)) =
+                                                ls.pending_era_transition.take()
+                                            {
+                                                drop(ls);
+                                                let mut eh = self.era_history.write().await;
+                                                if eh.current_era() < new_era {
+                                                    eh.record_era_transition(new_era, epoch.0);
+                                                    info!(
+                                                        prev = %prev_era,
+                                                        new = %new_era,
+                                                        epoch = epoch.0,
+                                                        "Era transition recorded in HFC era history (fork replay)",
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        // Update chain fragment and consensus tip for each
+                                        // replayed block.
+                                        {
+                                            let mut fragment = self.chain_fragment.write().await;
+                                            fragment.push(fork_block.header.clone());
+                                        }
+                                        self.consensus.update_tip(fork_block.tip());
+                                        info!(
+                                            era = %fork_block.era,
+                                            slot = fork_slot.0,
+                                            block = fork_block_no.0,
+                                            txs = fork_block.transactions.len(),
+                                            hash = %fork_hash_hex,
+                                            "Chain extended",
+                                        );
+                                        self.metrics.record_block_received();
+                                        self.metrics
+                                            .blocks_received
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        self.metrics
+                                            .blocks_applied
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        self.metrics.set_slot(fork_slot.0);
+                                        self.metrics.set_block_number(fork_block_no.0);
+                                        {
+                                            let ls = self.ledger_state.read().await;
+                                            let sc = &ls.slot_config;
+                                            let slot_time_ms = sc.zero_time
+                                                + fork_slot.0.saturating_sub(sc.zero_slot)
+                                                    * sc.slot_length as u64;
+                                            self.metrics.set_tip_slot_time_ms(slot_time_ms);
+                                            self.metrics.set_epoch(ls.epoch.0);
+                                        }
+                                        self.metrics.set_sync_progress(100.0);
+                                        // Announce each fork block to downstream peers.
+                                        if let Some(ref tx) = self.block_announcement_tx {
+                                            let mut hash_bytes = [0u8; 32];
+                                            hash_bytes.copy_from_slice(
+                                                fork_block.header.header_hash.as_ref(),
+                                            );
+                                            let _ = tx.send(dugite_network::BlockAnnouncement {
+                                                slot: fork_slot.0,
+                                                hash: hash_bytes,
+                                                block_number: fork_block_no.0,
+                                            });
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            hash = %fork_hash.to_hex(),
+                                            "Fork replay: failed to decode block from VolatileDB: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                warn!(
+                                    hash = %fork_hash.to_hex(),
+                                    "Fork replay: block hash in apply list not found in ChainDB"
+                                );
+                            }
+                        }
+                    }
+                    fork_replayed = true;
                     true
                 }
                 Some(dugite_storage::AddBlockResult::Invalid(reason)) => {
@@ -3099,18 +3221,16 @@ impl Node {
             return;
         }
 
+        // When TriggeredFork already replayed all fork blocks (including the
+        // incoming block) onto the ledger, skip the single-block apply path.
+        if fork_replayed {
+            return;
+        }
+
         // Check if this block connects to the current ledger tip.
         // Blocks may arrive out of order from multiple peers. Only apply
         // blocks that extend the current chain; others are stored in ChainDB
         // (via ChainSelQueue above) and will be applied when the chain catches up.
-        //
-        // After a TriggeredFork-triggered handle_rollback above, the ledger
-        // tip was reset to the intersection. The incoming block may be many
-        // blocks ahead of the intersection — in that case it does NOT connect
-        // to the new tip and is left in ChainDB for gap-bridging in
-        // `process_forward_blocks` to pick up. Previously this site had a
-        // `block_number == tip + 1` hash-mismatch bypass that silently fused
-        // two chains' UTxO views at the live tip — see #439.
         let prev_hash = *block.prev_hash();
         let connects_to_tip = {
             let ls = self.ledger_state.read().await;
