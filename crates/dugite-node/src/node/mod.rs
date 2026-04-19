@@ -3135,8 +3135,7 @@ impl Node {
                     for fork_hash in &apply {
                         let cbor_opt = {
                             let db = self.chain_db.read().await;
-                            db.get_block(fork_hash)
-                                .unwrap_or(None)
+                            db.get_block(fork_hash).unwrap_or(None)
                         };
                         match cbor_opt {
                             Some(cbor) => {
