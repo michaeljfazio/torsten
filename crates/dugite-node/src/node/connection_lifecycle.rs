@@ -1520,6 +1520,90 @@ impl TxSource for MempoolTxSource {
     }
 }
 
+// ─── Test-only helpers ───────────────────────────────────────────────────────
+
+#[cfg(test)]
+impl ConnectionLifecycleManager {
+    /// Create a minimal `ConnectionLifecycleManager` for use in unit tests.
+    ///
+    /// All channels and shared state are stubbed out with fresh, disconnected
+    /// instances.  The resulting manager is not suitable for running actual
+    /// peer connections, but it correctly tracks `connections.len()` so
+    /// `connection_count()` can be exercised directly.
+    ///
+    /// Must be called inside a tokio runtime context (e.g. `#[tokio::test]`).
+    pub(crate) fn new_for_test() -> Self {
+        let (fetched_blocks_tx, _rx) = mpsc::channel(1);
+        let (block_announcement_tx, _) = broadcast::channel(1);
+        let (rollback_announcement_tx, _) = broadcast::channel(1);
+        let (peer_failure_tx, _) = mpsc::channel(1);
+        let (keepalive_rtt_tx, _) = mpsc::channel(1);
+        let (gsm_event_tx, _) = mpsc::channel(1);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chain_db =
+            dugite_storage::ChainDB::open(tmp.path()).expect("ChainDB::open in test");
+
+        let ledger_state = dugite_ledger::LedgerState::new(
+            dugite_primitives::protocol_params::ProtocolParameters::mainnet_defaults(),
+        );
+
+        let peer_manager_for_servers = Arc::new(RwLock::new(
+            super::networking::NodePeerManager::new(
+                super::networking::PeerManagerConfig::default(),
+            ),
+        ));
+
+        let block_provider = Arc::new(super::serve::ChainDBBlockProvider {
+            chain_db: Arc::new(RwLock::new(chain_db)),
+        });
+
+        let ledger_arc = Arc::new(RwLock::new(ledger_state));
+
+        // chain_db was moved into block_provider; open a separate one for the
+        // lifecycle manager's own reference.
+        let tmp2 = tempfile::tempdir().expect("tempdir2");
+        let chain_db2 =
+            dugite_storage::ChainDB::open(tmp2.path()).expect("ChainDB::open2 in test");
+
+        Self::new(
+            764_824_073, // mainnet magic — arbitrary for tests
+            false,
+            std::time::Duration::from_secs(10),
+            Arc::new(RwLock::new(std::collections::HashMap::new())),
+            fetched_blocks_tx,
+            block_announcement_tx,
+            Arc::new(RwLock::new(chain_db2)),
+            ledger_arc,
+            432_000,
+            2160,
+            0.05,
+            Arc::new(crate::metrics::NodeMetrics::new()),
+            Arc::new(dugite_mempool::Mempool::new(
+                dugite_mempool::MempoolConfig::default(),
+            )),
+            peer_failure_tx,
+            keepalive_rtt_tx,
+            gsm_event_tx,
+            block_provider,
+            rollback_announcement_tx,
+            peer_manager_for_servers,
+        )
+    }
+
+    /// Insert a fake connection entry so `connection_count()` reflects the
+    /// insertion without starting any real protocol tasks.
+    pub(crate) fn insert_fake_for_test(&mut self, addr: std::net::SocketAddr) {
+        self.connections
+            .insert(addr, super::peer_connection::PeerConnection::fake_for_test(addr));
+    }
+
+    /// Remove a previously-inserted fake connection entry.
+    pub(crate) fn remove_fake_for_test(&mut self, addr: std::net::SocketAddr) {
+        self.connections.remove(&addr);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1592,66 +1676,41 @@ mod tests {
         assert_eq!(hdr.header_cbor.len(), 3);
     }
 
-    /// Verify the invariant: n2n_connections_active must equal connections.len()
-    /// after every mutation to the connections map.
+    /// Verify the invariant: `connection_count()` tracks the real `connections`
+    /// map length after every insert and remove.
     ///
-    /// This test documents the bug that existed before the fix: the old code used
-    /// fetch_add/fetch_sub calls that were not symmetric (outbound connections
-    /// never called fetch_add, inbound connections never called fetch_sub), causing
-    /// the gauge to drift to 0 despite 20+ active peers being present in the map.
-    ///
-    /// After the fix, every mutation calls
-    ///   gauge.store(map.len(), Ordering::Relaxed)
-    /// which is a strict derived-read — the gauge exactly equals the map size.
-    #[test]
-    fn n2n_connections_active_gauge_matches_map_len() {
-        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-
-        let gauge = AtomicU64::new(0);
-        let mut map: HashMap<SocketAddr, ()> = HashMap::new();
-
-        // Helper that implements the CORRECT post-fix update pattern.
-        let update = |gauge: &AtomicU64, map: &HashMap<SocketAddr, ()>| {
-            gauge.store(map.len() as u64, Relaxed);
-        };
+    /// This test calls `ConnectionLifecycleManager::connection_count()` directly
+    /// on a real instance so that any regression in how `n2n_connections_active`
+    /// is derived will be caught here.  The old bug (fetch_add/fetch_sub drift)
+    /// would have caused `connection_count()` to return stale values; the
+    /// current implementation returns `self.connections.len()` which is always
+    /// exact.
+    #[tokio::test]
+    async fn n2n_connections_active_gauge_matches_map_len() {
+        let mut lc = ConnectionLifecycleManager::new_for_test();
 
         let addr1: SocketAddr = "127.0.0.1:3001".parse().unwrap();
         let addr2: SocketAddr = "127.0.0.1:3002".parse().unwrap();
         let addr3: SocketAddr = "127.0.0.1:3003".parse().unwrap();
 
-        // Insert addr1 (simulates register_warm_connection or register_inbound_connection).
-        map.insert(addr1, ());
-        update(&gauge, &map);
-        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after insert addr1");
+        assert_eq!(lc.connection_count(), 0, "starts empty");
 
-        // Insert addr2.
-        map.insert(addr2, ());
-        update(&gauge, &map);
-        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after insert addr2");
+        lc.insert_fake_for_test(addr1);
+        assert_eq!(lc.connection_count(), 1, "after insert addr1");
 
-        // Insert addr3.
-        map.insert(addr3, ());
-        update(&gauge, &map);
-        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after insert addr3");
+        lc.insert_fake_for_test(addr2);
+        assert_eq!(lc.connection_count(), 2, "after insert addr2");
 
-        // Remove addr2 (simulates demote_to_cold or cleanup_dead_connections).
-        map.remove(&addr2);
-        update(&gauge, &map);
-        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after remove addr2");
+        lc.insert_fake_for_test(addr3);
+        assert_eq!(lc.connection_count(), 3, "after insert addr3");
 
-        // Remove addr1.
-        map.remove(&addr1);
-        update(&gauge, &map);
-        assert_eq!(gauge.load(Relaxed), map.len() as u64, "after remove addr1");
+        lc.remove_fake_for_test(addr2);
+        assert_eq!(lc.connection_count(), 2, "after remove addr2");
 
-        // Remove addr3.
-        map.remove(&addr3);
-        update(&gauge, &map);
-        assert_eq!(
-            gauge.load(Relaxed),
-            map.len() as u64,
-            "after remove addr3: gauge must be 0"
-        );
-        assert_eq!(gauge.load(Relaxed), 0, "empty map => gauge is 0");
+        lc.remove_fake_for_test(addr1);
+        assert_eq!(lc.connection_count(), 1, "after remove addr1");
+
+        lc.remove_fake_for_test(addr3);
+        assert_eq!(lc.connection_count(), 0, "after remove addr3: must be 0");
     }
 }

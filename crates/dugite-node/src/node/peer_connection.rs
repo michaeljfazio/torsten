@@ -785,6 +785,38 @@ impl From<MuxError> for PeerConnectionError {
 }
 
 #[cfg(test)]
+impl PeerConnection {
+    /// Create a minimal `PeerConnection` for use in unit tests.
+    ///
+    /// Spawns a no-op mux task so the `JoinHandle` is valid.  All protocol
+    /// channels are `None`, and all task lists are empty.  The instance
+    /// must be created inside a tokio runtime context (e.g. `#[tokio::test]`).
+    pub(crate) fn fake_for_test(addr: SocketAddr) -> Self {
+        let mux_handle = tokio::spawn(async { Ok::<(), MuxError>(()) });
+        Self {
+            addr,
+            version: 0,
+            network_magic: 0,
+            chainsync_client_channel: None,
+            blockfetch_client_channel: None,
+            txsubmission_client_channel: None,
+            keepalive_client_channel: None,
+            peersharing_client_channel: None,
+            chainsync_server_channel: None,
+            blockfetch_server_channel: None,
+            txsubmission_server_channel: None,
+            keepalive_server_channel: None,
+            peersharing_server_channel: None,
+            mux_handle,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            warm_tasks: Vec::new(),
+            hot_tasks: Vec::new(),
+            server_tasks: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
