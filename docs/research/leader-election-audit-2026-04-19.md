@@ -29,7 +29,7 @@ Praos leader election:
 
 **Finding: MATCH.**
 
-`crates/dugite-node/src/node/mod.rs`, lines 3964–3981:
+`crates/dugite-node/src/node/mod.rs`, lines 3978–3989:
 
 ```rust
 // Calculate stake from the "set" snapshot (used for leader election).
@@ -43,7 +43,7 @@ let (pool_stake, total_active_stake) = if let Some(set_snapshot) = &ls.epochs.sn
 };
 ```
 
-The comment at line 3964 explicitly says "used for leader election."
+The comment at line 3978 explicitly says "used for leader election."
 
 The "set" snapshot is populated during the epoch transition at
 `crates/dugite-ledger/src/state/epoch.rs`, lines 147–148:
@@ -59,10 +59,18 @@ which is then used for leader election — exactly mirroring Haskell's `nesPd` w
 comes from the Mark snapshot taken at the prior epoch boundary.
 
 **Eligibility lag:** A pool registered in epoch N has its delegation captured in the
-Mark at the N→N+1 boundary. That Mark becomes Set at N+1→N+2, so the pool is first
-consulted for leader election from epoch N+2 onward — one epoch earlier than its
-reward-eligibility epoch (N+2). This matches the Haskell rule ("leader-eligible from
-N+1" using the Mark that first includes the pool).
+fresh Mark built at the N→N+1 boundary. After the rotation at N→N+1 the old mark
+becomes `set`; the newly built mark sits in `mark`. After the next rotation at N+1→N+2
+the just-built mark (delegation from end of epoch N) becomes `set`. Leader election
+first consults the pool in epoch N+2.
+
+> **Note on Haskell alignment:** The oracle session reference states Haskell's `nesPd`
+> comes from the "Mark snapshot taken at epoch E−1 boundary" and pools are
+> "leader-eligible from N+1." If that means the freshly-built Mark at the E-1→E
+> transition (capturing delegation at end of epoch E-1), then Haskell uses a snapshot
+> one rotation newer than dugite's `set`. Verifying the exact `nesPd` update point in
+> `NewEpochState` is flagged as a follow-up; it does not affect the current soak test
+> (SAND pool registered many epochs prior) but matters for newly-registered pools.
 
 > Note: the log message at line 1608 ("pool stake in 'set' snapshot (used for leader
 > election)") provides additional evidence that operator-visible diagnostics correctly
@@ -291,7 +299,7 @@ Optional future work (not blocking correctness):
 
 | Item | Dugite location |
 |------|----------------|
-| Stake source (`set` snapshot) | `crates/dugite-node/src/node/mod.rs:3964–3981` |
+| Stake source (`set` snapshot) | `crates/dugite-node/src/node/mod.rs:3978–3989` |
 | Snapshot rotation (mark→set→go) | `crates/dugite-ledger/src/state/epoch.rs:147–148` |
 | Mark snapshot capture | `crates/dugite-ledger/src/state/epoch.rs:300–311` |
 | `check_slot_leadership` wrapper | `crates/dugite-node/src/forge.rs:462–488` |
