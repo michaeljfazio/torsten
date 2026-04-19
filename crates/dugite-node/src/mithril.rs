@@ -377,8 +377,17 @@ pub async fn import_snapshot(
     let dest_dir = database_path.join("immutable");
     if let Some(ref imm) = immutable_dir {
         info!("Moving chunk files to permanent storage");
+        // Remove any pre-existing immutable directory so that stale chunk files
+        // from a prior run (e.g. blocks written beyond the Mithril snapshot tip)
+        // cannot pollute the new import.  hash_index.dat is rebuilt automatically
+        // on first open so deleting it here is safe.
+        if dest_dir.exists() {
+            if let Err(e) = fs::remove_dir_all(&dest_dir) {
+                warn!(error = %e, "Failed to remove old immutable directory before import");
+            }
+        }
         if let Err(e) = fs::rename(imm, &dest_dir) {
-            // rename may fail across filesystems, fall back to copy
+            // rename may fail across filesystems (e.g. tmpfs → APFS), fall back to copy
             warn!(error = %e, "rename failed, falling back to copy");
             copy_dir_recursive(imm, &dest_dir)?;
         }

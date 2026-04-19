@@ -613,16 +613,27 @@ impl Node {
                                                 db_tip.point.slot().map(|s| s.0).unwrap_or(0);
 
                                             if snapshot_slot.0 > db_tip_slot {
-                                                // Snapshot is genuinely ahead of all storage —
-                                                // crash before ChainDB persist.
+                                                // Snapshot is ahead of ChainDB storage.
+                                                //
+                                                // This legitimately occurs after a Mithril import:
+                                                // the Haskell ExtLedgerState from the ancillary
+                                                // archive is at the snapshot epoch boundary which
+                                                // can be a few blocks ahead of the last complete
+                                                // immutable chunk.  The missing blocks will be
+                                                // fetched from peers on first sync.
+                                                //
+                                                // A crash-before-ChainDB-persist scenario cannot
+                                                // produce snapshot > ChainDB because the invariant
+                                                // is ChainDB write → ledger apply → snapshot save.
+                                                // So we always accept this case.
                                                 warn!(
                                                     "Ledger snapshot is ahead of ChainDB \
-                                                     (snapshot={}, chaindb={}); node may have \
-                                                     crashed before ChainDB persist — discarding \
-                                                     snapshot, will replay from storage",
+                                                     (snapshot={}, chaindb={}); this is expected \
+                                                     after a Mithril import — accepting snapshot, \
+                                                     missing blocks will be fetched from peers",
                                                     state.tip, db_tip,
                                                 );
-                                                false
+                                                true
                                             } else if snapshot_slot.0 <= imm_tip_slot {
                                                 // Snapshot slot is within the finalized ImmutableDB
                                                 // range, but the hash is not in ChainDB.  This means
