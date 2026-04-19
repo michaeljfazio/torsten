@@ -3090,7 +3090,7 @@ impl Node {
         // blocks that extend the current chain; others are stored in ChainDB
         // (via ChainSelQueue above) and will be applied when the chain catches up.
         //
-        // After a SwitchedToFork-triggered handle_rollback above, the ledger
+        // After a TriggeredFork-triggered handle_rollback above, the ledger
         // tip was reset to the intersection. The incoming block may be many
         // blocks ahead of the intersection — in that case it does NOT connect
         // to the new tip and is left in ChainDB for gap-bridging in
@@ -4075,19 +4075,17 @@ impl Node {
                 // forged ones — enter the node via the same `addBlock` path.
                 // The ChainSelQueue receives the forged block, writes it to
                 // VolatileDB, and runs chain selection. The queue returns one
-                // of: AdoptedAsTip / StoredNotAdopted / AlreadyKnown /
-                // SwitchedToFork / Invalid.
+                // of: AddedAsTip { tip_hash, tip_slot, tip_block_no } /
+                // StoredAsFork / AlreadyKnown / TriggeredFork / Invalid.
                 //
-                // Critically, `StoredNotAdopted` is ambiguous: it is returned
-                // both when the block extended selected_chain (normal forge
-                // case — the VolatileDB's `insert_block_internal` advances the
-                // tip but the queue's fork-scan finds no strictly-longer
-                // competitor) AND when the block was stored as a fork block
-                // (we lost a race — an upstream block arrived and became tip
-                // between forge start and chain-sel processing). Relying on
-                // the enum variant alone is not enough — we must verify the
-                // forged block actually sits at the selected_chain tip before
-                // applying it to the ledger or announcing it to peers.
+                // The `AddedAsTip.tip_hash == block.hash()` check is now O(1)
+                // and unambiguous: if the forged block's hash matches the
+                // returned tip_hash it was adopted as the new chain tip
+                // (normal forge case); if not, an upstream block raced ahead
+                // and became tip between forge start and chain-sel processing.
+                // Relying on the enum variant alone is not enough — we must
+                // verify the forged block actually sits at the selected_chain
+                // tip before applying it to the ledger or announcing it to peers.
                 //
                 // If no handle is available (should not happen after Node::new),
                 // fall back to the direct ChainDB write path for correctness.
