@@ -8823,31 +8823,35 @@ fn test_validate_all_rejects_hash_mismatch_at_tip_plus_one() {
     );
 }
 
-/// Under `ApplyOnly` (chunk-file replay), the legacy behavior is preserved:
-/// a block at exactly `tip+1` with a mismatched `prev_hash` is accepted with
-/// an info-level log.  This path is exercised only by startup replay where
-/// the input blocks are known-good (they were already validated when first
-/// received) and the only source of hash mismatch is legitimate CBOR
-/// roundtrip variance.
+/// Under `ApplyOnly` (chunk-file replay), the bypass is retained ONLY for
+/// Byron blocks: pallas's `OriginalHash<32> for KeepRaw<'_, byron::BlockHead>`
+/// re-encodes the decoded struct and can produce a hash different from the
+/// original wire bytes. A Byron block at exactly `tip+1` with a mismatched
+/// `prev_hash` is accepted with an info-level log.
+///
+/// For Shelley+ eras the bypass no longer applies (see
+/// `test_apply_only_rejects_shelley_hash_mismatch` in state/apply.rs).
 #[test]
 fn test_apply_only_accepts_hash_mismatch_at_tip_plus_one() {
     let params = ProtocolParameters::mainnet_defaults();
     let mut state = LedgerState::new(params);
-    state.era = Era::Conway;
+    // Use Byron era — the bypass only applies to Byron blocks.
+    state.era = Era::Byron;
     state.tip = Tip {
         point: Point::Specific(SlotNo(100), Hash32::from_bytes([0xAA; 32])),
         block_number: BlockNo(10),
     };
 
     let different_prev = Hash32::from_bytes([0xBB; 32]);
-    let block = make_test_block(101, 11, different_prev, vec![]);
+    let mut block = make_test_block(101, 11, different_prev, vec![]);
+    block.era = Era::Byron;
 
     let result = state.apply_block(&block, BlockValidationMode::ApplyOnly);
 
     assert!(
         result.is_ok(),
-        "ApplyOnly must retain the tip+1 sequence-number bypass for chunk-file \
-         replay (different CBOR serialization → different header hash); got {result:?}"
+        "ApplyOnly + Byron must retain the tip+1 sequence-number bypass for chunk-file \
+         replay (pallas Byron hash re-encoding bug); got {result:?}"
     );
     assert_eq!(state.tip.block_number, BlockNo(11));
 }

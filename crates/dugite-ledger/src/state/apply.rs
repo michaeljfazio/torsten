@@ -126,15 +126,19 @@ impl LedgerState {
                     let is_sequential_successor =
                         block.block_number().0 == self.tip.block_number.0 + 1;
                     match mode {
-                        BlockValidationMode::ApplyOnly if is_sequential_successor => {
+                        BlockValidationMode::ApplyOnly
+                            if is_sequential_successor && block.era == Era::Byron =>
+                        {
                             tracing::info!(
                                 block_no = block.block_number().0,
                                 tip_block = self.tip.block_number.0,
                                 tip_hash = %tip_hash.to_hex(),
                                 got_prev = %block.prev_hash().to_hex(),
-                                "ApplyOnly: accepting block by sequence number despite hash \
-                                 mismatch (legitimate for chunk-file replay with differing \
-                                 CBOR serialization)"
+                                era = ?block.era,
+                                "ApplyOnly (Byron): accepting block by sequence number despite \
+                                 hash mismatch — pallas byron::BlockHead `OriginalHash` re-encodes \
+                                 instead of using raw bytes; Shelley+ uses raw bytes and cannot \
+                                 exhibit this mismatch. Tracked upstream in pallas."
                             );
                         }
                         _ => {
@@ -1585,6 +1589,69 @@ mod tests {
             reward_accounts.contains_key(&key2),
             "cred2 must be registered in reward_accounts"
         );
+    }
+
+    // ── Test 16: ApplyOnly rejects Shelley+ hash mismatch ────────────────────
+    //
+    // After Sprint 1 Task 1, `ApplyOnly` only tolerates hash mismatch for Byron
+    // blocks. Shelley+ blocks must still be rejected — pallas's Shelley-era
+    // `OriginalHash` uses raw bytes so hash mismatch cannot legitimately occur
+    // through the decode→store→decode cycle.
+    #[test]
+    fn test_apply_only_rejects_shelley_hash_mismatch() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.era = Era::Conway;
+        state.tip = dugite_primitives::block::Tip {
+            point: Point::Specific(SlotNo(100), Hash32::from_bytes([0xAAu8; 32])),
+            block_number: BlockNo(10),
+        };
+
+        // Conway-era block at tip+1 with a prev_hash that does NOT match tip
+        // hash — must be rejected in ApplyOnly mode (bypass is Byron-only now).
+        let mut shelley_block = make_test_block(Era::Conway, 101, 11, 9, 0, vec![]);
+        // prev_hash = 0xBB... does not match tip hash = 0xAA...
+        shelley_block.header.prev_hash = Hash32::from_bytes([0xBBu8; 32]);
+
+        let result = state.apply_block(&shelley_block, BlockValidationMode::ApplyOnly);
+
+        assert!(
+            matches!(result, Err(LedgerError::BlockDoesNotConnect { .. })),
+            "ApplyOnly must reject Shelley+ hash mismatch; bypass is Byron-only now. Got: {result:?}"
+        );
+        assert_eq!(state.tip.block_number, BlockNo(10));
+    }
+
+    // ── Test 17: ApplyOnly accepts Byron hash mismatch (pallas re-encode bug) ──
+    //
+    // The `ApplyOnly` bypass is retained for Byron blocks: pallas's
+    // `OriginalHash<32> for KeepRaw<'_, byron::BlockHead>` re-encodes the
+    // decoded struct and can produce a hash different from the original wire
+    // bytes. Chunk-file replay must tolerate this until the pallas upstream
+    // fix lands (tracked separately).
+    #[test]
+    fn test_apply_only_byron_hash_mismatch_accepted() {
+        let params = ProtocolParameters::mainnet_defaults();
+        let mut state = LedgerState::new(params);
+        state.era = Era::Byron;
+        state.tip = dugite_primitives::block::Tip {
+            point: Point::Specific(SlotNo(100), Hash32::from_bytes([0xAAu8; 32])),
+            block_number: BlockNo(10),
+        };
+
+        // Byron-era block at tip+1 with a prev_hash that does NOT match tip
+        // hash — must be accepted in ApplyOnly mode (pallas bypass retained).
+        let mut byron_block = make_test_block(Era::Byron, 101, 11, 1, 0, vec![]);
+        // prev_hash = 0xBB... does not match tip hash = 0xAA...
+        byron_block.header.prev_hash = Hash32::from_bytes([0xBBu8; 32]);
+
+        let result = state.apply_block(&byron_block, BlockValidationMode::ApplyOnly);
+
+        assert!(
+            result.is_ok(),
+            "ApplyOnly + Byron era must retain the bypass until pallas upstream fix. Got: {result:?}"
+        );
+        assert_eq!(state.tip.block_number, BlockNo(11));
     }
 
     // ── Regression: bogus body-size approximation must not exist ─────────────
